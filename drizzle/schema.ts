@@ -1,6 +1,5 @@
-import { pgTable,pgSchema, unique, serial, varchar, boolean, timestamp, foreignKey, integer, uuid, date, index, text, numeric, check, primaryKey } from "drizzle-orm/pg-core"
+import { pgTable, pgSchema, unique, serial, varchar, boolean, timestamp, foreignKey, integer, uuid, date, index, text, numeric, check, primaryKey } from "drizzle-orm/pg-core"
 import { sql } from "drizzle-orm"
-
 export const authSchema = pgSchema('auth');
 
 export const users = authSchema.table('users', {
@@ -42,31 +41,6 @@ export const warehouses = pgTable("warehouses", {
 		}).onDelete("cascade"),
 	unique("uq_warehouses_org_wh").on(table.warehouseId, table.organizationId),
 	unique("warehouses_config_id_key").on(table.configId),
-]);
-
-export const warehouseHalls = pgTable("warehouse_halls", {
-	hallId: serial("hall_id").primaryKey().notNull(),
-	organizationId: integer("organization_id").notNull(),
-	warehouseId: integer("warehouse_id").notNull(),
-	name: varchar({ length: 100 }).notNull(),
-	physicalWidthMm: integer("physical_width_mm").default(80_000).notNull(),
-	physicalLengthMm: integer("physical_length_mm").default(60_000).notNull(),
-	clearHeightMm: integer("clear_height_mm").default(12_000),
-	isActive: boolean("is_active").default(true),
-	createdAt: timestamp("created_at", { mode: 'string' }).default(sql`CURRENT_TIMESTAMP`),
-	updatedAt: timestamp("updated_at", { mode: 'string' }).default(sql`CURRENT_TIMESTAMP`),
-}, (table) => [
-	foreignKey({
-			columns: [table.warehouseId],
-			foreignColumns: [warehouses.warehouseId],
-			name: "warehouse_halls_warehouse_id_fkey"
-		}).onDelete("cascade"),
-	foreignKey({
-			columns: [table.organizationId],
-			foreignColumns: [organizations.organizationId],
-			name: "warehouse_halls_organization_id_fkey"
-		}).onDelete("cascade"),
-	unique("uq_warehouse_halls_wh_name").on(table.warehouseId, table.name),
 ]);
 
 export const employees = pgTable("employees", {
@@ -356,32 +330,6 @@ export const inventoryStatuses = pgTable("inventory_statuses", {
 			name: "inventory_statuses_organization_id_fkey"
 		}).onDelete("cascade"),
 	unique("uq_inventory_statuses_org_name").on(table.organizationId, table.name),
-]);
-
-export const positionTypes = pgTable("position_types", {
-	positionId: serial("position_id").primaryKey().notNull(),
-	warehouseId: integer("warehouse_id").references(() => warehouses.warehouseId, { onDelete: "cascade" }),
-	title: varchar({ length: 50 }).notNull(),
-	isOfficeRole: boolean("is_office_role").default(false),
-	canViewMetrics: boolean("can_view_metrics").default(false),
-	canAssignTasks: boolean("can_assign_tasks").default(false),
-	canBook: boolean("can_book").default(false),
-	canUnload: boolean("can_unload").default(false),
-	canLoad: boolean("can_load").default(false),
-	canPick: boolean("can_pick").default(false),
-	canPack: boolean("can_pack").default(false),
-	canModifyInventory: boolean("can_modify_inventory").default(false),
-	canOverrideUnexpectedDeliveries: boolean("can_override_unexpected_deliveries").default(false),
-	canRegisterDamages: boolean("can_register_damages").default(false),
-	canModifyLocations: boolean("can_modify_locations").default(false),
-	canReplenish: boolean("can_replenish").default(false),
-	canForceRecount: boolean("can_force_recount").default(false),
-	canReleaseOrders: boolean("can_release_orders").default(false),
-	canVoidShipments: boolean("can_void_shipments").default(false),
-	canManageUsers: boolean("can_manage_users").default(false),
-	canModifyConfigs: boolean("can_modify_configs").default(false),
-}, (table) => [
-	unique("position_types_title_key").on(table.title),
 ]);
 
 export const mheTypes = pgTable("mhe_types", {
@@ -858,23 +806,57 @@ export const timeClockEntries = pgTable("time_clock_entries", {
 		}).onDelete("restrict"),
 ]);
 
-export const zoneTypes = pgTable("zone_types", {
-	zoneId: serial("zone_id").primaryKey().notNull(),
+export const positionTypes = pgTable("position_types", {
+	positionId: serial("position_id").primaryKey().notNull(),
+	title: varchar({ length: 50 }).notNull(),
+	isOfficeRole: boolean("is_office_role").default(false),
+	canViewMetrics: boolean("can_view_metrics").default(false),
+	canAssignTasks: boolean("can_assign_tasks").default(false),
+	canBook: boolean("can_book").default(false),
+	canUnload: boolean("can_unload").default(false),
+	canLoad: boolean("can_load").default(false),
+	canPick: boolean("can_pick").default(false),
+	canPack: boolean("can_pack").default(false),
+	canModifyInventory: boolean("can_modify_inventory").default(false),
+	canOverrideUnexpectedDeliveries: boolean("can_override_unexpected_deliveries").default(false),
+	canRegisterDamages: boolean("can_register_damages").default(false),
+	canModifyLocations: boolean("can_modify_locations").default(false),
+	canReplenish: boolean("can_replenish").default(false),
+	canForceRecount: boolean("can_force_recount").default(false),
+	canReleaseOrders: boolean("can_release_orders").default(false),
+	canVoidShipments: boolean("can_void_shipments").default(false),
+	canManageUsers: boolean("can_manage_users").default(false),
+	canModifyConfigs: boolean("can_modify_configs").default(false),
 	warehouseId: integer("warehouse_id"),
-	name: varchar({ length: 50 }).notNull(),
-	isPickable: boolean("is_pickable").default(true),
-	isTemperatureControlled: boolean("is_temperature_controlled").default(false),
-	requiresHazmatClearance: boolean("requires_hazmat_clearance").default(false),
-	requiresBarcodeScan: boolean("requires_barcode_scan").default(true).notNull(),
-	storagePermanence: varchar("storage_permanence", { length: 20 }).default('PERMANENT').notNull(),
 }, (table) => [
+	index("idx_position_types_warehouse_id").using("btree", table.warehouseId.asc().nullsLast().op("int4_ops")),
 	foreignKey({
 			columns: [table.warehouseId],
 			foreignColumns: [warehouses.warehouseId],
-			name: "zones_warehouse_id_fkey"
+			name: "position_types_warehouse_id_fkey"
 		}).onDelete("cascade"),
-	unique("uq_zones_wh_name").on(table.warehouseId, table.name),
-	check("chk_storage_permanence", sql`(storage_permanence)::text = ANY ((ARRAY['PERMANENT'::character varying, 'TEMPORARY'::character varying, 'FLUID_BUFFER'::character varying])::text[])`),
+	unique("position_types_title_key").on(table.title),
+]);
+
+export const halls = pgTable("halls", {
+	hallId: serial("hall_id").primaryKey().notNull(),
+	organizationId: integer("organization_id").notNull(),
+	warehouseId: integer("warehouse_id").notNull(),
+	name: varchar({ length: 100 }).notNull(),
+	physicalWidthMm: integer("physical_width_mm").default(80000).notNull(),
+	physicalLengthMm: integer("physical_length_mm").default(60000).notNull(),
+	clearHeightMm: integer("clear_height_mm").default(12000),
+	isActive: boolean("is_active").default(true),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).default(sql`CURRENT_TIMESTAMP`),
+	updatedAt: timestamp("updated_at", { withTimezone: true, mode: 'string' }).default(sql`CURRENT_TIMESTAMP`),
+}, (table) => [
+	index("idx_warehouse_halls_wh_id").using("btree", table.warehouseId.asc().nullsLast().op("int4_ops")),
+	foreignKey({
+			columns: [table.organizationId, table.warehouseId],
+			foreignColumns: [warehouses.warehouseId, warehouses.organizationId],
+			name: "fk_halls_warehouse"
+		}).onDelete("cascade"),
+	unique("uq_warehouse_hall_name").on(table.warehouseId, table.name),
 ]);
 
 export const locations = pgTable("locations", {
@@ -896,9 +878,15 @@ export const locations = pgTable("locations", {
 	physicalLengthMm: integer("physical_length_mm").default(0).notNull(),
 	rotationDegrees: integer("rotation_degrees").default(0).notNull(),
 	floorLevel: integer("floor_level").default(1).notNull(),
+	hallId: integer("hall_id"),
 }, (table) => [
-	index("idx_locations_canvas_render").using("btree", table.warehouseId.asc().nullsLast().op("int4_ops"), table.floorLevel.asc().nullsLast().op("int4_ops"), table.physicalX.asc().nullsLast().op("int4_ops"), table.physicalY.asc().nullsLast().op("int4_ops")).where(sql`(is_blocked = false)`),
-	index("idx_locations_zone_lookup").using("btree", table.warehouseId.asc().nullsLast().op("int4_ops"), table.zoneId.asc().nullsLast().op("int4_ops")),
+	index("idx_locations_canvas_render").using("btree", table.warehouseId.asc().nullsLast().op("int4_ops"), table.hallId.asc().nullsLast().op("int4_ops"), table.physicalX.asc().nullsLast().op("int4_ops"), table.physicalY.asc().nullsLast().op("int4_ops")).where(sql`(is_blocked = false)`),
+	index("idx_locations_zone_lookup").using("btree", table.warehouseId.asc().nullsLast().op("int4_ops"), table.hallId.asc().nullsLast().op("int4_ops"), table.zoneId.asc().nullsLast().op("int4_ops")),
+	foreignKey({
+			columns: [table.hallId],
+			foreignColumns: [halls.hallId],
+			name: "locations_hall_id_fkey"
+		}).onDelete("restrict"),
 	foreignKey({
 			columns: [table.warehouseId],
 			foreignColumns: [warehouses.warehouseId],
@@ -911,6 +899,25 @@ export const locations = pgTable("locations", {
 		}).onDelete("restrict"),
 	unique("locations_location_code_key").on(table.locationCode),
 	check("chk_rotation_range", sql`(rotation_degrees >= 0) AND (rotation_degrees < 360)`),
+]);
+
+export const zoneTypes = pgTable("zone_types", {
+	zoneId: serial("zone_id").primaryKey().notNull(),
+	warehouseId: integer("warehouse_id"),
+	name: varchar({ length: 50 }).notNull(),
+	isPickable: boolean("is_pickable").default(true),
+	isTemperatureControlled: boolean("is_temperature_controlled").default(false),
+	requiresHazmatClearance: boolean("requires_hazmat_clearance").default(false),
+	requiresBarcodeScan: boolean("requires_barcode_scan").default(true).notNull(),
+	storagePermanence: varchar("storage_permanence", { length: 20 }).default('PERMANENT').notNull(),
+}, (table) => [
+	foreignKey({
+			columns: [table.warehouseId],
+			foreignColumns: [warehouses.warehouseId],
+			name: "zones_warehouse_id_fkey"
+		}).onDelete("cascade"),
+	unique("uq_zones_wh_name").on(table.warehouseId, table.name),
+	check("chk_storage_permanence", sql`(storage_permanence)::text = ANY ((ARRAY['PERMANENT'::character varying, 'TEMPORARY'::character varying, 'FLUID_BUFFER'::character varying])::text[])`),
 ]);
 
 export const shipmentSalesOrders = pgTable("shipment_sales_orders", {
