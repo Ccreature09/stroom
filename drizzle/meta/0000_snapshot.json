@@ -1,0 +1,4236 @@
+{
+  "id": "00000000-0000-0000-0000-000000000000",
+  "prevId": "",
+  "version": "7",
+  "dialect": "postgresql",
+  "tables": {
+    "public.organizations": {
+      "name": "organizations",
+      "schema": "",
+      "columns": {
+        "organization_id": {
+          "name": "organization_id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "name": {
+          "name": "name",
+          "type": "varchar(100)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "is_active": {
+          "name": "is_active",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false,
+          "default": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false,
+          "default": "CURRENT_TIMESTAMP"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false,
+          "default": "CURRENT_TIMESTAMP"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "organizations_name_key": {
+          "columns": [
+            "name"
+          ],
+          "nullsNotDistinct": false,
+          "name": "organizations_name_key"
+        }
+      },
+      "checkConstraints": {},
+      "policies": {
+        "tenant_isolation_organizations": {
+          "name": "tenant_isolation_organizations",
+          "as": "PERMISSIVE",
+          "for": "SELECT",
+          "to": [
+            "public"
+          ],
+          "using": "(organization_id = current_employee_org_id())"
+        }
+      },
+      "isRLSEnabled": true
+    },
+    "public.warehouses": {
+      "name": "warehouses",
+      "schema": "",
+      "columns": {
+        "warehouse_id": {
+          "name": "warehouse_id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "organization_id": {
+          "name": "organization_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "config_id": {
+          "name": "config_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "name": {
+          "name": "name",
+          "type": "varchar(100)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "street": {
+          "name": "street",
+          "type": "varchar(100)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "city": {
+          "name": "city",
+          "type": "varchar(50)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "postal_code": {
+          "name": "postal_code",
+          "type": "varchar(20)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "country": {
+          "name": "country",
+          "type": "varchar(50)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "timezone": {
+          "name": "timezone",
+          "type": "varchar(50)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "is_active": {
+          "name": "is_active",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false,
+          "default": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "warehouses_config_id_fkey": {
+          "name": "warehouses_config_id_fkey",
+          "tableFrom": "warehouses",
+          "tableTo": "warehouse_configs",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "config_id"
+          ],
+          "columnsTo": [
+            "config_id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "warehouses_organization_id_fkey": {
+          "name": "warehouses_organization_id_fkey",
+          "tableFrom": "warehouses",
+          "tableTo": "organizations",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "organization_id"
+          ],
+          "columnsTo": [
+            "organization_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "uq_warehouses_org_wh": {
+          "columns": [
+            "warehouse_id",
+            "organization_id"
+          ],
+          "nullsNotDistinct": false,
+          "name": "uq_warehouses_org_wh"
+        },
+        "warehouses_config_id_key": {
+          "columns": [
+            "config_id"
+          ],
+          "nullsNotDistinct": false,
+          "name": "warehouses_config_id_key"
+        }
+      },
+      "checkConstraints": {},
+      "policies": {
+        "tenant_isolation_warehouses": {
+          "name": "tenant_isolation_warehouses",
+          "as": "PERMISSIVE",
+          "for": "SELECT",
+          "to": [
+            "public"
+          ],
+          "using": "(organization_id = current_employee_org_id())"
+        }
+      },
+      "isRLSEnabled": true
+    },
+    "public.employees": {
+      "name": "employees",
+      "schema": "",
+      "columns": {
+        "employee_id": {
+          "name": "employee_id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "organization_id": {
+          "name": "organization_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "auth_user_id": {
+          "name": "auth_user_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "work_email": {
+          "name": "work_email",
+          "type": "varchar(150)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "first_name": {
+          "name": "first_name",
+          "type": "varchar(50)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "middle_name": {
+          "name": "middle_name",
+          "type": "varchar(50)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "last_name": {
+          "name": "last_name",
+          "type": "varchar(50)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "profile_picture_url": {
+          "name": "profile_picture_url",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "position_id": {
+          "name": "position_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "primary_warehouse_id": {
+          "name": "primary_warehouse_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "current_warehouse_id": {
+          "name": "current_warehouse_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "is_active": {
+          "name": "is_active",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false,
+          "default": true
+        },
+        "hire_date": {
+          "name": "hire_date",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "termination_date": {
+          "name": "termination_date",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "last_login_at": {
+          "name": "last_login_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false,
+          "default": "CURRENT_TIMESTAMP"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "employees_auth_user_id_fkey": {
+          "name": "employees_auth_user_id_fkey",
+          "tableFrom": "employees",
+          "tableTo": "users",
+          "schemaTo": "auth",
+          "columnsFrom": [
+            "auth_user_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "employees_current_warehouse_id_fkey": {
+          "name": "employees_current_warehouse_id_fkey",
+          "tableFrom": "employees",
+          "tableTo": "warehouses",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "current_warehouse_id"
+          ],
+          "columnsTo": [
+            "warehouse_id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "employees_organization_id_fkey": {
+          "name": "employees_organization_id_fkey",
+          "tableFrom": "employees",
+          "tableTo": "organizations",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "organization_id"
+          ],
+          "columnsTo": [
+            "organization_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "employees_position_id_fkey": {
+          "name": "employees_position_id_fkey",
+          "tableFrom": "employees",
+          "tableTo": "position_types",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "position_id"
+          ],
+          "columnsTo": [
+            "position_id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "employees_primary_warehouse_id_fkey": {
+          "name": "employees_primary_warehouse_id_fkey",
+          "tableFrom": "employees",
+          "tableTo": "warehouses",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "primary_warehouse_id"
+          ],
+          "columnsTo": [
+            "warehouse_id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "fk_employees_current_wh": {
+          "name": "fk_employees_current_wh",
+          "tableFrom": "employees",
+          "tableTo": "warehouses",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "organization_id",
+            "current_warehouse_id"
+          ],
+          "columnsTo": [
+            "warehouse_id",
+            "organization_id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "fk_employees_primary_wh": {
+          "name": "fk_employees_primary_wh",
+          "tableFrom": "employees",
+          "tableTo": "warehouses",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "organization_id",
+            "primary_warehouse_id"
+          ],
+          "columnsTo": [
+            "warehouse_id",
+            "organization_id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "employees_auth_user_id_key": {
+          "columns": [
+            "auth_user_id"
+          ],
+          "nullsNotDistinct": false,
+          "name": "employees_auth_user_id_key"
+        },
+        "employees_work_email_key": {
+          "columns": [
+            "work_email"
+          ],
+          "nullsNotDistinct": false,
+          "name": "employees_work_email_key"
+        }
+      },
+      "checkConstraints": {},
+      "policies": {
+        "tenant_isolation_employees": {
+          "name": "tenant_isolation_employees",
+          "as": "PERMISSIVE",
+          "for": "SELECT",
+          "to": [
+            "public"
+          ],
+          "using": "(organization_id = current_employee_org_id())"
+        }
+      },
+      "isRLSEnabled": true
+    },
+    "public.items": {
+      "name": "items",
+      "schema": "",
+      "columns": {
+        "item_id": {
+          "name": "item_id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "organization_id": {
+          "name": "organization_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "sku": {
+          "name": "sku",
+          "type": "varchar(50)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "barcode": {
+          "name": "barcode",
+          "type": "varchar(128)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "name": {
+          "name": "name",
+          "type": "varchar(150)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "description": {
+          "name": "description",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "category": {
+          "name": "category",
+          "type": "varchar(50)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "length_cm": {
+          "name": "length_cm",
+          "type": "numeric(10, 2)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0.00'"
+        },
+        "width_cm": {
+          "name": "width_cm",
+          "type": "numeric(10, 2)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0.00'"
+        },
+        "height_cm": {
+          "name": "height_cm",
+          "type": "numeric(10, 2)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0.00'"
+        },
+        "weight_kg": {
+          "name": "weight_kg",
+          "type": "numeric(10, 3)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0.000'"
+        },
+        "hazard_class": {
+          "name": "hazard_class",
+          "type": "varchar(20)",
+          "primaryKey": false,
+          "notNull": false,
+          "default": "'None'"
+        },
+        "is_batch_tracked": {
+          "name": "is_batch_tracked",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "is_lot_tracked": {
+          "name": "is_lot_tracked",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "has_expiry": {
+          "name": "has_expiry",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "shelf_life_days": {
+          "name": "shelf_life_days",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "min_stock_level": {
+          "name": "min_stock_level",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "default": 0
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false,
+          "default": "CURRENT_TIMESTAMP"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false,
+          "default": "CURRENT_TIMESTAMP"
+        }
+      },
+      "indexes": {
+        "idx_items_category": {
+          "name": "idx_items_category",
+          "columns": [
+            {
+              "expression": "category",
+              "asc": true,
+              "nulls": "last",
+              "opclass": "text_ops",
+              "isExpression": false
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "items_organization_id_fkey": {
+          "name": "items_organization_id_fkey",
+          "tableFrom": "items",
+          "tableTo": "organizations",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "organization_id"
+          ],
+          "columnsTo": [
+            "organization_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "uq_items_org_sku": {
+          "columns": [
+            "organization_id",
+            "sku"
+          ],
+          "nullsNotDistinct": false,
+          "name": "uq_items_org_sku"
+        },
+        "items_barcode_key": {
+          "columns": [
+            "barcode"
+          ],
+          "nullsNotDistinct": false,
+          "name": "items_barcode_key"
+        }
+      },
+      "checkConstraints": {},
+      "policies": {
+        "tenant_isolation_items": {
+          "name": "tenant_isolation_items",
+          "as": "PERMISSIVE",
+          "for": "SELECT",
+          "to": [
+            "public"
+          ],
+          "using": "(organization_id = current_employee_org_id())"
+        }
+      },
+      "isRLSEnabled": true
+    },
+    "public.customers": {
+      "name": "customers",
+      "schema": "",
+      "columns": {
+        "customer_id": {
+          "name": "customer_id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "organization_id": {
+          "name": "organization_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "name": {
+          "name": "name",
+          "type": "varchar(150)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "contact_email": {
+          "name": "contact_email",
+          "type": "varchar(150)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "contact_phone": {
+          "name": "contact_phone",
+          "type": "varchar(30)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "default_shipping_address": {
+          "name": "default_shipping_address",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "is_active": {
+          "name": "is_active",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false,
+          "default": true
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false,
+          "default": "CURRENT_TIMESTAMP"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "customers_organization_id_fkey": {
+          "name": "customers_organization_id_fkey",
+          "tableFrom": "customers",
+          "tableTo": "organizations",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "organization_id"
+          ],
+          "columnsTo": [
+            "organization_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "uq_customers_org_customer": {
+          "columns": [
+            "customer_id",
+            "organization_id"
+          ],
+          "nullsNotDistinct": false,
+          "name": "uq_customers_org_customer"
+        }
+      },
+      "checkConstraints": {},
+      "policies": {
+        "tenant_isolation_customers": {
+          "name": "tenant_isolation_customers",
+          "as": "PERMISSIVE",
+          "for": "SELECT",
+          "to": [
+            "public"
+          ],
+          "using": "(organization_id = current_employee_org_id())"
+        }
+      },
+      "isRLSEnabled": true
+    },
+    "public.suppliers": {
+      "name": "suppliers",
+      "schema": "",
+      "columns": {
+        "supplier_id": {
+          "name": "supplier_id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "organization_id": {
+          "name": "organization_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "name": {
+          "name": "name",
+          "type": "varchar(150)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "contact_name": {
+          "name": "contact_name",
+          "type": "varchar(100)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "contact_email": {
+          "name": "contact_email",
+          "type": "varchar(150)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "contact_phone": {
+          "name": "contact_phone",
+          "type": "varchar(30)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "address": {
+          "name": "address",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "lead_time_days": {
+          "name": "lead_time_days",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "is_active": {
+          "name": "is_active",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false,
+          "default": true
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false,
+          "default": "CURRENT_TIMESTAMP"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "suppliers_organization_id_fkey": {
+          "name": "suppliers_organization_id_fkey",
+          "tableFrom": "suppliers",
+          "tableTo": "organizations",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "organization_id"
+          ],
+          "columnsTo": [
+            "organization_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "uq_suppliers_org_supplier": {
+          "columns": [
+            "supplier_id",
+            "organization_id"
+          ],
+          "nullsNotDistinct": false,
+          "name": "uq_suppliers_org_supplier"
+        }
+      },
+      "checkConstraints": {},
+      "policies": {
+        "tenant_isolation_suppliers": {
+          "name": "tenant_isolation_suppliers",
+          "as": "PERMISSIVE",
+          "for": "SELECT",
+          "to": [
+            "public"
+          ],
+          "using": "(organization_id = current_employee_org_id())"
+        }
+      },
+      "isRLSEnabled": true
+    },
+    "public.carriers": {
+      "name": "carriers",
+      "schema": "",
+      "columns": {
+        "carrier_id": {
+          "name": "carrier_id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "organization_id": {
+          "name": "organization_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "name": {
+          "name": "name",
+          "type": "varchar(100)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "scac_code": {
+          "name": "scac_code",
+          "type": "varchar(10)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "tracking_url_template": {
+          "name": "tracking_url_template",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "is_active": {
+          "name": "is_active",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false,
+          "default": true
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false,
+          "default": "CURRENT_TIMESTAMP"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "carriers_organization_id_fkey": {
+          "name": "carriers_organization_id_fkey",
+          "tableFrom": "carriers",
+          "tableTo": "organizations",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "organization_id"
+          ],
+          "columnsTo": [
+            "organization_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "uq_carriers_org_carrier": {
+          "columns": [
+            "carrier_id",
+            "organization_id"
+          ],
+          "nullsNotDistinct": false,
+          "name": "uq_carriers_org_carrier"
+        },
+        "uq_carriers_org_name": {
+          "columns": [
+            "organization_id",
+            "name"
+          ],
+          "nullsNotDistinct": false,
+          "name": "uq_carriers_org_name"
+        }
+      },
+      "checkConstraints": {},
+      "policies": {
+        "tenant_isolation_carriers": {
+          "name": "tenant_isolation_carriers",
+          "as": "PERMISSIVE",
+          "for": "SELECT",
+          "to": [
+            "public"
+          ],
+          "using": "(organization_id = current_employee_org_id())"
+        }
+      },
+      "isRLSEnabled": true
+    },
+    "public.purchase_orders": {
+      "name": "purchase_orders",
+      "schema": "",
+      "columns": {
+        "po_id": {
+          "name": "po_id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "po_number": {
+          "name": "po_number",
+          "type": "varchar(50)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "organization_id": {
+          "name": "organization_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "warehouse_id": {
+          "name": "warehouse_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "supplier_id": {
+          "name": "supplier_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "varchar(20)",
+          "primaryKey": false,
+          "notNull": false,
+          "default": "'Draft'"
+        },
+        "expected_date": {
+          "name": "expected_date",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false,
+          "default": "CURRENT_TIMESTAMP"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false,
+          "default": "CURRENT_TIMESTAMP"
+        }
+      },
+      "indexes": {
+        "idx_po_supplier": {
+          "name": "idx_po_supplier",
+          "columns": [
+            {
+              "expression": "supplier_id",
+              "asc": true,
+              "nulls": "last",
+              "opclass": "int4_ops",
+              "isExpression": false
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "fk_po_supplier": {
+          "name": "fk_po_supplier",
+          "tableFrom": "purchase_orders",
+          "tableTo": "suppliers",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "organization_id",
+            "supplier_id"
+          ],
+          "columnsTo": [
+            "supplier_id",
+            "organization_id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "fk_po_warehouse": {
+          "name": "fk_po_warehouse",
+          "tableFrom": "purchase_orders",
+          "tableTo": "warehouses",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "organization_id",
+            "warehouse_id"
+          ],
+          "columnsTo": [
+            "warehouse_id",
+            "organization_id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "purchase_orders_organization_id_fkey": {
+          "name": "purchase_orders_organization_id_fkey",
+          "tableFrom": "purchase_orders",
+          "tableTo": "organizations",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "organization_id"
+          ],
+          "columnsTo": [
+            "organization_id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "purchase_orders_supplier_id_fkey": {
+          "name": "purchase_orders_supplier_id_fkey",
+          "tableFrom": "purchase_orders",
+          "tableTo": "suppliers",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "supplier_id"
+          ],
+          "columnsTo": [
+            "supplier_id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "purchase_orders_warehouse_id_fkey": {
+          "name": "purchase_orders_warehouse_id_fkey",
+          "tableFrom": "purchase_orders",
+          "tableTo": "warehouses",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "warehouse_id"
+          ],
+          "columnsTo": [
+            "warehouse_id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "purchase_orders_po_number_key": {
+          "columns": [
+            "po_number"
+          ],
+          "nullsNotDistinct": false,
+          "name": "purchase_orders_po_number_key"
+        }
+      },
+      "checkConstraints": {},
+      "policies": {
+        "tenant_isolation_purchase_orders": {
+          "name": "tenant_isolation_purchase_orders",
+          "as": "PERMISSIVE",
+          "for": "SELECT",
+          "to": [
+            "public"
+          ],
+          "using": "(organization_id = current_employee_org_id())"
+        }
+      },
+      "isRLSEnabled": true
+    },
+    "public.sales_orders": {
+      "name": "sales_orders",
+      "schema": "",
+      "columns": {
+        "so_id": {
+          "name": "so_id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "so_number": {
+          "name": "so_number",
+          "type": "varchar(50)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "organization_id": {
+          "name": "organization_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "warehouse_id": {
+          "name": "warehouse_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "customer_id": {
+          "name": "customer_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "shipping_address": {
+          "name": "shipping_address",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "varchar(20)",
+          "primaryKey": false,
+          "notNull": false,
+          "default": "'Pending'"
+        },
+        "carrier_id": {
+          "name": "carrier_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "tracking_number": {
+          "name": "tracking_number",
+          "type": "varchar(100)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false,
+          "default": "CURRENT_TIMESTAMP"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false,
+          "default": "CURRENT_TIMESTAMP"
+        }
+      },
+      "indexes": {
+        "idx_so_customer": {
+          "name": "idx_so_customer",
+          "columns": [
+            {
+              "expression": "customer_id",
+              "asc": true,
+              "nulls": "last",
+              "opclass": "int4_ops",
+              "isExpression": false
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "fk_so_carrier": {
+          "name": "fk_so_carrier",
+          "tableFrom": "sales_orders",
+          "tableTo": "carriers",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "organization_id",
+            "carrier_id"
+          ],
+          "columnsTo": [
+            "carrier_id",
+            "organization_id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "fk_so_customer": {
+          "name": "fk_so_customer",
+          "tableFrom": "sales_orders",
+          "tableTo": "customers",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "organization_id",
+            "customer_id"
+          ],
+          "columnsTo": [
+            "customer_id",
+            "organization_id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "fk_so_warehouse": {
+          "name": "fk_so_warehouse",
+          "tableFrom": "sales_orders",
+          "tableTo": "warehouses",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "organization_id",
+            "warehouse_id"
+          ],
+          "columnsTo": [
+            "warehouse_id",
+            "organization_id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "sales_orders_carrier_id_fkey": {
+          "name": "sales_orders_carrier_id_fkey",
+          "tableFrom": "sales_orders",
+          "tableTo": "carriers",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "carrier_id"
+          ],
+          "columnsTo": [
+            "carrier_id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "sales_orders_customer_id_fkey": {
+          "name": "sales_orders_customer_id_fkey",
+          "tableFrom": "sales_orders",
+          "tableTo": "customers",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "customer_id"
+          ],
+          "columnsTo": [
+            "customer_id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "sales_orders_organization_id_fkey": {
+          "name": "sales_orders_organization_id_fkey",
+          "tableFrom": "sales_orders",
+          "tableTo": "organizations",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "organization_id"
+          ],
+          "columnsTo": [
+            "organization_id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "sales_orders_warehouse_id_fkey": {
+          "name": "sales_orders_warehouse_id_fkey",
+          "tableFrom": "sales_orders",
+          "tableTo": "warehouses",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "warehouse_id"
+          ],
+          "columnsTo": [
+            "warehouse_id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "sales_orders_so_number_key": {
+          "columns": [
+            "so_number"
+          ],
+          "nullsNotDistinct": false,
+          "name": "sales_orders_so_number_key"
+        }
+      },
+      "checkConstraints": {},
+      "policies": {
+        "tenant_isolation_sales_orders": {
+          "name": "tenant_isolation_sales_orders",
+          "as": "PERMISSIVE",
+          "for": "SELECT",
+          "to": [
+            "public"
+          ],
+          "using": "(organization_id = current_employee_org_id())"
+        }
+      },
+      "isRLSEnabled": true
+    },
+    "public.shipments": {
+      "name": "shipments",
+      "schema": "",
+      "columns": {
+        "shipment_id": {
+          "name": "shipment_id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "organization_id": {
+          "name": "organization_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "warehouse_id": {
+          "name": "warehouse_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "carrier_id": {
+          "name": "carrier_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "trailer_number": {
+          "name": "trailer_number",
+          "type": "varchar(30)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "status": {
+          "name": "status",
+          "type": "varchar(20)",
+          "primaryKey": false,
+          "notNull": false,
+          "default": "'STAGING'"
+        },
+        "dispatched_at": {
+          "name": "dispatched_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false,
+          "default": "CURRENT_TIMESTAMP"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "fk_shipments_carrier": {
+          "name": "fk_shipments_carrier",
+          "tableFrom": "shipments",
+          "tableTo": "carriers",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "organization_id",
+            "carrier_id"
+          ],
+          "columnsTo": [
+            "carrier_id",
+            "organization_id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "fk_shipments_warehouse": {
+          "name": "fk_shipments_warehouse",
+          "tableFrom": "shipments",
+          "tableTo": "warehouses",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "organization_id",
+            "warehouse_id"
+          ],
+          "columnsTo": [
+            "warehouse_id",
+            "organization_id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "shipments_carrier_id_fkey": {
+          "name": "shipments_carrier_id_fkey",
+          "tableFrom": "shipments",
+          "tableTo": "carriers",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "carrier_id"
+          ],
+          "columnsTo": [
+            "carrier_id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "shipments_organization_id_fkey": {
+          "name": "shipments_organization_id_fkey",
+          "tableFrom": "shipments",
+          "tableTo": "organizations",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "organization_id"
+          ],
+          "columnsTo": [
+            "organization_id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "shipments_warehouse_id_fkey": {
+          "name": "shipments_warehouse_id_fkey",
+          "tableFrom": "shipments",
+          "tableTo": "warehouses",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "warehouse_id"
+          ],
+          "columnsTo": [
+            "warehouse_id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {},
+      "policies": {
+        "tenant_isolation_shipments": {
+          "name": "tenant_isolation_shipments",
+          "as": "PERMISSIVE",
+          "for": "SELECT",
+          "to": [
+            "public"
+          ],
+          "using": "(organization_id = current_employee_org_id())"
+        }
+      },
+      "isRLSEnabled": true
+    },
+    "public.inventory_statuses": {
+      "name": "inventory_statuses",
+      "schema": "",
+      "columns": {
+        "status_id": {
+          "name": "status_id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "organization_id": {
+          "name": "organization_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "name": {
+          "name": "name",
+          "type": "varchar(50)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "allow_allocation": {
+          "name": "allow_allocation",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false,
+          "default": true
+        },
+        "allow_movement": {
+          "name": "allow_movement",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false,
+          "default": true
+        },
+        "is_sellable": {
+          "name": "is_sellable",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false,
+          "default": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "inventory_statuses_organization_id_fkey": {
+          "name": "inventory_statuses_organization_id_fkey",
+          "tableFrom": "inventory_statuses",
+          "tableTo": "organizations",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "organization_id"
+          ],
+          "columnsTo": [
+            "organization_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "uq_inventory_statuses_org_name": {
+          "columns": [
+            "organization_id",
+            "name"
+          ],
+          "nullsNotDistinct": false,
+          "name": "uq_inventory_statuses_org_name"
+        }
+      },
+      "checkConstraints": {},
+      "policies": {
+        "tenant_isolation_inventory_statuses": {
+          "name": "tenant_isolation_inventory_statuses",
+          "as": "PERMISSIVE",
+          "for": "SELECT",
+          "to": [
+            "public"
+          ],
+          "using": "(organization_id = current_employee_org_id())"
+        }
+      },
+      "isRLSEnabled": true
+    },
+    "public.position_types": {
+      "name": "position_types",
+      "schema": "",
+      "columns": {
+        "position_id": {
+          "name": "position_id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "title": {
+          "name": "title",
+          "type": "varchar(50)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "is_office_role": {
+          "name": "is_office_role",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false,
+          "default": false
+        },
+        "can_view_metrics": {
+          "name": "can_view_metrics",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false,
+          "default": false
+        },
+        "can_assign_tasks": {
+          "name": "can_assign_tasks",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false,
+          "default": false
+        },
+        "can_book": {
+          "name": "can_book",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false,
+          "default": false
+        },
+        "can_unload": {
+          "name": "can_unload",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false,
+          "default": false
+        },
+        "can_load": {
+          "name": "can_load",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false,
+          "default": false
+        },
+        "can_pick": {
+          "name": "can_pick",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false,
+          "default": false
+        },
+        "can_pack": {
+          "name": "can_pack",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false,
+          "default": false
+        },
+        "can_modify_inventory": {
+          "name": "can_modify_inventory",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false,
+          "default": false
+        },
+        "can_override_unexpected_deliveries": {
+          "name": "can_override_unexpected_deliveries",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false,
+          "default": false
+        },
+        "can_register_damages": {
+          "name": "can_register_damages",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false,
+          "default": false
+        },
+        "can_modify_locations": {
+          "name": "can_modify_locations",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false,
+          "default": false
+        },
+        "can_replenish": {
+          "name": "can_replenish",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false,
+          "default": false
+        },
+        "can_force_recount": {
+          "name": "can_force_recount",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false,
+          "default": false
+        },
+        "can_release_orders": {
+          "name": "can_release_orders",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false,
+          "default": false
+        },
+        "can_void_shipments": {
+          "name": "can_void_shipments",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false,
+          "default": false
+        },
+        "can_manage_users": {
+          "name": "can_manage_users",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false,
+          "default": false
+        },
+        "can_modify_configs": {
+          "name": "can_modify_configs",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false,
+          "default": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "position_types_title_key": {
+          "columns": [
+            "title"
+          ],
+          "nullsNotDistinct": false,
+          "name": "position_types_title_key"
+        }
+      },
+      "checkConstraints": {},
+      "policies": {},
+      "isRLSEnabled": true
+    },
+    "public.mhe_types": {
+      "name": "mhe_types",
+      "schema": "",
+      "columns": {
+        "mhe_type_id": {
+          "name": "mhe_type_id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "name": {
+          "name": "name",
+          "type": "varchar(50)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "requires_license": {
+          "name": "requires_license",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false,
+          "default": true
+        },
+        "max_weight_capacity_kg": {
+          "name": "max_weight_capacity_kg",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "max_reach_height_mm": {
+          "name": "max_reach_height_mm",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "mhe_types_name_key": {
+          "columns": [
+            "name"
+          ],
+          "nullsNotDistinct": false,
+          "name": "mhe_types_name_key"
+        }
+      },
+      "checkConstraints": {},
+      "policies": {},
+      "isRLSEnabled": true
+    },
+    "public.task_statuses": {
+      "name": "task_statuses",
+      "schema": "",
+      "columns": {
+        "status_id": {
+          "name": "status_id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "code": {
+          "name": "code",
+          "type": "varchar(20)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "description": {
+          "name": "description",
+          "type": "varchar(100)",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "task_statuses_code_key": {
+          "columns": [
+            "code"
+          ],
+          "nullsNotDistinct": false,
+          "name": "task_statuses_code_key"
+        }
+      },
+      "checkConstraints": {},
+      "policies": {},
+      "isRLSEnabled": true
+    },
+    "public.task_types": {
+      "name": "task_types",
+      "schema": "",
+      "columns": {
+        "task_type_id": {
+          "name": "task_type_id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "code": {
+          "name": "code",
+          "type": "varchar(30)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "description": {
+          "name": "description",
+          "type": "varchar(100)",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "task_types_code_key": {
+          "columns": [
+            "code"
+          ],
+          "nullsNotDistinct": false,
+          "name": "task_types_code_key"
+        }
+      },
+      "checkConstraints": {},
+      "policies": {},
+      "isRLSEnabled": true
+    },
+    "public.warehouse_configs": {
+      "name": "warehouse_configs",
+      "schema": "",
+      "columns": {
+        "config_id": {
+          "name": "config_id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "require_staging_before_putaway": {
+          "name": "require_staging_before_putaway",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false,
+          "default": true
+        },
+        "allow_mixed_sku_per_location": {
+          "name": "allow_mixed_sku_per_location",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false,
+          "default": false
+        },
+        "allow_mixed_lpn_per_location": {
+          "name": "allow_mixed_lpn_per_location",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false,
+          "default": true
+        },
+        "default_putaway_strategy": {
+          "name": "default_putaway_strategy",
+          "type": "varchar(20)",
+          "primaryKey": false,
+          "notNull": false,
+          "default": "'NEAREST_EMPTY'"
+        },
+        "cycle_count_frequency_days": {
+          "name": "cycle_count_frequency_days",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false,
+          "default": "CURRENT_TIMESTAMP"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {},
+      "policies": {},
+      "isRLSEnabled": true
+    },
+    "public.departments": {
+      "name": "departments",
+      "schema": "",
+      "columns": {
+        "department_id": {
+          "name": "department_id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "warehouse_id": {
+          "name": "warehouse_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "department_name": {
+          "name": "department_name",
+          "type": "varchar(100)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "is_custom": {
+          "name": "is_custom",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false,
+          "default": false
+        },
+        "is_active": {
+          "name": "is_active",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false,
+          "default": true
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false,
+          "default": "CURRENT_TIMESTAMP"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "departments_warehouse_id_fkey": {
+          "name": "departments_warehouse_id_fkey",
+          "tableFrom": "departments",
+          "tableTo": "warehouses",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "warehouse_id"
+          ],
+          "columnsTo": [
+            "warehouse_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "uq_departments_wh_name": {
+          "columns": [
+            "warehouse_id",
+            "department_name"
+          ],
+          "nullsNotDistinct": false,
+          "name": "uq_departments_wh_name"
+        }
+      },
+      "checkConstraints": {},
+      "policies": {},
+      "isRLSEnabled": true
+    },
+    "public.zones": {
+      "name": "zones",
+      "schema": "",
+      "columns": {
+        "zone_id": {
+          "name": "zone_id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "warehouse_id": {
+          "name": "warehouse_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "name": {
+          "name": "name",
+          "type": "varchar(50)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "is_pickable": {
+          "name": "is_pickable",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false,
+          "default": true
+        },
+        "is_temperature_controlled": {
+          "name": "is_temperature_controlled",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false,
+          "default": false
+        },
+        "requires_hazmat_clearance": {
+          "name": "requires_hazmat_clearance",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false,
+          "default": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "zones_warehouse_id_fkey": {
+          "name": "zones_warehouse_id_fkey",
+          "tableFrom": "zones",
+          "tableTo": "warehouses",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "warehouse_id"
+          ],
+          "columnsTo": [
+            "warehouse_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "uq_zones_wh_name": {
+          "columns": [
+            "warehouse_id",
+            "name"
+          ],
+          "nullsNotDistinct": false,
+          "name": "uq_zones_wh_name"
+        }
+      },
+      "checkConstraints": {},
+      "policies": {},
+      "isRLSEnabled": true
+    },
+    "public.locations": {
+      "name": "locations",
+      "schema": "",
+      "columns": {
+        "location_id": {
+          "name": "location_id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "warehouse_id": {
+          "name": "warehouse_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "zone_id": {
+          "name": "zone_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "location_code": {
+          "name": "location_code",
+          "type": "varchar(50)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "aisle": {
+          "name": "aisle",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "bay": {
+          "name": "bay",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "level": {
+          "name": "level",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "position": {
+          "name": "position",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "height_mm": {
+          "name": "height_mm",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "max_weight_kg": {
+          "name": "max_weight_kg",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "is_blocked": {
+          "name": "is_blocked",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false,
+          "default": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false,
+          "default": "CURRENT_TIMESTAMP"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "locations_warehouse_id_fkey": {
+          "name": "locations_warehouse_id_fkey",
+          "tableFrom": "locations",
+          "tableTo": "warehouses",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "warehouse_id"
+          ],
+          "columnsTo": [
+            "warehouse_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "locations_zone_id_fkey": {
+          "name": "locations_zone_id_fkey",
+          "tableFrom": "locations",
+          "tableTo": "zones",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "zone_id"
+          ],
+          "columnsTo": [
+            "zone_id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "locations_location_code_key": {
+          "columns": [
+            "location_code"
+          ],
+          "nullsNotDistinct": false,
+          "name": "locations_location_code_key"
+        }
+      },
+      "checkConstraints": {},
+      "policies": {},
+      "isRLSEnabled": true
+    },
+    "public.inventory": {
+      "name": "inventory",
+      "schema": "",
+      "columns": {
+        "inventory_id": {
+          "name": "inventory_id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "location_id": {
+          "name": "location_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "item_id": {
+          "name": "item_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "quantity": {
+          "name": "quantity",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "batch_number": {
+          "name": "batch_number",
+          "type": "varchar(50)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "lot_number": {
+          "name": "lot_number",
+          "type": "varchar(50)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "expiry_date": {
+          "name": "expiry_date",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "status_id": {
+          "name": "status_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false,
+          "default": "CURRENT_TIMESTAMP"
+        }
+      },
+      "indexes": {
+        "idx_inventory_item": {
+          "name": "idx_inventory_item",
+          "columns": [
+            {
+              "expression": "item_id",
+              "asc": true,
+              "nulls": "last",
+              "opclass": "int4_ops",
+              "isExpression": false
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_inventory_location": {
+          "name": "idx_inventory_location",
+          "columns": [
+            {
+              "expression": "location_id",
+              "asc": true,
+              "nulls": "last",
+              "opclass": "int4_ops",
+              "isExpression": false
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "inventory_item_id_fkey": {
+          "name": "inventory_item_id_fkey",
+          "tableFrom": "inventory",
+          "tableTo": "items",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "item_id"
+          ],
+          "columnsTo": [
+            "item_id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "inventory_location_id_fkey": {
+          "name": "inventory_location_id_fkey",
+          "tableFrom": "inventory",
+          "tableTo": "locations",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "location_id"
+          ],
+          "columnsTo": [
+            "location_id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "inventory_status_id_fkey": {
+          "name": "inventory_status_id_fkey",
+          "tableFrom": "inventory",
+          "tableTo": "inventory_statuses",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "status_id"
+          ],
+          "columnsTo": [
+            "status_id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "uq_inventory_location_item_batch_lot": {
+          "columns": [
+            "location_id",
+            "item_id",
+            "batch_number",
+            "lot_number"
+          ],
+          "nullsNotDistinct": false,
+          "name": "uq_inventory_location_item_batch_lot"
+        }
+      },
+      "checkConstraints": {
+        "inventory_quantity_check": {
+          "name": "inventory_quantity_check",
+          "value": "quantity >= 0"
+        }
+      },
+      "policies": {},
+      "isRLSEnabled": true
+    },
+    "public.pallets": {
+      "name": "pallets",
+      "schema": "",
+      "columns": {
+        "lpn_id": {
+          "name": "lpn_id",
+          "type": "varchar(50)",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "warehouse_id": {
+          "name": "warehouse_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "current_location_id": {
+          "name": "current_location_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "status": {
+          "name": "status",
+          "type": "varchar(20)",
+          "primaryKey": false,
+          "notNull": false,
+          "default": "'ACTIVE'"
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false,
+          "default": "CURRENT_TIMESTAMP"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false,
+          "default": "CURRENT_TIMESTAMP"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "pallets_current_location_id_fkey": {
+          "name": "pallets_current_location_id_fkey",
+          "tableFrom": "pallets",
+          "tableTo": "locations",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "current_location_id"
+          ],
+          "columnsTo": [
+            "location_id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "pallets_warehouse_id_fkey": {
+          "name": "pallets_warehouse_id_fkey",
+          "tableFrom": "pallets",
+          "tableTo": "warehouses",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "warehouse_id"
+          ],
+          "columnsTo": [
+            "warehouse_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {},
+      "policies": {},
+      "isRLSEnabled": true
+    },
+    "public.purchase_order_lines": {
+      "name": "purchase_order_lines",
+      "schema": "",
+      "columns": {
+        "po_line_id": {
+          "name": "po_line_id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "po_id": {
+          "name": "po_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "item_id": {
+          "name": "item_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "quantity_ordered": {
+          "name": "quantity_ordered",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "quantity_received": {
+          "name": "quantity_received",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "default": 0
+        },
+        "batch_number": {
+          "name": "batch_number",
+          "type": "varchar(50)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "lot_number": {
+          "name": "lot_number",
+          "type": "varchar(50)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "expiry_date": {
+          "name": "expiry_date",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "unit_cost": {
+          "name": "unit_cost",
+          "type": "numeric(10, 2)",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "idx_pol_item": {
+          "name": "idx_pol_item",
+          "columns": [
+            {
+              "expression": "item_id",
+              "asc": true,
+              "nulls": "last",
+              "opclass": "int4_ops",
+              "isExpression": false
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "purchase_order_lines_item_id_fkey": {
+          "name": "purchase_order_lines_item_id_fkey",
+          "tableFrom": "purchase_order_lines",
+          "tableTo": "items",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "item_id"
+          ],
+          "columnsTo": [
+            "item_id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "purchase_order_lines_po_id_fkey": {
+          "name": "purchase_order_lines_po_id_fkey",
+          "tableFrom": "purchase_order_lines",
+          "tableTo": "purchase_orders",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "po_id"
+          ],
+          "columnsTo": [
+            "po_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "purchase_order_lines_quantity_ordered_check": {
+          "name": "purchase_order_lines_quantity_ordered_check",
+          "value": "quantity_ordered > 0"
+        },
+        "purchase_order_lines_quantity_received_check": {
+          "name": "purchase_order_lines_quantity_received_check",
+          "value": "quantity_received >= 0"
+        },
+        "purchase_order_lines_unit_cost_check": {
+          "name": "purchase_order_lines_unit_cost_check",
+          "value": "unit_cost >= (0)::numeric"
+        }
+      },
+      "policies": {},
+      "isRLSEnabled": true
+    },
+    "public.sales_order_lines": {
+      "name": "sales_order_lines",
+      "schema": "",
+      "columns": {
+        "so_line_id": {
+          "name": "so_line_id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "so_id": {
+          "name": "so_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "item_id": {
+          "name": "item_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "quantity_requested": {
+          "name": "quantity_requested",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "batch_number": {
+          "name": "batch_number",
+          "type": "varchar(50)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "lot_number": {
+          "name": "lot_number",
+          "type": "varchar(50)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "expiry_date": {
+          "name": "expiry_date",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "quantity_allocated": {
+          "name": "quantity_allocated",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "default": 0
+        },
+        "quantity_shipped": {
+          "name": "quantity_shipped",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "default": 0
+        }
+      },
+      "indexes": {
+        "idx_sol_item": {
+          "name": "idx_sol_item",
+          "columns": [
+            {
+              "expression": "item_id",
+              "asc": true,
+              "nulls": "last",
+              "opclass": "int4_ops",
+              "isExpression": false
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "sales_order_lines_item_id_fkey": {
+          "name": "sales_order_lines_item_id_fkey",
+          "tableFrom": "sales_order_lines",
+          "tableTo": "items",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "item_id"
+          ],
+          "columnsTo": [
+            "item_id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "sales_order_lines_so_id_fkey": {
+          "name": "sales_order_lines_so_id_fkey",
+          "tableFrom": "sales_order_lines",
+          "tableTo": "sales_orders",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "so_id"
+          ],
+          "columnsTo": [
+            "so_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "sales_order_lines_check": {
+          "name": "sales_order_lines_check",
+          "value": "(quantity_shipped >= 0) AND (quantity_shipped <= quantity_allocated)"
+        },
+        "sales_order_lines_quantity_allocated_check": {
+          "name": "sales_order_lines_quantity_allocated_check",
+          "value": "quantity_allocated >= 0"
+        },
+        "sales_order_lines_quantity_requested_check": {
+          "name": "sales_order_lines_quantity_requested_check",
+          "value": "quantity_requested > 0"
+        }
+      },
+      "policies": {},
+      "isRLSEnabled": true
+    },
+    "public.stock_movements": {
+      "name": "stock_movements",
+      "schema": "",
+      "columns": {
+        "movement_id": {
+          "name": "movement_id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "employee_id": {
+          "name": "employee_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "item_id": {
+          "name": "item_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "batch_number": {
+          "name": "batch_number",
+          "type": "varchar(50)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "lot_number": {
+          "name": "lot_number",
+          "type": "varchar(50)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "expiry_date": {
+          "name": "expiry_date",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "quantity": {
+          "name": "quantity",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "source_location_id": {
+          "name": "source_location_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "destination_location_id": {
+          "name": "destination_location_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "movement_type": {
+          "name": "movement_type",
+          "type": "varchar(30)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "reason_code": {
+          "name": "reason_code",
+          "type": "varchar(50)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false,
+          "default": "CURRENT_TIMESTAMP"
+        }
+      },
+      "indexes": {
+        "idx_stock_movements_created": {
+          "name": "idx_stock_movements_created",
+          "columns": [
+            {
+              "expression": "created_at",
+              "asc": true,
+              "nulls": "last",
+              "opclass": "timestamp_ops",
+              "isExpression": false
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_stock_movements_item": {
+          "name": "idx_stock_movements_item",
+          "columns": [
+            {
+              "expression": "item_id",
+              "asc": true,
+              "nulls": "last",
+              "opclass": "int4_ops",
+              "isExpression": false
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "stock_movements_destination_location_id_fkey": {
+          "name": "stock_movements_destination_location_id_fkey",
+          "tableFrom": "stock_movements",
+          "tableTo": "locations",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "destination_location_id"
+          ],
+          "columnsTo": [
+            "location_id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "stock_movements_employee_id_fkey": {
+          "name": "stock_movements_employee_id_fkey",
+          "tableFrom": "stock_movements",
+          "tableTo": "employees",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "employee_id"
+          ],
+          "columnsTo": [
+            "employee_id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "stock_movements_item_id_fkey": {
+          "name": "stock_movements_item_id_fkey",
+          "tableFrom": "stock_movements",
+          "tableTo": "items",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "item_id"
+          ],
+          "columnsTo": [
+            "item_id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "stock_movements_source_location_id_fkey": {
+          "name": "stock_movements_source_location_id_fkey",
+          "tableFrom": "stock_movements",
+          "tableTo": "locations",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "source_location_id"
+          ],
+          "columnsTo": [
+            "location_id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "stock_movements_quantity_check": {
+          "name": "stock_movements_quantity_check",
+          "value": "quantity > 0"
+        }
+      },
+      "policies": {},
+      "isRLSEnabled": true
+    },
+    "public.tasks": {
+      "name": "tasks",
+      "schema": "",
+      "columns": {
+        "task_id": {
+          "name": "task_id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "warehouse_id": {
+          "name": "warehouse_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "task_type_id": {
+          "name": "task_type_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status_id": {
+          "name": "status_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "priority": {
+          "name": "priority",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 100
+        },
+        "assigned_employee_id": {
+          "name": "assigned_employee_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "mhe_type_required": {
+          "name": "mhe_type_required",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false,
+          "default": "CURRENT_TIMESTAMP"
+        },
+        "started_at": {
+          "name": "started_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "completed_at": {
+          "name": "completed_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "idx_tasks_assigned_employee": {
+          "name": "idx_tasks_assigned_employee",
+          "columns": [
+            {
+              "expression": "assigned_employee_id",
+              "asc": true,
+              "nulls": "last",
+              "opclass": "int4_ops",
+              "isExpression": false
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_tasks_warehouse_status": {
+          "name": "idx_tasks_warehouse_status",
+          "columns": [
+            {
+              "expression": "warehouse_id",
+              "asc": true,
+              "nulls": "last",
+              "opclass": "int4_ops",
+              "isExpression": false
+            },
+            {
+              "expression": "status_id",
+              "asc": true,
+              "nulls": "last",
+              "opclass": "int4_ops",
+              "isExpression": false
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "tasks_assigned_employee_id_fkey": {
+          "name": "tasks_assigned_employee_id_fkey",
+          "tableFrom": "tasks",
+          "tableTo": "employees",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "assigned_employee_id"
+          ],
+          "columnsTo": [
+            "employee_id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "tasks_mhe_type_required_fkey": {
+          "name": "tasks_mhe_type_required_fkey",
+          "tableFrom": "tasks",
+          "tableTo": "mhe_types",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "mhe_type_required"
+          ],
+          "columnsTo": [
+            "mhe_type_id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "tasks_status_id_fkey": {
+          "name": "tasks_status_id_fkey",
+          "tableFrom": "tasks",
+          "tableTo": "task_statuses",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "status_id"
+          ],
+          "columnsTo": [
+            "status_id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "tasks_task_type_id_fkey": {
+          "name": "tasks_task_type_id_fkey",
+          "tableFrom": "tasks",
+          "tableTo": "task_types",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "task_type_id"
+          ],
+          "columnsTo": [
+            "task_type_id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "tasks_warehouse_id_fkey": {
+          "name": "tasks_warehouse_id_fkey",
+          "tableFrom": "tasks",
+          "tableTo": "warehouses",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "warehouse_id"
+          ],
+          "columnsTo": [
+            "warehouse_id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {},
+      "policies": {},
+      "isRLSEnabled": true
+    },
+    "public.booking_tasks": {
+      "name": "booking_tasks",
+      "schema": "",
+      "columns": {
+        "task_id": {
+          "name": "task_id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "dock_door_location_id": {
+          "name": "dock_door_location_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "pallet_height_cm": {
+          "name": "pallet_height_cm",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "item_id": {
+          "name": "item_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "product_type": {
+          "name": "product_type",
+          "type": "varchar(50)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "product_quantity": {
+          "name": "product_quantity",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "batch_number": {
+          "name": "batch_number",
+          "type": "varchar(50)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "lot_number": {
+          "name": "lot_number",
+          "type": "varchar(50)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "expiry_date": {
+          "name": "expiry_date",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "booking_tasks_dock_door_location_id_fkey": {
+          "name": "booking_tasks_dock_door_location_id_fkey",
+          "tableFrom": "booking_tasks",
+          "tableTo": "locations",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "dock_door_location_id"
+          ],
+          "columnsTo": [
+            "location_id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "booking_tasks_item_id_fkey": {
+          "name": "booking_tasks_item_id_fkey",
+          "tableFrom": "booking_tasks",
+          "tableTo": "items",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "item_id"
+          ],
+          "columnsTo": [
+            "item_id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "booking_tasks_task_id_fkey": {
+          "name": "booking_tasks_task_id_fkey",
+          "tableFrom": "booking_tasks",
+          "tableTo": "tasks",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "task_id"
+          ],
+          "columnsTo": [
+            "task_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "booking_tasks_product_quantity_check": {
+          "name": "booking_tasks_product_quantity_check",
+          "value": "product_quantity > 0"
+        }
+      },
+      "policies": {},
+      "isRLSEnabled": true
+    },
+    "public.putaway_tasks": {
+      "name": "putaway_tasks",
+      "schema": "",
+      "columns": {
+        "task_id": {
+          "name": "task_id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "lpn_id": {
+          "name": "lpn_id",
+          "type": "varchar(50)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "source_location_id": {
+          "name": "source_location_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "suggested_dest_location_id": {
+          "name": "suggested_dest_location_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "actual_dest_location_id": {
+          "name": "actual_dest_location_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "putaway_tasks_actual_dest_location_id_fkey": {
+          "name": "putaway_tasks_actual_dest_location_id_fkey",
+          "tableFrom": "putaway_tasks",
+          "tableTo": "locations",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "actual_dest_location_id"
+          ],
+          "columnsTo": [
+            "location_id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "putaway_tasks_lpn_id_fkey": {
+          "name": "putaway_tasks_lpn_id_fkey",
+          "tableFrom": "putaway_tasks",
+          "tableTo": "pallets",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "lpn_id"
+          ],
+          "columnsTo": [
+            "lpn_id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "putaway_tasks_source_location_id_fkey": {
+          "name": "putaway_tasks_source_location_id_fkey",
+          "tableFrom": "putaway_tasks",
+          "tableTo": "locations",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "source_location_id"
+          ],
+          "columnsTo": [
+            "location_id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "putaway_tasks_suggested_dest_location_id_fkey": {
+          "name": "putaway_tasks_suggested_dest_location_id_fkey",
+          "tableFrom": "putaway_tasks",
+          "tableTo": "locations",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "suggested_dest_location_id"
+          ],
+          "columnsTo": [
+            "location_id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "putaway_tasks_task_id_fkey": {
+          "name": "putaway_tasks_task_id_fkey",
+          "tableFrom": "putaway_tasks",
+          "tableTo": "tasks",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "task_id"
+          ],
+          "columnsTo": [
+            "task_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {},
+      "policies": {},
+      "isRLSEnabled": true
+    },
+    "public.unloading_tasks": {
+      "name": "unloading_tasks",
+      "schema": "",
+      "columns": {
+        "task_id": {
+          "name": "task_id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "dock_door_location_id": {
+          "name": "dock_door_location_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "trailer_number": {
+          "name": "trailer_number",
+          "type": "varchar(30)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "expected_pallets": {
+          "name": "expected_pallets",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "carrier_id": {
+          "name": "carrier_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "unloading_tasks_carrier_id_fkey": {
+          "name": "unloading_tasks_carrier_id_fkey",
+          "tableFrom": "unloading_tasks",
+          "tableTo": "carriers",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "carrier_id"
+          ],
+          "columnsTo": [
+            "carrier_id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "unloading_tasks_dock_door_location_id_fkey": {
+          "name": "unloading_tasks_dock_door_location_id_fkey",
+          "tableFrom": "unloading_tasks",
+          "tableTo": "locations",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "dock_door_location_id"
+          ],
+          "columnsTo": [
+            "location_id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "unloading_tasks_task_id_fkey": {
+          "name": "unloading_tasks_task_id_fkey",
+          "tableFrom": "unloading_tasks",
+          "tableTo": "tasks",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "task_id"
+          ],
+          "columnsTo": [
+            "task_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "unloading_tasks_expected_pallets_check": {
+          "name": "unloading_tasks_expected_pallets_check",
+          "value": "expected_pallets > 0"
+        }
+      },
+      "policies": {},
+      "isRLSEnabled": true
+    },
+    "public.picking_tasks": {
+      "name": "picking_tasks",
+      "schema": "",
+      "columns": {
+        "task_id": {
+          "name": "task_id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "pick_location_id": {
+          "name": "pick_location_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "item_id": {
+          "name": "item_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "batch_number": {
+          "name": "batch_number",
+          "type": "varchar(50)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "lot_number": {
+          "name": "lot_number",
+          "type": "varchar(50)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "pick_quantity": {
+          "name": "pick_quantity",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "lpn_id": {
+          "name": "lpn_id",
+          "type": "varchar(50)",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "picking_tasks_item_id_fkey": {
+          "name": "picking_tasks_item_id_fkey",
+          "tableFrom": "picking_tasks",
+          "tableTo": "items",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "item_id"
+          ],
+          "columnsTo": [
+            "item_id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "picking_tasks_lpn_id_fkey": {
+          "name": "picking_tasks_lpn_id_fkey",
+          "tableFrom": "picking_tasks",
+          "tableTo": "pallets",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "lpn_id"
+          ],
+          "columnsTo": [
+            "lpn_id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "picking_tasks_pick_location_id_fkey": {
+          "name": "picking_tasks_pick_location_id_fkey",
+          "tableFrom": "picking_tasks",
+          "tableTo": "locations",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "pick_location_id"
+          ],
+          "columnsTo": [
+            "location_id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "picking_tasks_task_id_fkey": {
+          "name": "picking_tasks_task_id_fkey",
+          "tableFrom": "picking_tasks",
+          "tableTo": "tasks",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "task_id"
+          ],
+          "columnsTo": [
+            "task_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "picking_tasks_pick_quantity_check": {
+          "name": "picking_tasks_pick_quantity_check",
+          "value": "pick_quantity > 0"
+        }
+      },
+      "policies": {},
+      "isRLSEnabled": true
+    },
+    "public.loading_tasks": {
+      "name": "loading_tasks",
+      "schema": "",
+      "columns": {
+        "task_id": {
+          "name": "task_id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "dock_door_location_id": {
+          "name": "dock_door_location_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "lpn_id": {
+          "name": "lpn_id",
+          "type": "varchar(50)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "shipment_id": {
+          "name": "shipment_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "sequence_number": {
+          "name": "sequence_number",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 1
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "loading_tasks_dock_door_location_id_fkey": {
+          "name": "loading_tasks_dock_door_location_id_fkey",
+          "tableFrom": "loading_tasks",
+          "tableTo": "locations",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "dock_door_location_id"
+          ],
+          "columnsTo": [
+            "location_id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "loading_tasks_lpn_id_fkey": {
+          "name": "loading_tasks_lpn_id_fkey",
+          "tableFrom": "loading_tasks",
+          "tableTo": "pallets",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "lpn_id"
+          ],
+          "columnsTo": [
+            "lpn_id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "loading_tasks_shipment_id_fkey": {
+          "name": "loading_tasks_shipment_id_fkey",
+          "tableFrom": "loading_tasks",
+          "tableTo": "shipments",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "shipment_id"
+          ],
+          "columnsTo": [
+            "shipment_id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "loading_tasks_task_id_fkey": {
+          "name": "loading_tasks_task_id_fkey",
+          "tableFrom": "loading_tasks",
+          "tableTo": "tasks",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "task_id"
+          ],
+          "columnsTo": [
+            "task_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {},
+      "policies": {},
+      "isRLSEnabled": true
+    },
+    "public.replenishment_tasks": {
+      "name": "replenishment_tasks",
+      "schema": "",
+      "columns": {
+        "task_id": {
+          "name": "task_id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "item_id": {
+          "name": "item_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "batch_number": {
+          "name": "batch_number",
+          "type": "varchar(50)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "lot_number": {
+          "name": "lot_number",
+          "type": "varchar(50)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "source_location_id": {
+          "name": "source_location_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "destination_location_id": {
+          "name": "destination_location_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "quantity": {
+          "name": "quantity",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "replenishment_tasks_destination_location_id_fkey": {
+          "name": "replenishment_tasks_destination_location_id_fkey",
+          "tableFrom": "replenishment_tasks",
+          "tableTo": "locations",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "destination_location_id"
+          ],
+          "columnsTo": [
+            "location_id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "replenishment_tasks_item_id_fkey": {
+          "name": "replenishment_tasks_item_id_fkey",
+          "tableFrom": "replenishment_tasks",
+          "tableTo": "items",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "item_id"
+          ],
+          "columnsTo": [
+            "item_id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "replenishment_tasks_source_location_id_fkey": {
+          "name": "replenishment_tasks_source_location_id_fkey",
+          "tableFrom": "replenishment_tasks",
+          "tableTo": "locations",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "source_location_id"
+          ],
+          "columnsTo": [
+            "location_id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "replenishment_tasks_task_id_fkey": {
+          "name": "replenishment_tasks_task_id_fkey",
+          "tableFrom": "replenishment_tasks",
+          "tableTo": "tasks",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "task_id"
+          ],
+          "columnsTo": [
+            "task_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "replenishment_tasks_quantity_check": {
+          "name": "replenishment_tasks_quantity_check",
+          "value": "quantity > 0"
+        }
+      },
+      "policies": {},
+      "isRLSEnabled": true
+    },
+    "public.cycle_count_tasks": {
+      "name": "cycle_count_tasks",
+      "schema": "",
+      "columns": {
+        "task_id": {
+          "name": "task_id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "location_id": {
+          "name": "location_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "item_id": {
+          "name": "item_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "batch_number": {
+          "name": "batch_number",
+          "type": "varchar(50)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "lot_number": {
+          "name": "lot_number",
+          "type": "varchar(50)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "expected_quantity": {
+          "name": "expected_quantity",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "counted_quantity": {
+          "name": "counted_quantity",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "cycle_count_tasks_item_id_fkey": {
+          "name": "cycle_count_tasks_item_id_fkey",
+          "tableFrom": "cycle_count_tasks",
+          "tableTo": "items",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "item_id"
+          ],
+          "columnsTo": [
+            "item_id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "cycle_count_tasks_location_id_fkey": {
+          "name": "cycle_count_tasks_location_id_fkey",
+          "tableFrom": "cycle_count_tasks",
+          "tableTo": "locations",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "location_id"
+          ],
+          "columnsTo": [
+            "location_id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "cycle_count_tasks_task_id_fkey": {
+          "name": "cycle_count_tasks_task_id_fkey",
+          "tableFrom": "cycle_count_tasks",
+          "tableTo": "tasks",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "task_id"
+          ],
+          "columnsTo": [
+            "task_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "cycle_count_tasks_counted_quantity_check": {
+          "name": "cycle_count_tasks_counted_quantity_check",
+          "value": "counted_quantity >= 0"
+        }
+      },
+      "policies": {},
+      "isRLSEnabled": true
+    },
+    "public.time_clock_entries": {
+      "name": "time_clock_entries",
+      "schema": "",
+      "columns": {
+        "time_clock_id": {
+          "name": "time_clock_id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "employee_id": {
+          "name": "employee_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "warehouse_id": {
+          "name": "warehouse_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "clock_in_at": {
+          "name": "clock_in_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "clock_out_at": {
+          "name": "clock_out_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "break_minutes": {
+          "name": "break_minutes",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "default": 0
+        },
+        "source": {
+          "name": "source",
+          "type": "varchar(20)",
+          "primaryKey": false,
+          "notNull": false,
+          "default": "'TERMINAL'"
+        },
+        "edited_by_employee_id": {
+          "name": "edited_by_employee_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "idx_time_clock_employee": {
+          "name": "idx_time_clock_employee",
+          "columns": [
+            {
+              "expression": "employee_id",
+              "asc": true,
+              "nulls": "last",
+              "opclass": "int4_ops",
+              "isExpression": false
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "time_clock_entries_edited_by_employee_id_fkey": {
+          "name": "time_clock_entries_edited_by_employee_id_fkey",
+          "tableFrom": "time_clock_entries",
+          "tableTo": "employees",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "edited_by_employee_id"
+          ],
+          "columnsTo": [
+            "employee_id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "time_clock_entries_employee_id_fkey": {
+          "name": "time_clock_entries_employee_id_fkey",
+          "tableFrom": "time_clock_entries",
+          "tableTo": "employees",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "employee_id"
+          ],
+          "columnsTo": [
+            "employee_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "time_clock_entries_warehouse_id_fkey": {
+          "name": "time_clock_entries_warehouse_id_fkey",
+          "tableFrom": "time_clock_entries",
+          "tableTo": "warehouses",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "warehouse_id"
+          ],
+          "columnsTo": [
+            "warehouse_id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {},
+      "policies": {},
+      "isRLSEnabled": true
+    },
+    "public.shipment_sales_orders": {
+      "name": "shipment_sales_orders",
+      "schema": "",
+      "columns": {
+        "shipment_id": {
+          "name": "shipment_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "so_id": {
+          "name": "so_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "shipment_sales_orders_shipment_id_fkey": {
+          "name": "shipment_sales_orders_shipment_id_fkey",
+          "tableFrom": "shipment_sales_orders",
+          "tableTo": "shipments",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "shipment_id"
+          ],
+          "columnsTo": [
+            "shipment_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "shipment_sales_orders_so_id_fkey": {
+          "name": "shipment_sales_orders_so_id_fkey",
+          "tableFrom": "shipment_sales_orders",
+          "tableTo": "sales_orders",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "so_id"
+          ],
+          "columnsTo": [
+            "so_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "shipment_sales_orders_pkey": {
+          "name": "shipment_sales_orders_pkey",
+          "columns": [
+            "shipment_id",
+            "so_id"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraints": {},
+      "policies": {},
+      "isRLSEnabled": true
+    },
+    "public.task_eligible_departments": {
+      "name": "task_eligible_departments",
+      "schema": "",
+      "columns": {
+        "task_id": {
+          "name": "task_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "department_id": {
+          "name": "department_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "task_eligible_departments_department_id_fkey": {
+          "name": "task_eligible_departments_department_id_fkey",
+          "tableFrom": "task_eligible_departments",
+          "tableTo": "departments",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "department_id"
+          ],
+          "columnsTo": [
+            "department_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "task_eligible_departments_task_id_fkey": {
+          "name": "task_eligible_departments_task_id_fkey",
+          "tableFrom": "task_eligible_departments",
+          "tableTo": "tasks",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "task_id"
+          ],
+          "columnsTo": [
+            "task_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "task_eligible_departments_pkey": {
+          "name": "task_eligible_departments_pkey",
+          "columns": [
+            "task_id",
+            "department_id"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraints": {},
+      "policies": {},
+      "isRLSEnabled": true
+    },
+    "public.employee_departments": {
+      "name": "employee_departments",
+      "schema": "",
+      "columns": {
+        "employee_id": {
+          "name": "employee_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "department_id": {
+          "name": "department_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "is_primary": {
+          "name": "is_primary",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false,
+          "default": false
+        },
+        "assigned_at": {
+          "name": "assigned_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false,
+          "default": "CURRENT_TIMESTAMP"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "employee_departments_department_id_fkey": {
+          "name": "employee_departments_department_id_fkey",
+          "tableFrom": "employee_departments",
+          "tableTo": "departments",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "department_id"
+          ],
+          "columnsTo": [
+            "department_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "employee_departments_employee_id_fkey": {
+          "name": "employee_departments_employee_id_fkey",
+          "tableFrom": "employee_departments",
+          "tableTo": "employees",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "employee_id"
+          ],
+          "columnsTo": [
+            "employee_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "employee_departments_pkey": {
+          "name": "employee_departments_pkey",
+          "columns": [
+            "employee_id",
+            "department_id"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraints": {},
+      "policies": {},
+      "isRLSEnabled": true
+    },
+    "public.employee_licenses": {
+      "name": "employee_licenses",
+      "schema": "",
+      "columns": {
+        "employee_id": {
+          "name": "employee_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "mhe_type_id": {
+          "name": "mhe_type_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "issued_date": {
+          "name": "issued_date",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "expiry_date": {
+          "name": "expiry_date",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "employee_licenses_employee_id_fkey": {
+          "name": "employee_licenses_employee_id_fkey",
+          "tableFrom": "employee_licenses",
+          "tableTo": "employees",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "employee_id"
+          ],
+          "columnsTo": [
+            "employee_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "employee_licenses_mhe_type_id_fkey": {
+          "name": "employee_licenses_mhe_type_id_fkey",
+          "tableFrom": "employee_licenses",
+          "tableTo": "mhe_types",
+          "schemaTo": "public",
+          "columnsFrom": [
+            "mhe_type_id"
+          ],
+          "columnsTo": [
+            "mhe_type_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "employee_licenses_pkey": {
+          "name": "employee_licenses_pkey",
+          "columns": [
+            "employee_id",
+            "mhe_type_id"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraints": {},
+      "policies": {},
+      "isRLSEnabled": true
+    }
+  },
+  "enums": {},
+  "schemas": {},
+  "sequences": {},
+  "roles": {},
+  "policies": {},
+  "views": {},
+  "_meta": {
+    "schemas": {},
+    "tables": {},
+    "columns": {}
+  },
+  "internal": {
+    "tables": {}
+  }
+}

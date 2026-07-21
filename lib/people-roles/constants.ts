@@ -1,0 +1,41 @@
+export const PERMISSION_FIELDS = [
+  "canViewMetrics",
+  "canAssignTasks",
+  "canBook",
+  "canUnload",
+  "canLoad",
+  "canPick",
+  "canPack",
+  "canModifyInventory",
+  "canOverrideUnexpectedDeliveries",
+  "canRegisterDamages",
+  "canModifyLocations",
+  "canReplenish",
+  "canForceRecount",
+  "canReleaseOrders",
+  "canVoidShipments",
+  "canManageUsers",
+  "canModifyConfigs",
+] as const;
+
+export type PermissionField = (typeof PERMISSION_FIELDS)[number];
+
+export const PERMISSION_LABELS: Record<PermissionField, string> = {
+  canViewMetrics: "View metrics",
+  canAssignTasks: "Assign tasks",
+  canBook: "Book inbound",
+  canUnload: "Unload",
+  canLoad: "Load",
+  canPick: "Pick",
+  canPack: "Pack",
+  canModifyInventory: "Modify inventory",
+  canOverrideUnexpectedDeliveries: "Override unexpected deliveries",
+  canRegisterDamages: "Register damages",
+  canModifyLocations: "Modify locations",
+  canReplenish: "Replenish",
+  canForceRecount: "Force recount",
+  canReleaseOrders: "Release orders",
+  canVoidShipments: "Void shipments",
+  canManageUsers: "Manage users",
+  canModifyConfigs: "Modify configs",
+};

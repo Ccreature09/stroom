@@ -16,6 +16,21 @@ bun dev
 
 Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
 
+## Environment
+
+The onboarding flow creates its first administrator through Supabase Auth. Alongside
+`DATABASE_URL`, configure these server environment variables:
+
+```env
+NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
+NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=sb_publishable_your_publishable_key
+SUPABASE_SECRET_KEY=your-secret-key
+```
+
+`NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` is used by the browser to sign users in.
+Keep `SUPABASE_SECRET_KEY` private: it is only read in the server action and
+must never be exposed in browser code.
+
 You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
