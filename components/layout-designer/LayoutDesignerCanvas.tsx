@@ -114,29 +114,60 @@ export default function LayoutDesignerCanvas({
       viewport.clampZoom({ minScale: 0.05, maxScale: 8 });
       viewport.clamp({ direction: "all", underflow: "center" });
 
-      // --- static background: hall floor + grid ---
+      // --- static background: hall floor ---
       const floor = new Graphics()
         .rect(0, 0, hall.physicalWidthMm, hall.physicalLengthMm)
         .fill({ color: 0xffffff })
         .stroke({ width: 60, color: 0x1e293b });
       viewport.addChild(floor);
 
+      // --- dynamic grid ---
       const grid = new Graphics();
-      for (let x = 0; x <= hall.physicalWidthMm; x += GRID_STEP_MM) {
-        const isMajor = Math.round(x / GRID_STEP_MM) % GRID_MAJOR_EVERY === 0;
-        grid.moveTo(x, 0).lineTo(x, hall.physicalLengthMm).stroke({
-          width: isMajor ? 12 : 4,
-          color: isMajor ? 0xcbd5e1 : 0xe2e8f0,
-        });
-      }
-      for (let y = 0; y <= hall.physicalLengthMm; y += GRID_STEP_MM) {
-        const isMajor = Math.round(y / GRID_STEP_MM) % GRID_MAJOR_EVERY === 0;
-        grid.moveTo(0, y).lineTo(hall.physicalWidthMm, y).stroke({
-          width: isMajor ? 12 : 4,
-          color: isMajor ? 0xcbd5e1 : 0xe2e8f0,
-        });
-      }
       viewport.addChild(grid);
+
+      function drawDynamicGrid() {
+        grid.clear();
+        
+        // 1. Get current zoom level
+        const scale = viewport.scale.x;
+        
+        // 2. Define grid density thresholds based on zoom
+        let stepMm = 10000; // Zoomed out: 10m grid lines
+        if (scale > 1.0) {
+          stepMm = 100;     // Zoomed far in: 10cm grid lines
+        } else if (scale > 0.2) {
+          stepMm = 1000;    // Standard view: 1m grid lines
+        }
+
+        const majorEvery = 5;
+
+        // 3. Keep line thickness consistent on screen regardless of world zoom
+        const majorStrokeWidth = 3 / scale;
+        const minorStrokeWidth = 1 / scale;
+
+        // Draw vertical lines
+        for (let x = 0; x <= hall.physicalWidthMm; x += stepMm) {
+          const isMajor = Math.round(x / stepMm) % majorEvery === 0;
+          grid.moveTo(x, 0).lineTo(x, hall.physicalLengthMm).stroke({
+            width: isMajor ? majorStrokeWidth : minorStrokeWidth,
+            color: isMajor ? 0xcbd5e1 : 0xe2e8f0,
+            alpha: 0.8
+          });
+        }
+        
+        // Draw horizontal lines
+        for (let y = 0; y <= hall.physicalLengthMm; y += stepMm) {
+          const isMajor = Math.round(y / stepMm) % majorEvery === 0;
+          grid.moveTo(0, y).lineTo(hall.physicalWidthMm, y).stroke({
+            width: isMajor ? majorStrokeWidth : minorStrokeWidth,
+            color: isMajor ? 0xcbd5e1 : 0xe2e8f0,
+            alpha: 0.8
+          });
+        }
+      }
+
+      // Redraw grid dynamically on zoom
+      viewport.on("zoomed", drawDynamicGrid);
 
       const locationLayer = new Container();
       viewport.addChild(locationLayer);
@@ -148,6 +179,9 @@ export default function LayoutDesignerCanvas({
 
       viewport.fit(true);
       viewport.moveCenter(hall.physicalWidthMm / 2, hall.physicalLengthMm / 2);
+      
+      // Draw the initial grid based on the starting zoom after fitting
+      drawDynamicGrid();
 
       // --- draw-new-location interactions (rubber-band rectangle) ---
       viewport.eventMode = "static";
@@ -285,6 +319,44 @@ export default function LayoutDesignerCanvas({
           };
         });
 
+        // Properly clear drag state and save geometry when releasing the mouse over the location
+        container.on("pointerup", (e: FederatedPointerEvent) => {
+          if (stateRef.current.tool !== "select") return;
+          e.stopPropagation();
+          const drag = dragRef.current;
+          if (drag) {
+            dragRef.current = null;
+            const node = nodesRef.current.get(drag.locationId);
+            if (node) {
+              stateRef.current.onGeometryChange(drag.locationId, {
+                physicalX: node.loc.physicalX,
+                physicalY: node.loc.physicalY,
+                physicalWidthMm: node.loc.physicalWidthMm,
+                physicalLengthMm: node.loc.physicalLengthMm,
+                rotationDegrees: node.loc.rotationDegrees,
+              });
+            }
+          }
+        });
+
+        container.on("pointerupoutside", (e: FederatedPointerEvent) => {
+          if (stateRef.current.tool !== "select") return;
+          e.stopPropagation();
+          const drag = dragRef.current;
+          if (drag) {
+            dragRef.current = null;
+            const node = nodesRef.current.get(drag.locationId);
+            if (node) {
+              stateRef.current.onGeometryChange(drag.locationId, {
+                physicalX: node.loc.physicalX,
+                physicalY: node.loc.physicalY,
+                physicalWidthMm: node.loc.physicalWidthMm,
+                physicalLengthMm: node.loc.physicalLengthMm,
+                rotationDegrees: node.loc.rotationDegrees,
+              });
+            }
+          }
+        });
         node = { container, box, label, loc };
         nodes.set(loc.locationId, node);
       }
@@ -372,12 +444,6 @@ export default function LayoutDesignerCanvas({
       handle.eventMode = "static";
       handle.cursor = corner === "nw" || corner === "se" ? "nwse-resize" : "nesw-resize";
 
-      // Handles live in the location's own rotated container so they track
-      // rotation, but resize math below assumes axis-aligned (rotation 0) --
-      // matches the "rotate via button" simplification described in the panel.
-      node.container.addChild(handle);
-      handlesRef.current.push(handle);
-
       handle.on("pointerdown", (e: FederatedPointerEvent) => {
         e.stopPropagation();
         resizeRef.current = {
@@ -389,6 +455,31 @@ export default function LayoutDesignerCanvas({
           originH: node.loc.physicalLengthMm,
         };
       });
+
+      // Clear resize state and trigger geometry save when releasing the mouse
+      const handleResizeUp = (e: FederatedPointerEvent) => {
+        e.stopPropagation();
+        const resize = resizeRef.current;
+        if (resize) {
+          resizeRef.current = null;
+          const targetNode = nodesRef.current.get(resize.locationId);
+          if (targetNode) {
+            stateRef.current.onGeometryChange(resize.locationId, {
+              physicalX: targetNode.loc.physicalX,
+              physicalY: targetNode.loc.physicalY,
+              physicalWidthMm: targetNode.loc.physicalWidthMm,
+              physicalLengthMm: targetNode.loc.physicalLengthMm,
+              rotationDegrees: targetNode.loc.rotationDegrees,
+            });
+          }
+        }
+      };
+
+      handle.on("pointerup", handleResizeUp);
+      handle.on("pointerupoutside", handleResizeUp);
+
+      node.container.addChild(handle);
+      handlesRef.current.push(handle);
     }
   }
 
