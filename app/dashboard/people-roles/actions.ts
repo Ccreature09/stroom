@@ -150,9 +150,10 @@ async function ensureEmployeeBelongsToOrg(employeeId: number, organizationId: nu
 }
 
 export async function createRole(formData: FormData) {
-  await requireManageUsersAccess();
+  const actor = await requireManageUsersAccess();
 
   const title = String(formData.get("title") ?? "").trim();
+  const warehouseId = parseOptionalNumber(formData.get("warehouseId"));
   const isOfficeRole = parseBooleanFromForm(formData, "isOfficeRole");
   const permissions = parsePermissionValues(formData);
 
@@ -163,15 +164,24 @@ export async function createRole(formData: FormData) {
     redirect(buildReturnUrl("error", "Role title must be 50 characters or fewer."));
   }
 
+  // Validate warehouse assignment against organization if provided
+  if (warehouseId !== null) {
+    const validWarehouseIds = await getValidWarehouseIds(actor.organizationId, [warehouseId]);
+    if (!validWarehouseIds.has(warehouseId)) {
+      redirect(buildReturnUrl("error", "Selected warehouse is invalid for your organization."));
+    }
+  }
+
   try {
     await db.insert(positionTypes).values({
       title,
+      warehouseId,
       isOfficeRole,
       ...permissions,
     });
 
     revalidatePath("/dashboard/people-roles");
-    redirect(buildReturnUrl("success", `Role \"${title}\" created.`));
+    redirect(buildReturnUrl("success", `Role "${title}" created.`));
   } catch (error) {
     if (isUniqueViolation(error)) {
       redirect(buildReturnUrl("error", "A role with this title already exists."));
@@ -182,9 +192,10 @@ export async function createRole(formData: FormData) {
 }
 
 export async function updateRole(formData: FormData) {
-  await requireManageUsersAccess();
+  const actor = await requireManageUsersAccess();
 
   const positionId = parseOptionalNumber(formData.get("positionId"));
+  const warehouseId = parseOptionalNumber(formData.get("warehouseId"));
   const title = String(formData.get("title") ?? "").trim();
   const isOfficeRole = parseBooleanFromForm(formData, "isOfficeRole");
   const permissions = parsePermissionValues(formData);
@@ -199,11 +210,20 @@ export async function updateRole(formData: FormData) {
     redirect(buildReturnUrl("error", "Role title must be 50 characters or fewer."));
   }
 
+  // Validate warehouse assignment against organization if provided
+  if (warehouseId !== null) {
+    const validWarehouseIds = await getValidWarehouseIds(actor.organizationId, [warehouseId]);
+    if (!validWarehouseIds.has(warehouseId)) {
+      redirect(buildReturnUrl("error", "Selected warehouse is invalid for your organization."));
+    }
+  }
+
   try {
     const updated = await db
       .update(positionTypes)
       .set({
         title,
+        warehouseId,
         isOfficeRole,
         ...permissions,
       })
@@ -215,7 +235,7 @@ export async function updateRole(formData: FormData) {
     }
 
     revalidatePath("/dashboard/people-roles");
-    redirect(buildReturnUrl("success", `Role \"${title}\" updated.`));
+    redirect(buildReturnUrl("success", `Role "${title}" updated.`));
   } catch (error) {
     if (isUniqueViolation(error)) {
       redirect(buildReturnUrl("error", "A role with this title already exists."));
@@ -329,7 +349,7 @@ export async function createEmployee(formData: FormData) {
     });
 
     revalidatePath("/dashboard/people-roles");
-    redirect(buildReturnUrl("success", `Employee \"${workEmail}\" created.`));
+    redirect(buildReturnUrl("success", `Employee "${workEmail}" created.`));
   } catch (error) {
     if (isUniqueViolation(error)) {
       redirect(buildReturnUrl("error", "An employee with that work email already exists."));

@@ -1,33 +1,24 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
-import { useRouter } from "next/navigation";
-import { createClient } from "@/lib/client";
+import { useState, useTransition } from "react";
+import { signInAction } from "@/app/dashboard/warehouses/actions";
 
 export default function SignInForm() {
-  const router = useRouter();
   const [error, setError] = useState<string>();
-  const [isPending, setIsPending] = useState(false);
+  const [isPending, startTransition] = useTransition();
 
-  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+  async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError(undefined);
-    setIsPending(true);
 
     const formData = new FormData(event.currentTarget);
-    const { error: signInError } = await createClient().auth.signInWithPassword({
-      email: String(formData.get("email") ?? "").trim(),
-      password: String(formData.get("password") ?? ""),
+
+    startTransition(async () => {
+      const result = await signInAction(formData);
+      if (result?.error) {
+        setError(result.error);
+      }
     });
-
-    setIsPending(false);
-    if (signInError) {
-      setError("We couldn’t sign you in with those details. Please try again.");
-      return;
-    }
-
-    router.replace("/dashboard");
-    router.refresh();
   }
 
   return (

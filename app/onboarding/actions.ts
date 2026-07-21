@@ -203,6 +203,7 @@ export async function createOnboardingSubmission(
           },
         })
         .returning({ positionId: positionTypes.positionId });
+
       const administratorRole =
         createdRoles[0] ??
         (await tx

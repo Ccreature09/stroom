@@ -1,5 +1,5 @@
+import { createClient } from "@/lib/server";
 import Link from "next/link";
-
 const capabilities = [
   ["Inbound, without the bottleneck", "Receive, book, and put away inventory with clear next actions for every dock and operator."],
   ["Confident fulfilment", "Turn orders into efficient pick, pack, and load workflows that keep customers in the loop."],
@@ -12,7 +12,10 @@ const activity = [
   ["Cycle count", "Aisle 12 in progress", "98% complete", "bg-amber-400"],
 ];
 
-export default function Home() {
+export default async function Home() {
+  const supabase = await createClient();
+  const { data } = await supabase.auth.getClaims();
+  const isAuthenticated = Boolean(data?.claims?.sub);
   return (
     <main className="overflow-hidden bg-[#f8faf9] text-slate-950">
       <section className="relative isolate border-b border-slate-200/80">
@@ -28,14 +31,31 @@ export default function Home() {
             <p className="mx-auto mt-6 max-w-xl text-pretty text-lg leading-8 text-slate-600 sm:text-xl">
               Stroom gives warehouse teams one clear, connected way to receive, move, count, and ship inventory.
             </p>
-            <div className="mt-9 flex flex-col justify-center gap-3 sm:flex-row">
-              <Link href="/onboarding" className="rounded-lg bg-slate-950 px-5 py-3 text-sm font-semibold text-white shadow-lg shadow-slate-950/15 transition hover:-translate-y-0.5 hover:bg-slate-800">
+            <div className="mt-10 flex items-center justify-center gap-4">
+          {isAuthenticated ? (
+            <Link
+              href="/dashboard/warehouses"
+              className="rounded-xl bg-teal-700 px-6 py-3.5 text-sm font-bold text-white shadow-md hover:bg-teal-800 transition"
+            >
+              Go to my warehouses →
+            </Link>
+          ) : (
+            <>
+              <Link
+                href="/onboarding"
+                className="rounded-xl bg-slate-950 px-6 py-3.5 text-sm font-bold text-white shadow-md hover:bg-slate-800 transition"
+              >
                 Set up your warehouse
               </Link>
-              <a href="#platform" className="rounded-lg border border-slate-300 bg-white px-5 py-3 text-sm font-semibold text-slate-800 shadow-sm transition hover:border-slate-400 hover:bg-slate-50">
+              <Link
+                href="#features"
+                className="rounded-xl border border-slate-300 bg-white px-6 py-3.5 text-sm font-semibold text-slate-700 shadow-sm hover:bg-slate-50 transition"
+              >
                 Explore the platform
-              </a>
-            </div>
+              </Link>
+            </>
+          )}
+        </div>
           </div>
 
           <div className="mx-auto mt-16 max-w-5xl rounded-2xl border border-slate-200 bg-white p-3 shadow-2xl shadow-teal-950/10 sm:p-5">

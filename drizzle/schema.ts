@@ -44,6 +44,31 @@ export const warehouses = pgTable("warehouses", {
 	unique("warehouses_config_id_key").on(table.configId),
 ]);
 
+export const warehouseHalls = pgTable("warehouse_halls", {
+	hallId: serial("hall_id").primaryKey().notNull(),
+	organizationId: integer("organization_id").notNull(),
+	warehouseId: integer("warehouse_id").notNull(),
+	name: varchar({ length: 100 }).notNull(),
+	physicalWidthMm: integer("physical_width_mm").default(80_000).notNull(),
+	physicalLengthMm: integer("physical_length_mm").default(60_000).notNull(),
+	clearHeightMm: integer("clear_height_mm").default(12_000),
+	isActive: boolean("is_active").default(true),
+	createdAt: timestamp("created_at", { mode: 'string' }).default(sql`CURRENT_TIMESTAMP`),
+	updatedAt: timestamp("updated_at", { mode: 'string' }).default(sql`CURRENT_TIMESTAMP`),
+}, (table) => [
+	foreignKey({
+			columns: [table.warehouseId],
+			foreignColumns: [warehouses.warehouseId],
+			name: "warehouse_halls_warehouse_id_fkey"
+		}).onDelete("cascade"),
+	foreignKey({
+			columns: [table.organizationId],
+			foreignColumns: [organizations.organizationId],
+			name: "warehouse_halls_organization_id_fkey"
+		}).onDelete("cascade"),
+	unique("uq_warehouse_halls_wh_name").on(table.warehouseId, table.name),
+]);
+
 export const employees = pgTable("employees", {
 	employeeId: serial("employee_id").primaryKey().notNull(),
 	organizationId: integer("organization_id").notNull(),
@@ -335,6 +360,7 @@ export const inventoryStatuses = pgTable("inventory_statuses", {
 
 export const positionTypes = pgTable("position_types", {
 	positionId: serial("position_id").primaryKey().notNull(),
+	warehouseId: integer("warehouse_id").references(() => warehouses.warehouseId, { onDelete: "cascade" }),
 	title: varchar({ length: 50 }).notNull(),
 	isOfficeRole: boolean("is_office_role").default(false),
 	canViewMetrics: boolean("can_view_metrics").default(false),

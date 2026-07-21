@@ -156,3 +156,21 @@ export async function deleteWarehouse(formData: FormData) {
     );
   }
 }
+
+export async function signInAction(formData: FormData) {
+  const email = String(formData.get("email") ?? "").trim();
+  const password = String(formData.get("password") ?? "");
+
+  const supabase = await createClient();
+
+  const { error } = await supabase.auth.signInWithPassword({
+    email,
+    password,
+  });
+
+  if (error) {
+    return { error: "We couldn’t sign you in with those details. Please try again." };
+  }
+
+  redirect("/dashboard");
+}
