@@ -60,31 +60,101 @@ export default async function WarehouseLayoutDesignerPage({
   // No halls yet -- show a minimal empty state instead of an empty canvas.
   if (halls.length === 0) {
     return (
-      <main className="flex h-[calc(100vh-64px)] flex-1 items-center justify-center overflow-hidden bg-[linear-gradient(180deg,#ebe7dc_0%,#f7f4ed_24%,#f4f1e8_100%)] px-4 py-4 sm:px-6">
-        <div className="w-full max-w-sm rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
-          <h1 className="text-lg font-semibold text-slate-900">Create your first hall</h1>
-          <p className="mt-1 text-sm text-slate-500">
-            A hall is a physical building or module inside {warehouse.name ?? "this warehouse"}. Its dimensions define the
-            canvas bounds for the layout designer.
-          </p>
-          <form action={createHall} className="mt-5 space-y-4">
-            <input type="hidden" name="warehouseId" value={parsedWarehouseId} />
-            <div>
-              <label htmlFor="name" className="text-sm font-semibold text-slate-700">Hall name</label>
-              <input id="name" name="name" required placeholder="Hall A - Ambient" className="mt-2 block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm shadow-sm outline-none transition focus:border-teal-600 focus:ring-4 focus:ring-teal-600/10" />
+      <main className="flex h-[calc(100vh-64px)] flex-1 items-center justify-center overflow-hidden bg-[linear-gradient(180deg,#ebe7dc_0%,#f7f4ed_24%,#f4f1e8_100%)] p-4 sm:p-6">
+        <div className="w-full max-w-md rounded-2xl border border-slate-200/80 bg-white/95 p-8 shadow-xl backdrop-blur-sm dark:border-zinc-800 dark:bg-zinc-900/95">
+          {/* Header Icon & Title */}
+          <div className="flex flex-col items-center text-center">
+            <div className="flex h-12 w-12 items-center justify-center rounded-full bg-teal-50 text-teal-600 ring-8 ring-teal-50/50 dark:bg-teal-950/50 dark:text-teal-400 dark:ring-teal-950/30">
+              <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 21h19.5m-18-18v18m10.5-18v18m6-13.5V21M6.75 6.75h.75m-.75 3h.75m-.75 3h.75m3-6h.75m-.75 3h.75m-.75 3h.75M6.75 21v-3.375c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125V21" />
+              </svg>
             </div>
+            <h1 className="mt-4 text-xl font-bold tracking-tight text-slate-900 dark:text-zinc-50">
+              Create your first hall
+            </h1>
+            <p className="mt-1.5 text-xs/relaxed text-slate-500 dark:text-zinc-400">
+              A hall defines the physical canvas boundaries inside{" "}
+              <span className="font-semibold text-slate-700 dark:text-zinc-200">
+                {warehouse.name ?? "this warehouse"}
+              </span>.
+            </p>
+          </div>
+
+          {/* Creation Form */}
+          <form action={createHall} className="mt-6 space-y-4">
+            <input type="hidden" name="warehouseId" value={parsedWarehouseId} />
+
+            <div>
+              <label htmlFor="name" className="block text-xs font-semibold uppercase tracking-wider text-slate-600 dark:text-zinc-400">
+                Hall Name
+              </label>
+              <input
+                id="name"
+                name="name"
+                required
+                placeholder="e.g. Hall A - Main Storage"
+                className="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2 text-sm text-slate-900 shadow-sm transition placeholder:text-slate-400 focus:border-teal-600 focus:outline-none focus:ring-2 focus:ring-teal-600/20 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder:text-zinc-500 dark:focus:border-teal-500"
+              />
+            </div>
+
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <label htmlFor="physicalWidthMm" className="text-sm font-semibold text-slate-700">Width (mm)</label>
-                <input id="physicalWidthMm" name="physicalWidthMm" type="number" min={1} defaultValue={80_000} className="mt-2 block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm shadow-sm outline-none transition focus:border-teal-600 focus:ring-4 focus:ring-teal-600/10" />
+                <div className="flex items-center justify-between">
+                  <label htmlFor="physicalWidthMm" className="block text-xs font-semibold uppercase tracking-wider text-slate-600 dark:text-zinc-400">
+                    Width (mm)
+                  </label>
+                  <span className="text-[10px] text-slate-400 dark:text-zinc-500">80m</span>
+                </div>
+                <input
+                  id="physicalWidthMm"
+                  name="physicalWidthMm"
+                  type="number"
+                  min={1}
+                  defaultValue={80_000}
+                  className="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2 text-sm text-slate-900 shadow-sm transition focus:border-teal-600 focus:outline-none focus:ring-2 focus:ring-teal-600/20 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:focus:border-teal-500"
+                />
               </div>
+
               <div>
-                <label htmlFor="physicalLengthMm" className="text-sm font-semibold text-slate-700">Length (mm)</label>
-                <input id="physicalLengthMm" name="physicalLengthMm" type="number" min={1} defaultValue={60_000} className="mt-2 block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm shadow-sm outline-none transition focus:border-teal-600 focus:ring-4 focus:ring-teal-600/10" />
+                <div className="flex items-center justify-between">
+                  <label htmlFor="physicalLengthMm" className="block text-xs font-semibold uppercase tracking-wider text-slate-600 dark:text-zinc-400">
+                    Length (mm)
+                  </label>
+                  <span className="text-[10px] text-slate-400 dark:text-zinc-500">60m</span>
+                </div>
+                <input
+                  id="physicalLengthMm"
+                  name="physicalLengthMm"
+                  type="number"
+                  min={1}
+                  defaultValue={60_000}
+                  className="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2 text-sm text-slate-900 shadow-sm transition focus:border-teal-600 focus:outline-none focus:ring-2 focus:ring-teal-600/20 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:focus:border-teal-500"
+                />
               </div>
             </div>
-            <button type="submit" className="w-full rounded-lg bg-slate-950 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800">
-              Create hall
+
+            <div>
+              <div className="flex items-center justify-between">
+                <label htmlFor="clearHeightMm" className="block text-xs font-semibold uppercase tracking-wider text-slate-600 dark:text-zinc-400">
+                  Clear Height (mm)
+                </label>
+                <span className="text-[10px] text-slate-400 dark:text-zinc-500">10m</span>
+              </div>
+              <input
+                id="clearHeightMm"
+                name="clearHeightMm"
+                type="number"
+                min={1}
+                defaultValue={10_000}
+                className="mt-1.5 block w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2 text-sm text-slate-900 shadow-sm transition focus:border-teal-600 focus:outline-none focus:ring-2 focus:ring-teal-600/20 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:focus:border-teal-500"
+              />
+            </div>
+
+            <button
+              type="submit"
+              className="mt-2 flex w-full items-center justify-center rounded-lg bg-teal-600 px-4 py-2.5 text-sm font-semibold text-white shadow-md transition hover:bg-teal-500 active:bg-teal-700 dark:bg-teal-500 dark:hover:bg-teal-400"
+            >
+              Create Hall & Open Designer
             </button>
           </form>
         </div>

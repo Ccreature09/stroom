@@ -68,7 +68,7 @@ export function CreateLocationPanel({
 
         <div>
           <label className={labelClass} htmlFor="locationCode">Location code</label>
-          <input id="locationCode" name="locationCode" required autoFocus placeholder="WH1-BULK-04-12-3" className={inputClass} />
+          <input id="locationCode" name="locationCode" required placeholder="WH1-BULK-04-12-3" className={inputClass} />
         </div>
         <div>
           <label className={labelClass} htmlFor="zoneId">Zone</label>
@@ -229,6 +229,14 @@ export function EditLocationPanel({
       <button onClick={handleDelete} disabled={isDeleting} className="mt-3 w-full rounded-lg border border-red-200 px-4 py-2.5 text-sm font-semibold text-red-700 transition hover:bg-red-50 disabled:opacity-60">
         {isDeleting ? "Deleting…" : "Delete location"}
       </button>
+    </div>
+  );
+}
+
+export function EmptyLocationPanel() {
+  return (
+    <div className="flex h-full w-80 shrink-0 flex-col items-center justify-center border-l border-slate-200 bg-white p-5 text-center">
+      <p className="text-sm font-medium text-slate-500">Create or select a location to edit.</p>
     </div>
   );
 }

@@ -162,7 +162,7 @@ export default function RegistrationWizard() {
     <div className="mx-auto w-full max-w-2xl">
       <Stepper steps={STEP_LABELS} currentStep={step} />
 
-      <form action={formAction} className="mt-8 space-y-8">
+      <form action={formAction} noValidate className="mt-8 space-y-8">
         <div className={step === 0 ? "block" : "hidden"}>
           <OrganizationStep
             values={organization}

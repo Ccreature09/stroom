@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect,useState, useRef } from "react";
 import { Application, Container, Graphics, Text, TextStyle, type FederatedPointerEvent } from "pixi.js";
 import { Viewport } from "pixi-viewport";
 import type { HallDTO, LocationDTO } from "./types";
@@ -36,6 +36,24 @@ type LocationNode = {
 const HANDLE_CORNERS = ["nw", "ne", "se", "sw"] as const;
 type Corner = (typeof HANDLE_CORNERS)[number];
 
+function clampLocation(
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  hallWidth: number,
+  hallHeight: number
+) {
+  const clampedWidth = Math.min(width, hallWidth);
+  const clampedHeight = Math.min(height, hallHeight);
+  return {
+    x: Math.max(0, Math.min(x, hallWidth - clampedWidth)),
+    y: Math.max(0, Math.min(y, hallHeight - clampedHeight)),
+    width: clampedWidth,
+    height: clampedHeight,
+  };
+}
+
 export default function LayoutDesignerCanvas({
   hall,
   locations,
@@ -52,6 +70,27 @@ export default function LayoutDesignerCanvas({
   const handleLayerRef = useRef<Container | null>(null);
   const nodesRef = useRef<Map<number, LocationNode>>(new Map());
   const handlesRef = useRef<Graphics[]>([]);
+  const scaleTextRef = useRef<HTMLSpanElement>(null);
+  const scaleBarRef = useRef<HTMLDivElement>(null);
+  const minFitScaleRef = useRef<number>(0.05);
+  const [isReady, setIsReady] = useState(false);
+
+  function handleZoomIn() {
+    const vp = viewportRef.current;
+    if (!vp) return;
+    const absoluteMax = Math.max(8, minFitScaleRef.current * 1.5);
+    const targetScale = Math.min(vp.scale.x * 1.5, absoluteMax);
+    vp.setZoom(targetScale);
+    updateScaleBar(vp);
+  }
+
+  function handleZoomOut() {
+    const vp = viewportRef.current;
+    if (!vp) return;
+    const targetScale = Math.max(vp.scale.x / 1.5, minFitScaleRef.current);
+    vp.setZoom(targetScale);
+    updateScaleBar(vp);
+  }
 
   // Keep latest callbacks/props in refs so the Pixi event handlers (attached
   // once) never see stale closures without having to tear the app down.
@@ -106,12 +145,21 @@ export default function LayoutDesignerCanvas({
       app.stage.addChild(viewport);
       viewportRef.current = viewport;
 
+      // 1. Calculate the exact scale needed to fit the hall perfectly
+      const scaleX = el.clientWidth / hall.physicalWidthMm;
+      const scaleY = el.clientHeight / hall.physicalLengthMm;
+      const minFitScale = Math.min(scaleX, scaleY);
+      minFitScaleRef.current = minFitScale;
+
       viewport
         .drag()
         .pinch()
         .wheel()
         .decelerate({ friction: 0.9 });
-      viewport.clampZoom({ minScale: 0.05, maxScale: 8 });
+      
+      // 2. Ensure maxScale is NEVER smaller than minFitScale to prevent silent Pixi errors
+      const safeMaxScale = Math.max(8, minFitScale * 1.5);
+      viewport.clampZoom({ minScale: minFitScale, maxScale: safeMaxScale });
       viewport.clamp({ direction: "all", underflow: "center" });
 
       // --- static background: hall floor ---
@@ -166,6 +214,37 @@ export default function LayoutDesignerCanvas({
         }
       }
 
+      function updateScaleUI() {
+        if (!viewportRef.current || !scaleTextRef.current || !scaleBarRef.current) return;
+        const currentScale = viewportRef.current.scale.x;
+
+        // Target an approximate visual width on screen (e.g., ~80 pixels)
+        const targetPx = 80;
+        const worldMm = targetPx / currentScale;
+        const worldMeters = worldMm / 1000;
+
+        // Find the closest "round" map scale step (1m, 2m, 5m, 10m, etc.)
+        const steps = [0.1, 0.5, 1, 2, 5, 10, 20, 50, 100];
+        let bestStep = steps[0];
+        let minDiff = Infinity;
+        for (const step of steps) {
+          const diff = Math.abs(Math.log(worldMeters / step));
+          if (diff < minDiff) {
+            minDiff = diff;
+            bestStep = step;
+          }
+        }
+
+        // Calculate exact pixel width for this rounded step
+        const actualPx = (bestStep * 1000) * currentScale;
+
+        scaleTextRef.current.innerText = bestStep >= 1 ? `${bestStep}m` : `${bestStep * 100}cm`;
+        scaleBarRef.current.style.width = `${actualPx}px`;
+      }
+
+      viewport.on("zoomed", drawDynamicGrid);
+      viewport.on("zoomed", updateScaleUI); // Attach to zoom events
+
       // Redraw grid dynamically on zoom
       viewport.on("zoomed", drawDynamicGrid);
 
@@ -179,9 +258,14 @@ export default function LayoutDesignerCanvas({
 
       viewport.fit(true);
       viewport.moveCenter(hall.physicalWidthMm / 2, hall.physicalLengthMm / 2);
+
+      viewport.on("zoomed", () => updateScaleBar(viewport!));
+      viewport.on("moved", () => updateScaleBar(viewport!));
       
       // Draw the initial grid based on the starting zoom after fitting
       drawDynamicGrid();
+      updateScaleUI();
+      setIsReady(true);
 
       // --- draw-new-location interactions (rubber-band rectangle) ---
       viewport.eventMode = "static";
@@ -224,11 +308,20 @@ export default function LayoutDesignerCanvas({
           drawRef.current = null;
           if (w >= MIN_LOCATION_MM && h >= MIN_LOCATION_MM) {
             const snap = (v: number) => Math.round(v / 100) * 100;
+            const clamped = clampLocation(
+              snap(x),
+              snap(y),
+              snap(w),
+              snap(h),
+              hall.physicalWidthMm,
+              hall.physicalLengthMm
+            );
+
             stateRef.current.onDraftDrawn({
-              physicalX: snap(Math.max(0, x)),
-              physicalY: snap(Math.max(0, y)),
-              physicalWidthMm: snap(w),
-              physicalLengthMm: snap(h),
+              physicalX: clamped.x,
+              physicalY: clamped.y,
+              physicalWidthMm: clamped.width,
+              physicalLengthMm: clamped.height,
             });
           }
           return;
@@ -241,8 +334,10 @@ export default function LayoutDesignerCanvas({
       viewport.on("pointerupoutside", cancelDraw);
     })();
 
+
     return () => {
       destroyed = true;
+      setIsReady(false);
       nodesRef.current.clear();
       handlesRef.current = [];
       const app = appRef.current;
@@ -279,6 +374,8 @@ export default function LayoutDesignerCanvas({
   // create/update/delete server action revalidates the page).
   // ---------------------------------------------------------------------
   useEffect(() => {
+    if (!isReady) return;
+
     const layer = locationLayerRef.current;
     if (!layer) return;
 
@@ -386,7 +483,7 @@ export default function LayoutDesignerCanvas({
     updateLabelVisibility();
     rebuildHandles();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [locations]);
+  }, [locations, isReady]);
 
   // ---------------------------------------------------------------------
   // Selection change -> rebuild resize handles for the selected location.
@@ -488,6 +585,38 @@ export default function LayoutDesignerCanvas({
   // Attached once to the app stage so drags keep tracking even if the
   // pointer leaves the original hit area.
   // ---------------------------------------------------------------------
+
+  const updateScaleBar = (vp: Viewport) => {
+    if (!scaleTextRef.current || !scaleBarRef.current) return;
+    const scale = vp.scale.x;
+    
+    const targetPx = 80;
+    const mmAtTarget = targetPx / scale;
+
+    const niceValuesMm = [10, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000, 100000];
+    
+    let bestMm = niceValuesMm[0];
+    let minDiff = Math.abs(mmAtTarget - bestMm);
+    for (const val of niceValuesMm) {
+      const diff = Math.abs(mmAtTarget - val);
+      if (diff < minDiff) {
+        minDiff = diff;
+        bestMm = val;
+      }
+    }
+
+    const actualPx = bestMm * scale;
+    scaleBarRef.current.style.width = `${actualPx}px`;
+
+    if (bestMm >= 1000) {
+      scaleTextRef.current.innerText = `${bestMm / 1000}m`;
+    } else if (bestMm >= 10) {
+      scaleTextRef.current.innerText = `${bestMm / 10}cm`;
+    } else {
+      scaleTextRef.current.innerText = `${bestMm}mm`;
+    }
+  };
+
   useEffect(() => {
     const app = appRef.current;
     // Effect body re-runs after every location sync; app may not exist yet
@@ -507,8 +636,17 @@ export default function LayoutDesignerCanvas({
           const dy = world.y - drag.startWorldY;
           const nextX = Math.max(0, drag.originX + dx);
           const nextY = Math.max(0, drag.originY + dy);
-          node.loc = { ...node.loc, physicalX: nextX, physicalY: nextY };
-          node.container.position.set(nextX, nextY);
+          const clamped = clampLocation(
+            nextX,
+            nextY,
+            node.loc.physicalWidthMm,
+            node.loc.physicalLengthMm,
+            hall.physicalWidthMm,
+            hall.physicalLengthMm
+          );
+
+          node.loc = { ...node.loc, physicalX: clamped.x, physicalY: clamped.y };
+          node.container.position.set(clamped.x, clamped.y);
         }
         return;
       }
@@ -545,6 +683,8 @@ export default function LayoutDesignerCanvas({
         }
       }
     }
+
+    
 
     function handleUp() {
       const drag = dragRef.current;
@@ -586,13 +726,66 @@ export default function LayoutDesignerCanvas({
     viewport.on("zoomed", rebuildHandles);
 
     return () => {
-      app.stage.off("pointermove", handleMove);
-      app.stage.off("pointerup", handleUp);
-      app.stage.off("pointerupoutside", handleUp);
-      viewport.off("zoomed", updateLabelVisibility);
-      viewport.off("zoomed", rebuildHandles);
+      const currentApp = appRef.current;
+      const currentViewport = viewportRef.current;
+
+      if (currentApp && currentApp.stage) {
+        currentApp.stage.off("pointermove", handleMove);
+        currentApp.stage.off("pointerup", handleUp);
+        currentApp.stage.off("pointerupoutside", handleUp);
+      }
+      if (currentViewport) {
+        currentViewport.off("zoomed", updateLabelVisibility);
+        currentViewport.off("zoomed", rebuildHandles);
+      }
     };
   }, [locations, selectedLocationId]);
 
-  return <div ref={containerRef} className="h-full w-full overflow-hidden rounded-xl border border-slate-200 bg-white/60" />;
+  return (
+    <div className="relative flex h-full w-full overflow-hidden rounded-xl border border-slate-200 bg-white/60">
+      
+      {/* CANVAS LAYER: Strictly confined to the background context */}
+      <div ref={containerRef} className="relative z-0 h-full w-full" />
+
+      {/* UI OVERLAY: Strictly forced to the top layer */}
+      <div className="pointer-events-none absolute right-4 top-4 z-50 flex flex-col items-end gap-3">
+        
+        {/* Dynamic Map Scale */}
+        <div className="flex flex-col items-end gap-1 rounded-md bg-white/90 p-1.5 shadow-sm backdrop-blur-md">
+          <span ref={scaleTextRef} className="text-[10px] font-bold leading-none text-slate-700">
+            {/* Populated by Pixi zoomed event */}
+          </span>
+          <div
+            ref={scaleBarRef}
+            className="h-1.5 border-x-2 border-b-2 border-slate-800"
+            style={{ width: "80px" }}
+          />
+        </div>
+
+        {/* Zoom Controls */}
+        <div className="pointer-events-auto flex flex-col overflow-hidden rounded-lg border border-slate-300 bg-white shadow-md">
+          <button
+            onClick={handleZoomIn}
+            className="flex h-8 w-8 items-center justify-center text-slate-700 transition-colors hover:bg-slate-100 active:bg-slate-200"
+            title="Zoom In"
+          >
+            <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
+            </svg>
+          </button>
+          <div className="h-px w-full bg-slate-200" />
+          <button
+            onClick={handleZoomOut}
+            className="flex h-8 w-8 items-center justify-center text-slate-700 transition-colors hover:bg-slate-100 active:bg-slate-200"
+            title="Zoom Out"
+          >
+            <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M20 12H4" />
+            </svg>
+          </button>
+        </div>
+        
+      </div>
+    </div>
+  );
 }

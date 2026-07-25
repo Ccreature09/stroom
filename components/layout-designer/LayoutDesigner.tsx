@@ -3,7 +3,8 @@
 import { useMemo, useState } from "react";
 import HallToolbar from "./HallToolbar";
 import LayoutDesignerCanvas, { type Tool } from "./LayoutDesignerCanvas";
-import { CreateLocationPanel, EditLocationPanel } from "./LocationPanel";
+// Added EmptyLocationPanel to the imports here:
+import { CreateLocationPanel, EditLocationPanel, EmptyLocationPanel } from "./LocationPanel";
 import { updateLocationGeometry } from "@/app/dashboard/warehouses/[warehouseId]/layout-designer/actions";
 import type { DraftGeometry, HallDTO, LocationDTO, ZoneTypeDTO } from "./types";
 
@@ -45,7 +46,9 @@ export default function LayoutDesigner({
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white/40">
+    <div className="flex h-full min-h-0 flex-1 flex-row overflow-hidden rounded-xl border border-slate-200 bg-white/40">
+      
+      {/* 1. Left Sidebar: Toolbar */}
       <HallToolbar
         warehouseId={warehouseId}
         halls={halls}
@@ -54,8 +57,10 @@ export default function LayoutDesigner({
         tool={tool}
         onToolChange={handleToolChange}
       />
-      <div className="flex min-h-0 flex-1">
-        <div className="min-w-0 flex-1 p-3">
+      
+      {/* 2. Middle Column: Centered restricted-size canvas */}
+      <div className="flex min-w-0 flex-1 items-center justify-center p-6 bg-slate-50/50">
+        <div className="h-[600px] w-full max-w-5xl overflow-hidden rounded-xl shadow-sm">
           <LayoutDesignerCanvas
             hall={hall}
             locations={locations}
@@ -68,25 +73,29 @@ export default function LayoutDesigner({
             }}
           />
         </div>
-        {draft && (
-          <CreateLocationPanel
-            warehouseId={warehouseId}
-            hallId={hall.hallId}
-            draft={draft}
-            zoneTypes={zoneTypes}
-            onClose={() => setDraft(null)}
-          />
-        )}
-        {!draft && selectedLocation && (
-          <EditLocationPanel
-            warehouseId={warehouseId}
-            location={selectedLocation}
-            zoneTypes={zoneTypes}
-            onClose={() => setSelectedLocationId(null)}
-            onDeleted={() => setSelectedLocationId(null)}
-          />
-        )}
       </div>
+
+      {/* 3. Right Sidebar: Permanently mounted Location Panel */}
+      {draft ? (
+        <CreateLocationPanel
+          warehouseId={warehouseId}
+          hallId={hall.hallId}
+          draft={draft}
+          zoneTypes={zoneTypes}
+          onClose={() => setDraft(null)}
+        />
+      ) : selectedLocation ? (
+        <EditLocationPanel
+          warehouseId={warehouseId}
+          location={selectedLocation}
+          zoneTypes={zoneTypes}
+          onClose={() => setSelectedLocationId(null)}
+          onDeleted={() => setSelectedLocationId(null)}
+        />
+      ) : (
+        <EmptyLocationPanel />
+      )}
+      
     </div>
   );
 }

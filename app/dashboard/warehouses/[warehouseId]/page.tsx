@@ -12,6 +12,7 @@ export default async function WarehouseDashboardPage({
 }) {
   const { warehouseId } = await params;
   const parsedWarehouseId = Number(warehouseId);
+  console.log(parsedWarehouseId);
   if (!Number.isInteger(parsedWarehouseId) || parsedWarehouseId <= 0) {
     redirect("/dashboard/warehouses");
   }
