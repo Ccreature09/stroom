@@ -12,7 +12,6 @@ export default async function WarehouseDashboardPage({
 }) {
   const { warehouseId } = await params;
   const parsedWarehouseId = Number(warehouseId);
-  console.log(parsedWarehouseId);
   if (!Number.isInteger(parsedWarehouseId) || parsedWarehouseId <= 0) {
     redirect("/dashboard/warehouses");
   }
@@ -26,6 +25,10 @@ export default async function WarehouseDashboardPage({
     .select({
       organizationId: employees.organizationId,
       canManageUsers: positionTypes.canManageUsers,
+      canModifyConfigs: positionTypes.canModifyConfigs,
+      canModifyLayout: positionTypes.canModifyLayout,
+      // Add or adjust additional permission flags here as needed
+      canViewMetrics: positionTypes.canViewMetrics,
     })
     .from(employees)
     .innerJoin(positionTypes, eq(employees.positionId, positionTypes.positionId))
@@ -71,32 +74,99 @@ export default async function WarehouseDashboardPage({
         </header>
 
         <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+          {/* Core Configuration & Management Modules */}
+          {employee.canModifyConfigs ? (
+            <Link
+              href={`/dashboard/warehouses/${warehouse.warehouseId}/configs`}
+              className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm transition hover:-translate-y-0.5 hover:border-teal-300 hover:shadow-md"
+            >
+              <h2 className="text-lg font-bold text-slate-950">Warehouse Configs</h2>
+              <p className="mt-2 text-sm text-slate-600">Manage warehouse-level operating rules and behaviors.</p>
+              <span className="mt-4 inline-flex text-sm font-semibold text-teal-700">Open module →</span>
+            </Link>
+          ) : null}
+
+          {employee.canManageUsers ? (
+            <Link
+              href={`/dashboard/warehouses/${warehouse.warehouseId}/people-roles`}
+              className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm transition hover:-translate-y-0.5 hover:border-teal-300 hover:shadow-md"
+            >
+              <h2 className="text-lg font-bold text-slate-950">People & Roles</h2>
+              <p className="mt-2 text-sm text-slate-600">Assign and monitor team members working in this facility.</p>
+              <span className="mt-4 inline-flex text-sm font-semibold text-teal-700">Open module →</span>
+            </Link>
+          ) : null}
+
+          {employee.canModifyLayout ? (
+            <Link
+              href={`/dashboard/warehouses/${warehouse.warehouseId}/layout-designer`}
+              className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm transition hover:-translate-y-0.5 hover:border-teal-300 hover:shadow-md"
+            >
+              <h2 className="text-lg font-bold text-slate-950">Layout Designer</h2>
+              <p className="mt-2 text-sm text-slate-600">Define zones, aisles, bins and physical warehouse structure.</p>
+              <span className="mt-4 inline-flex text-sm font-semibold text-teal-700">Open module →</span>
+            </Link>
+          ) : null}
+
+          {/* 1. Master Data & Partners */}
           <Link
-            href={`/dashboard/warehouses/${warehouse.warehouseId}/configs`}
+            href={`/dashboard/warehouses/${warehouse.warehouseId}/master-data`}
             className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm transition hover:-translate-y-0.5 hover:border-teal-300 hover:shadow-md"
           >
-            <h2 className="text-lg font-bold text-slate-950">Warehouse Configs</h2>
-            <p className="mt-2 text-sm text-slate-600">Manage warehouse-level operating rules and behaviors.</p>
+            <h2 className="text-lg font-bold text-slate-950">Master Data & Partners</h2>
+            <p className="mt-2 text-sm text-slate-600">Manage items, suppliers, customers, and carriers.</p>
             <span className="mt-4 inline-flex text-sm font-semibold text-teal-700">Open module →</span>
           </Link>
 
-          <article className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-            <h2 className="text-lg font-bold text-slate-950">People & Roles</h2>
-            <p className="mt-2 text-sm text-slate-600">Assign and monitor team members working in this facility.</p>
-            {employee.canManageUsers ? (
-              <Link href={`/dashboard/warehouses/${warehouse.warehouseId}/people-roles`} className="mt-4 inline-flex text-sm font-semibold text-teal-700 hover:text-teal-800">
-                Open people manager
-              </Link>
-            ) : null}
-          </article>
+          {/* 2. Inventory Control */}
+          <Link
+            href={`/dashboard/warehouses/${warehouse.warehouseId}/inventory`}
+            className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm transition hover:-translate-y-0.5 hover:border-teal-300 hover:shadow-md"
+          >
+            <h2 className="text-lg font-bold text-slate-950">Inventory Control</h2>
+            <p className="mt-2 text-sm text-slate-600">Track live stock balances, LPN pallets, and movement logs.</p>
+            <span className="mt-4 inline-flex text-sm font-semibold text-teal-700">Open module →</span>
+          </Link>
 
-          <article className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-            <h2 className="text-lg font-bold text-slate-950">Layout Designer</h2>
-            <p className="mt-2 text-sm text-slate-600">Define zones, aisles, bins, and physical warehouse structure.</p>
-            <Link href={`/dashboard/warehouses/${warehouse.warehouseId}/layout-designer`} className="mt-4 inline-flex text-sm font-semibold text-teal-700 hover:text-teal-800">
-              Open layout designer
-            </Link>
-          </article>
+          {/* 3. Inbound Logistics */}
+          <Link
+            href={`/dashboard/warehouses/${warehouse.warehouseId}/inbound`}
+            className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm transition hover:-translate-y-0.5 hover:border-teal-300 hover:shadow-md"
+          >
+            <h2 className="text-lg font-bold text-slate-950">Inbound Logistics</h2>
+            <p className="mt-2 text-sm text-slate-600">Handle purchase orders, receiving, dock booking, and putaway.</p>
+            <span className="mt-4 inline-flex text-sm font-semibold text-teal-700">Open module →</span>
+          </Link>
+
+          {/* 4. Outbound Logistics */}
+          <Link
+            href={`/dashboard/warehouses/${warehouse.warehouseId}/outbound`}
+            className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm transition hover:-translate-y-0.5 hover:border-teal-300 hover:shadow-md"
+          >
+            <h2 className="text-lg font-bold text-slate-950">Outbound Logistics</h2>
+            <p className="mt-2 text-sm text-slate-600">Process sales orders, picking tasks, staging, and shipments.</p>
+            <span className="mt-4 inline-flex text-sm font-semibold text-teal-700">Open module →</span>
+          </Link>
+
+          {/* 5. Internal Operations & Audits */}
+          <Link
+            href={`/dashboard/warehouses/${warehouse.warehouseId}/internal-ops`}
+            className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm transition hover:-translate-y-0.5 hover:border-teal-300 hover:shadow-md"
+          >
+            <h2 className="text-lg font-bold text-slate-950">Internal Operations</h2>
+            <p className="mt-2 text-sm text-slate-600">Execute stock replenishments, cycle counting, and inventory audits.</p>
+            <span className="mt-4 inline-flex text-sm font-semibold text-teal-700">Open module →</span>
+          </Link>
+
+          {/* 6. Task Control Engine */}
+          <Link
+            href={`/dashboard/warehouses/${warehouse.warehouseId}/task-control`}
+            className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm transition hover:-translate-y-0.5 hover:border-teal-300 hover:shadow-md"
+          >
+            <h2 className="text-lg font-bold text-slate-950">Task Control Engine</h2>
+            <p className="mt-2 text-sm text-slate-600">Central queue to monitor, prioritize, and dispatch operational tasks.</p>
+            <span className="mt-4 inline-flex text-sm font-semibold text-teal-700">Open module →</span>
+          </Link>
         </section>
       </div>
     </main>

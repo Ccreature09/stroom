@@ -827,6 +827,7 @@ export const positionTypes = pgTable("position_types", {
 	canVoidShipments: boolean("can_void_shipments").default(false),
 	canManageUsers: boolean("can_manage_users").default(false),
 	canModifyConfigs: boolean("can_modify_configs").default(false),
+	canModifyLayout: boolean("can_modify_layout").default(false),
 	warehouseId: integer("warehouse_id"),
 }, (table) => [
 	index("idx_position_types_warehouse_id").using("btree", table.warehouseId.asc().nullsLast().op("int4_ops")),

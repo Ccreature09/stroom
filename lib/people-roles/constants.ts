@@ -16,6 +16,7 @@ export const PERMISSION_FIELDS = [
   "canVoidShipments",
   "canManageUsers",
   "canModifyConfigs",
+  "canModifyLayout"
 ] as const;
 
 export type PermissionField = (typeof PERMISSION_FIELDS)[number];
@@ -38,4 +39,5 @@ export const PERMISSION_LABELS: Record<PermissionField, string> = {
   canVoidShipments: "Void shipments",
   canManageUsers: "Manage users",
   canModifyConfigs: "Modify configs",
+  canModifyLayout: "Modify Layout"
 };

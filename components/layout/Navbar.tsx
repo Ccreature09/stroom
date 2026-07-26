@@ -1,4 +1,3 @@
-// components/layout/Navbar.tsx
 import Link from "next/link";
 import { createClient } from "@/lib/server";
 import UserDropdown from "./UserDropdown";
