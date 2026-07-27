@@ -25,7 +25,10 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Plus, Check, MousePointer, SquarePlus } from "lucide-react";
+import { Plus, Check, MousePointer, SquarePlus, Layers } from "lucide-react";
+
+import { BulkGenerateDialog } from "./bulk-generator-dialog";
+import { Separator } from "@/components/ui/separator";
 
 export default function HallToolbar({
   warehouseId,
@@ -47,6 +50,7 @@ export default function HallToolbar({
   const [showNewZone, setShowNewZone] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [savedMessage, setSavedMessage] = useState(false);
+  const [showBulkGenerate, setShowBulkGenerate] = useState(false);
 
   function handleSaveMap() {
     setIsSaving(true);
@@ -95,9 +99,7 @@ export default function HallToolbar({
             New Hall
           </Button>
         </div>
-
-        <div className="h-px w-full bg-border" />
-
+        <Separator />
         {/* Tools Group */}
         <div className="flex flex-col gap-2">
           <Label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
@@ -124,9 +126,21 @@ export default function HallToolbar({
             </Button>
           </div>
         </div>
-
-        <div className="h-px w-full bg-border" />
-
+        <div className="flex flex-col gap-2">
+          <Label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+            Bulk Generate
+          </Label>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setShowBulkGenerate(true)}
+            className="w-full justify-start text-xs"
+          >
+            <Layers className="mr-1.5 h-3.5 w-3.5" />
+            Rackings / floor lines / shelving
+          </Button>
+        </div>
+        <Separator></Separator>
         {/* Zones Group */}
         <div className="flex flex-col gap-2">
           <Label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
@@ -156,6 +170,15 @@ export default function HallToolbar({
             </Button>
           </div>
         </div>
+        {showBulkGenerate && (
+          <BulkGenerateDialog
+            warehouseId={warehouseId}
+            hall={halls.find((h) => h.hallId === selectedHallId) ?? halls[0]}
+            zoneTypes={zoneTypes}
+            open={showBulkGenerate}
+            onOpenChange={setShowBulkGenerate}
+          />
+        )}
       </div>
 
       {/* Save Map Button */}

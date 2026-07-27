@@ -394,3 +394,421 @@ async function zoneBelongsToWarehouse(zoneId: number, warehouseId: number) {
     .limit(1);
   return Boolean(row);
 }
+
+// ---------------------------------------------------------------------------
+// Bulk location generation (rackings, floor lines, shelving)
+// ---------------------------------------------------------------------------
+
+type BulkGeneratorType = "racking" | "floor_line" | "shelving";
+type Orientation = "horizontal" | "vertical";
+
+type BulkLocationDraft = {
+  locationCode: string;
+  zoneId: number | null;
+  aisle: number | null;
+  bay: number | null;
+  level: number | null;
+  physicalX: number;
+  physicalY: number;
+  physicalWidthMm: number;
+  physicalLengthMm: number;
+};
+
+export type BulkGenerateResult = {
+  error?: string;
+  success?: true;
+  created?: number;
+  skipped?: number;
+  total?: number;
+};
+
+function padNumber(value: number, width: number) {
+  return String(value).padStart(width, "0");
+}
+
+function readRequiredPositiveInt(
+  formData: FormData,
+  key: string,
+): number | null {
+  const raw = formData.get(key);
+  if (raw === null || String(raw).trim() === "") return null;
+  const parsed = Number(raw);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function readOptionalPositiveInt(
+  formData: FormData,
+  key: string,
+  fallback: number,
+): number | null {
+  const raw = formData.get(key);
+  if (raw === null || String(raw).trim() === "") return fallback;
+  const parsed = Number(raw);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function readOptionalNonNegativeInt(
+  formData: FormData,
+  key: string,
+  fallback: number,
+): number | null {
+  const raw = formData.get(key);
+  if (raw === null || String(raw).trim() === "") return fallback;
+  const parsed = Number(raw);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function buildRackingLocations(params: {
+  codePrefix: string;
+  aisleCount: number;
+  aisleStart: number;
+  bayCount: number;
+  bayStart: number;
+  levelCount: number;
+  levelStart: number;
+  bayWidthMm: number;
+  bayDepthMm: number;
+  aisleGapMm: number;
+  bayGapMm: number;
+  startX: number;
+  startY: number;
+  orientation: Orientation;
+  zoneId: number | null;
+}): BulkLocationDraft[] {
+  const drafts: BulkLocationDraft[] = [];
+  for (let i = 0; i < params.aisleCount; i++) {
+    const aisleNum = params.aisleStart + i;
+    for (let j = 0; j < params.bayCount; j++) {
+      const bayNum = params.bayStart + j;
+
+      let x: number, y: number, width: number, length: number;
+      if (params.orientation === "horizontal") {
+        // Aisles stack vertically (rows); bays extend left-to-right within a row.
+        x = params.startX + j * (params.bayWidthMm + params.bayGapMm);
+        y = params.startY + i * (params.bayDepthMm + params.aisleGapMm);
+        width = params.bayWidthMm;
+        length = params.bayDepthMm;
+      } else {
+        // Aisles sit side-by-side (columns); bays extend top-to-bottom within a column.
+        x = params.startX + i * (params.bayDepthMm + params.aisleGapMm);
+        y = params.startY + j * (params.bayWidthMm + params.bayGapMm);
+        width = params.bayDepthMm;
+        length = params.bayWidthMm;
+      }
+
+      // Every level in a bay shares the same floor footprint -- only the code
+      // and level number differ, mirroring a real vertical rack column.
+      for (let k = 0; k < params.levelCount; k++) {
+        const levelNum = params.levelStart + k;
+        drafts.push({
+          locationCode: `${params.codePrefix}-${padNumber(aisleNum, 2)}-${padNumber(bayNum, 2)}-${padNumber(levelNum, 2)}`,
+          zoneId: params.zoneId,
+          aisle: aisleNum,
+          bay: bayNum,
+          level: levelNum,
+          physicalX: Math.round(x),
+          physicalY: Math.round(y),
+          physicalWidthMm: Math.round(width),
+          physicalLengthMm: Math.round(length),
+        });
+      }
+    }
+  }
+  return drafts;
+}
+
+function buildFloorLineLocations(params: {
+  codePrefix: string;
+  slotCount: number;
+  slotStart: number;
+  slotWidthMm: number;
+  slotDepthMm: number;
+  gapMm: number;
+  startX: number;
+  startY: number;
+  orientation: Orientation;
+  zoneId: number | null;
+}): BulkLocationDraft[] {
+  const drafts: BulkLocationDraft[] = [];
+  for (let s = 0; s < params.slotCount; s++) {
+    const slotNum = params.slotStart + s;
+    const x =
+      params.orientation === "horizontal"
+        ? params.startX + s * (params.slotWidthMm + params.gapMm)
+        : params.startX;
+    const y =
+      params.orientation === "horizontal"
+        ? params.startY
+        : params.startY + s * (params.slotDepthMm + params.gapMm);
+
+    drafts.push({
+      locationCode: `${params.codePrefix}-${padNumber(slotNum, 2)}`,
+      zoneId: params.zoneId,
+      aisle: null,
+      bay: slotNum,
+      level: null,
+      physicalX: Math.round(x),
+      physicalY: Math.round(y),
+      physicalWidthMm: Math.round(params.slotWidthMm),
+      physicalLengthMm: Math.round(params.slotDepthMm),
+    });
+  }
+  return drafts;
+}
+
+function buildShelvingLocations(params: {
+  codePrefix: string;
+  bayCount: number;
+  bayStart: number;
+  levelCount: number;
+  levelStart: number;
+  bayWidthMm: number;
+  bayDepthMm: number;
+  bayGapMm: number;
+  startX: number;
+  startY: number;
+  orientation: Orientation;
+  zoneId: number | null;
+}): BulkLocationDraft[] {
+  const drafts: BulkLocationDraft[] = [];
+  for (let j = 0; j < params.bayCount; j++) {
+    const bayNum = params.bayStart + j;
+    let x: number, y: number, width: number, length: number;
+    if (params.orientation === "horizontal") {
+      x = params.startX + j * (params.bayWidthMm + params.bayGapMm);
+      y = params.startY;
+      width = params.bayWidthMm;
+      length = params.bayDepthMm;
+    } else {
+      x = params.startX;
+      y = params.startY + j * (params.bayWidthMm + params.bayGapMm);
+      width = params.bayDepthMm;
+      length = params.bayWidthMm;
+    }
+
+    for (let k = 0; k < params.levelCount; k++) {
+      const levelNum = params.levelStart + k;
+      drafts.push({
+        locationCode: `${params.codePrefix}-${padNumber(bayNum, 2)}-${padNumber(levelNum, 2)}`,
+        zoneId: params.zoneId,
+        aisle: null,
+        bay: bayNum,
+        level: levelNum,
+        physicalX: Math.round(x),
+        physicalY: Math.round(y),
+        physicalWidthMm: Math.round(width),
+        physicalLengthMm: Math.round(length),
+      });
+    }
+  }
+  return drafts;
+}
+
+export async function bulkGenerateLocations(
+  formData: FormData,
+): Promise<BulkGenerateResult> {
+  const warehouseId = parsePositiveInt(formData.get("warehouseId"));
+  const hallId = parsePositiveInt(formData.get("hallId"));
+  if (!warehouseId || !hallId) return { error: "Missing warehouse or hall." };
+
+  try {
+    await requireLayoutContext(warehouseId);
+  } catch (err) {
+    return { error: (err as Error).message };
+  }
+
+  if (!(await hallBelongsToWarehouse(hallId, warehouseId))) {
+    return { error: "Selected hall does not belong to this warehouse." };
+  }
+
+  const generatorType = String(
+    formData.get("generatorType") ?? "",
+  ) as BulkGeneratorType;
+
+  const codePrefix = String(formData.get("codePrefix") ?? "")
+    .trim()
+    .toUpperCase();
+  if (!codePrefix) return { error: "A location code prefix is required." };
+  if (codePrefix.length > 40)
+    return { error: "Code prefix must be 40 characters or fewer." };
+
+  const zoneId = parsePositiveInt(formData.get("zoneId"));
+  if (zoneId !== null && !(await zoneBelongsToWarehouse(zoneId, warehouseId))) {
+    return { error: "Selected zone does not belong to this warehouse." };
+  }
+
+  const orientation: Orientation =
+    formData.get("orientation") === "vertical" ? "vertical" : "horizontal";
+
+  const startX = readOptionalNonNegativeInt(formData, "startX", 0);
+  const startY = readOptionalNonNegativeInt(formData, "startY", 0);
+  if (startX === null || startY === null) {
+    return { error: "Start X/Y must be whole numbers." };
+  }
+
+  let drafts: BulkLocationDraft[] = [];
+
+  if (generatorType === "racking") {
+    const aisleCount = readRequiredPositiveInt(formData, "aisleCount");
+    const bayCount = readRequiredPositiveInt(formData, "bayCount");
+    const levelCount = readRequiredPositiveInt(formData, "levelCount");
+    const bayWidthMm = readRequiredPositiveInt(formData, "bayWidthMm");
+    const bayDepthMm = readRequiredPositiveInt(formData, "bayDepthMm");
+    if (!aisleCount || !bayCount || !levelCount || !bayWidthMm || !bayDepthMm) {
+      return {
+        error:
+          "Aisle count, bay count, level count, and bay dimensions must all be positive whole numbers.",
+      };
+    }
+    const aisleStart = readOptionalPositiveInt(formData, "aisleStart", 1);
+    const bayStart = readOptionalPositiveInt(formData, "bayStart", 1);
+    const levelStart = readOptionalPositiveInt(formData, "levelStart", 1);
+    const aisleGapMm = readOptionalNonNegativeInt(formData, "aisleGapMm", 2000);
+    const bayGapMm = readOptionalNonNegativeInt(formData, "bayGapMm", 0);
+    if (aisleStart === null || bayStart === null || levelStart === null) {
+      return { error: "Start numbers must be positive whole numbers." };
+    }
+    if (aisleGapMm === null || bayGapMm === null) {
+      return { error: "Gap values must be whole numbers." };
+    }
+
+    drafts = buildRackingLocations({
+      codePrefix,
+      aisleCount,
+      aisleStart,
+      bayCount,
+      bayStart,
+      levelCount,
+      levelStart,
+      bayWidthMm,
+      bayDepthMm,
+      aisleGapMm,
+      bayGapMm,
+      startX,
+      startY,
+      orientation,
+      zoneId,
+    });
+  } else if (generatorType === "floor_line") {
+    const slotCount = readRequiredPositiveInt(formData, "slotCount");
+    const slotWidthMm = readRequiredPositiveInt(formData, "slotWidthMm");
+    const slotDepthMm = readRequiredPositiveInt(formData, "slotDepthMm");
+    if (!slotCount || !slotWidthMm || !slotDepthMm) {
+      return {
+        error: "Slot count and slot dimensions must be positive whole numbers.",
+      };
+    }
+    const slotStart = readOptionalPositiveInt(formData, "slotStart", 1);
+    const gapMm = readOptionalNonNegativeInt(formData, "gapMm", 200);
+    if (slotStart === null)
+      return { error: "Slot start must be a positive whole number." };
+    if (gapMm === null) return { error: "Gap must be a whole number." };
+
+    drafts = buildFloorLineLocations({
+      codePrefix,
+      slotCount,
+      slotStart,
+      slotWidthMm,
+      slotDepthMm,
+      gapMm,
+      startX,
+      startY,
+      orientation,
+      zoneId,
+    });
+  } else if (generatorType === "shelving") {
+    const bayCount = readRequiredPositiveInt(formData, "bayCount");
+    const levelCount = readRequiredPositiveInt(formData, "levelCount");
+    const bayWidthMm = readRequiredPositiveInt(formData, "bayWidthMm");
+    const bayDepthMm = readRequiredPositiveInt(formData, "bayDepthMm");
+    if (!bayCount || !levelCount || !bayWidthMm || !bayDepthMm) {
+      return {
+        error:
+          "Bay count, level count, and shelf dimensions must be positive whole numbers.",
+      };
+    }
+    const bayStart = readOptionalPositiveInt(formData, "bayStart", 1);
+    const levelStart = readOptionalPositiveInt(formData, "levelStart", 1);
+    const bayGapMm = readOptionalNonNegativeInt(formData, "bayGapMm", 0);
+    if (bayStart === null || levelStart === null) {
+      return { error: "Start numbers must be positive whole numbers." };
+    }
+    if (bayGapMm === null) return { error: "Gap must be a whole number." };
+
+    drafts = buildShelvingLocations({
+      codePrefix,
+      bayCount,
+      bayStart,
+      levelCount,
+      levelStart,
+      bayWidthMm,
+      bayDepthMm,
+      bayGapMm,
+      startX,
+      startY,
+      orientation,
+      zoneId,
+    });
+  } else {
+    return { error: "Unknown generator type." };
+  }
+
+  if (drafts.length === 0) {
+    return {
+      error: "No locations to generate -- check the counts you entered.",
+    };
+  }
+  if (drafts.length > 2000) {
+    return {
+      error: `That would generate ${drafts.length} locations in one batch -- please keep batches to 2000 or fewer.`,
+    };
+  }
+
+  // Guard against duplicate codes colliding within this same batch.
+  const seen = new Set<string>();
+  for (const draft of drafts) {
+    if (seen.has(draft.locationCode)) {
+      return {
+        error: `Generated codes collide (e.g. "${draft.locationCode}"). Adjust the start numbers or prefix.`,
+      };
+    }
+    seen.add(draft.locationCode);
+  }
+
+  // location_code is globally unique, so skip rows that collide with existing
+  // locations (e.g. re-running a generator over the same range) instead of
+  // failing the whole batch.
+  const inserted = await db
+    .insert(locations)
+    .values(
+      drafts.map((draft) => ({
+        warehouseId,
+        hallId,
+        zoneId: draft.zoneId,
+        locationCode: draft.locationCode,
+        aisle: draft.aisle,
+        bay: draft.bay,
+        level: draft.level,
+        physicalX: draft.physicalX,
+        physicalY: draft.physicalY,
+        physicalWidthMm: draft.physicalWidthMm,
+        physicalLengthMm: draft.physicalLengthMm,
+        rotationDegrees: 0,
+      })),
+    )
+    .onConflictDoNothing({ target: locations.locationCode })
+    .returning({ locationId: locations.locationId });
+
+  revalidateLayout(warehouseId);
+
+  const created = inserted.length;
+  const skipped = drafts.length - created;
+
+  if (created === 0) {
+    return {
+      error: `None of the ${drafts.length} location codes could be created -- they already exist. Try a different prefix or start number.`,
+    };
+  }
+
+  return { success: true, created, skipped, total: drafts.length };
+}
