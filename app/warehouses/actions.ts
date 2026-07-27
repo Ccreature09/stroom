@@ -9,7 +9,7 @@ import { createClient } from "@/lib/server";
 
 function buildReturnUrl(status: "success" | "error", message: string) {
   const params = new URLSearchParams({ status, message });
-  return `/dashboard/warehouses?${params.toString()}`;
+  return `/warehouses?${params.toString()}`;
 }
 
 function parsePositiveInt(value: FormDataEntryValue | null) {
@@ -36,7 +36,7 @@ async function requireManageUsersContext() {
     .limit(1);
 
   if (!employee) redirect("/sign-in");
-  if (employee.canManageUsers !== true) redirect("/dashboard");
+  if (employee.canManageUsers !== true) redirect("/warehouses");
 
   return employee;
 }
@@ -78,7 +78,7 @@ export async function createWarehouse(formData: FormData) {
     });
   });
 
-  revalidatePath("/dashboard/warehouses");
+  revalidatePath("/warehouses");
   redirect(buildReturnUrl("success", "Warehouse created."));
 }
 
@@ -122,8 +122,8 @@ export async function updateWarehouse(formData: FormData) {
     redirect(buildReturnUrl("error", "Warehouse not found for your organization."));
   }
 
-  revalidatePath("/dashboard/warehouses");
-  revalidatePath(`/dashboard/warehouses/${warehouseId}`);
+  revalidatePath("/warehouses");
+  revalidatePath(`/warehouses/${warehouseId}`);
   redirect(buildReturnUrl("success", "Warehouse updated."));
 }
 
@@ -145,7 +145,7 @@ export async function deleteWarehouse(formData: FormData) {
       redirect(buildReturnUrl("error", "Warehouse not found for your organization."));
     }
 
-    revalidatePath("/dashboard/warehouses");
+    revalidatePath("/warehouses");
     redirect(buildReturnUrl("success", "Warehouse deleted."));
   } catch {
     redirect(
@@ -172,5 +172,5 @@ export async function signInAction(formData: FormData) {
     return { error: "We couldn’t sign you in with those details. Please try again." };
   }
 
-  redirect("/dashboard");
+  redirect("/warehouses");
 }
