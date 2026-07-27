@@ -9,7 +9,7 @@ import { createClient } from "@/lib/server";
 
 function buildReturnUrl(warehouseId: number, status: "success" | "error", message: string) {
   const params = new URLSearchParams({ status, message });
-  return `/dashboard/warehouses/${warehouseId}/configs?${params.toString()}`;
+  return `/warehouses/${warehouseId}/configs?${params.toString()}`;
 }
 
 function parsePositiveInt(value: FormDataEntryValue | null) {
@@ -54,7 +54,7 @@ async function requireWarehouseContext(warehouseId: number) {
     .where(and(eq(warehouses.warehouseId, warehouseId), eq(warehouses.organizationId, employee.organizationId)))
     .limit(1);
 
-  if (!warehouse) redirect("/dashboard/warehouses");
+  if (!warehouse) redirect("/warehouses");
 
   return {
     employee,
@@ -64,7 +64,7 @@ async function requireWarehouseContext(warehouseId: number) {
 
 export async function updateWarehouseConfig(formData: FormData) {
   const warehouseId = parsePositiveInt(formData.get("warehouseId"));
-  if (!warehouseId) redirect("/dashboard/warehouses");
+  if (!warehouseId) redirect("/warehouses");
 
   const { employee, warehouse } = await requireWarehouseContext(warehouseId);
   if (employee.canModifyConfigs !== true) {
@@ -129,8 +129,8 @@ export async function updateWarehouseConfig(formData: FormData) {
       .where(eq(warehouseConfigs.configId, targetConfigId));
   });
 
-  revalidatePath("/dashboard/warehouses");
-  revalidatePath(`/dashboard/warehouses/${warehouseId}`);
-  revalidatePath(`/dashboard/warehouses/${warehouseId}/configs`);
+  revalidatePath("/warehouses");
+  revalidatePath(`/warehouses/${warehouseId}`);
+  revalidatePath(`/warehouses/${warehouseId}/configs`);
   redirect(buildReturnUrl(warehouseId, "success", "Warehouse config updated."));
 }
