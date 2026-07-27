@@ -10,8 +10,14 @@ import {
   type FederatedPointerEvent,
 } from "pixi.js";
 import { Viewport } from "pixi-viewport";
-import type { HallDTO, LocationDTO } from "./types";
-import { colorForZone, groupByBayFootprint } from "./types";
+import type { HallDTO, LocationDTO, ZoneTypeDTO } from "./types";
+import {
+  groupByBayFootprint,
+  groupKeyFor,
+  locationIdsInAisle,
+  locationIdsInGroup,
+  resolveZoneColor,
+} from "./types";
 
 import { Button } from "@/components/ui/button";
 import { ZoomIn, ZoomOut } from "lucide-react";
@@ -20,7 +26,7 @@ const MIN_LOCATION_MM = 200;
 const HANDLE_SCREEN_SIZE = 9;
 const LABEL_ZOOM_THRESHOLD = 0.55;
 
-export type Tool = "select" | "draw";
+export type Tool = "select" | "pan" | "transform" | "draw";
 export type Geometry = {
   physicalX: number;
   physicalY: number;
@@ -28,14 +34,19 @@ export type Geometry = {
   physicalLengthMm: number;
 };
 export type GeometryWithRotation = Geometry & { rotationDegrees: number };
+export type GeometryUpdate = Geometry & { locationId: number };
 
 type Props = {
   hall: HallDTO;
   locations: LocationDTO[];
+  zoneTypes: ZoneTypeDTO[];
   selectedLocationId: number | null;
   selectedLocationIds: number[];
   activeLevel: number | null;
+  availableLevels: number[];
+  onLevelChange: (level: number) => void;
   tool: Tool;
+  locked: boolean;
   onSelect: (locationId: number | null) => void;
   onMultiSelect: (locationIds: number[]) => void;
   onDraftDrawn: (geometry: Geometry) => void;
@@ -43,6 +54,8 @@ type Props = {
     locationId: number,
     geometry: GeometryWithRotation,
   ) => void;
+  onGroupMove: (locationIds: number[], deltaX: number, deltaY: number) => void;
+  onGroupResize: (updates: GeometryUpdate[]) => void;
 };
 
 type LocationNode = {
@@ -115,18 +128,45 @@ function resolveVisibleLocations(
 
   return { visible, memberCountByLocationId };
 }
+const PENDING_CREATE_COLOR = 0xf59e0b;
+
+function strokeForNode(locationId: number, isSelected: boolean) {
+  if (locationId < 0) {
+    return { width: isSelected ? 45 : 24, color: PENDING_CREATE_COLOR };
+  }
+  return {
+    width: isSelected ? 45 : 18,
+    color: isSelected ? 0x0f172a : 0x1e293b,
+  };
+}
+
+function formatFootprint(
+  w: number,
+  h: number,
+  x: number,
+  y: number,
+  rotation: number,
+) {
+  return `${Math.round(w)}mm × ${Math.round(h)}mm at (${Math.round(x)}, ${Math.round(y)}) · ${rotation}°`;
+}
 
 export default function LayoutDesignerCanvas({
   hall,
   locations,
+  zoneTypes,
   selectedLocationId,
   selectedLocationIds,
   activeLevel,
+  availableLevels,
+  onLevelChange,
   tool,
+  locked,
   onSelect,
   onMultiSelect,
   onDraftDrawn,
   onGeometryChange,
+  onGroupMove,
+  onGroupResize,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const appRef = useRef<Application | null>(null);
@@ -135,8 +175,11 @@ export default function LayoutDesignerCanvas({
   const handleLayerRef = useRef<Container | null>(null);
   const nodesRef = useRef<Map<number, LocationNode>>(new Map());
   const handlesRef = useRef<Graphics[]>([]);
+  const handleCornerGraphicsRef = useRef<Partial<Record<Corner, Graphics>>>({});
+  const handleOutlineRef = useRef<Graphics | null>(null);
   const scaleTextRef = useRef<HTMLSpanElement>(null);
   const scaleBarRef = useRef<HTMLDivElement>(null);
+  const coordOverlayRef = useRef<HTMLDivElement>(null);
   const minFitScaleRef = useRef<number>(0.05);
   const [isReady, setIsReady] = useState(false);
   const [initError, setInitError] = useState<string | null>(null);
@@ -158,6 +201,21 @@ export default function LayoutDesignerCanvas({
     updateScaleBar(vp);
   }
 
+  function showCoordOverlay(screenX: number, screenY: number, text: string) {
+    const el = coordOverlayRef.current;
+    if (!el) return;
+    el.textContent = text;
+    el.style.left = `${screenX + 14}px`;
+    el.style.top = `${screenY + 14}px`;
+    el.style.display = "block";
+  }
+
+  function hideCoordOverlay() {
+    const el = coordOverlayRef.current;
+    if (!el) return;
+    el.style.display = "none";
+  }
+
   const stateRef = useRef({
     tool,
     selectedLocationId,
@@ -166,6 +224,8 @@ export default function LayoutDesignerCanvas({
     onMultiSelect,
     onDraftDrawn,
     onGeometryChange,
+    onGroupMove,
+    onGroupResize,
     hall,
   });
   stateRef.current = {
@@ -176,11 +236,22 @@ export default function LayoutDesignerCanvas({
     onMultiSelect,
     onDraftDrawn,
     onGeometryChange,
+    onGroupMove,
+    onGroupResize,
     hall,
   };
 
   const locationsRef = useRef(locations);
   locationsRef.current = locations;
+
+  const zoneTypesRef = useRef(zoneTypes);
+  zoneTypesRef.current = zoneTypes;
+
+  function colorForLocation(zoneId: number | null): number {
+    if (zoneId == null) return resolveZoneColor(null);
+    const zone = zoneTypesRef.current.find((z) => z.zoneId === zoneId);
+    return resolveZoneColor(zone ?? { zoneId, color: null });
+  }
 
   const activeLevelRef = useRef(activeLevel);
   activeLevelRef.current = activeLevel;
@@ -205,12 +276,29 @@ export default function LayoutDesignerCanvas({
     originW: number;
     originH: number;
   }>(null);
-  // Drag-to-select box (only active in "select" tool, when the pointer-down
-  // did not land on an existing location container).
+
   const boxSelectRef = useRef<null | {
     startWorldX: number;
     startWorldY: number;
     rect: Graphics;
+  }>(null);
+  const groupDragRef = useRef<null | {
+    memberNodeIds: number[];
+    fullLocationIds: number[];
+    startWorldX: number;
+    startWorldY: number;
+    origins: Map<number, { x: number; y: number }>;
+    originBBox: { x: number; y: number; w: number; h: number };
+  }>(null);
+  // Aisle-level group resize: scaling the group's aggregate bounding box
+  // proportionally rescales every member location relative to the fixed
+  // opposite corner.
+  const groupResizeRef = useRef<null | {
+    aisle: number;
+    corner: Corner;
+    memberNodeIds: number[];
+    originBBox: { x: number; y: number; w: number; h: number };
+    originGeoms: Map<number, { x: number; y: number; w: number; h: number }>;
   }>(null);
 
   function fittedFontSize(widthMm: number, lengthMm: number) {
@@ -218,6 +306,128 @@ export default function LayoutDesignerCanvas({
     // never overflows a narrow bay, but stays readable in larger footprints.
     const raw = Math.min(widthMm, lengthMm) * 0.28;
     return Math.max(90, Math.min(raw, 420));
+  }
+
+  // ---------------------------------------------------------------------
+  // Shared commit helpers -- these run both when a pointerup lands directly
+  // on the node/handle that started the gesture (its own listener) AND, as a
+  // fallback, when it lands elsewhere on the stage (app.stage's listener).
+  // Both paths null-check the ref so double-firing is a harmless no-op.
+  // ---------------------------------------------------------------------
+
+  function commitSingleDrag() {
+    const drag = dragRef.current;
+    if (!drag) return;
+    dragRef.current = null;
+    hideCoordOverlay();
+    const node = nodesRef.current.get(drag.locationId);
+    if (node) {
+      stateRef.current.onGeometryChange(drag.locationId, {
+        physicalX: node.loc.physicalX,
+        physicalY: node.loc.physicalY,
+        physicalWidthMm: node.loc.physicalWidthMm,
+        physicalLengthMm: node.loc.physicalLengthMm,
+        rotationDegrees: node.loc.rotationDegrees,
+      });
+    }
+  }
+
+  function commitSingleResize() {
+    const resize = resizeRef.current;
+    if (!resize) return;
+    resizeRef.current = null;
+    hideCoordOverlay();
+    const node = nodesRef.current.get(resize.locationId);
+    if (node) {
+      stateRef.current.onGeometryChange(resize.locationId, {
+        physicalX: node.loc.physicalX,
+        physicalY: node.loc.physicalY,
+        physicalWidthMm: node.loc.physicalWidthMm,
+        physicalLengthMm: node.loc.physicalLengthMm,
+        rotationDegrees: node.loc.rotationDegrees,
+      });
+    }
+  }
+
+  function commitGroupDrag() {
+    const drag = groupDragRef.current;
+    if (!drag) return;
+    groupDragRef.current = null;
+    hideCoordOverlay();
+    const firstId = drag.memberNodeIds[0];
+    if (firstId == null) return;
+    const node = nodesRef.current.get(firstId);
+    const origin = drag.origins.get(firstId);
+    if (!node || !origin) return;
+    const dx = node.loc.physicalX - origin.x;
+    const dy = node.loc.physicalY - origin.y;
+    if (dx !== 0 || dy !== 0) {
+      stateRef.current.onGroupMove(drag.fullLocationIds, dx, dy);
+    }
+  }
+
+  // Grouping rule for click/marquee selection: racking locations expand to
+  // their full aisle (all bays/levels); shelf and floor storage locations
+  // expand to their zone+type group (the same grouping already used for
+  // move/delete elsewhere in the app). Anything else selects just itself.
+  function resolveGroupIds(locationId: number): number[] {
+    const loc = locationsRef.current.find((l) => l.locationId === locationId);
+    if (!loc) return [locationId];
+    if (loc.isRacking && loc.aisle != null) {
+      return locationIdsInAisle(locationsRef.current, loc.aisle);
+    }
+    if (loc.isShelf || loc.isFloorStorage) {
+      return locationIdsInGroup(locationsRef.current, groupKeyFor(loc));
+    }
+    return [locationId];
+  }
+
+  function resolveSelectionForHits(hitIds: number[]): number[] {
+    const result = new Set<number>();
+    for (const id of hitIds) {
+      for (const gid of resolveGroupIds(id)) result.add(gid);
+    }
+    return Array.from(result);
+  }
+
+  function commitGroupResize() {
+    const resize = groupResizeRef.current;
+    if (!resize) return;
+    groupResizeRef.current = null;
+    hideCoordOverlay();
+
+    const geomByBay = new Map<
+      string,
+      { x: number; y: number; w: number; h: number }
+    >();
+    for (const id of resize.memberNodeIds) {
+      const node = nodesRef.current.get(id);
+      if (!node) continue;
+      const bayKey = `${node.loc.aisle ?? "x"}:${node.loc.bay ?? "x"}`;
+      geomByBay.set(bayKey, {
+        x: node.loc.physicalX,
+        y: node.loc.physicalY,
+        w: node.loc.physicalWidthMm,
+        h: node.loc.physicalLengthMm,
+      });
+    }
+
+    const updates: GeometryUpdate[] = [];
+    for (const loc of locationsRef.current) {
+      if (!loc.isRacking || loc.aisle !== resize.aisle) continue;
+      const bayKey = `${loc.aisle ?? "x"}:${loc.bay ?? "x"}`;
+      const geom = geomByBay.get(bayKey);
+      if (!geom) continue;
+      updates.push({
+        locationId: loc.locationId,
+        physicalX: geom.x,
+        physicalY: geom.y,
+        physicalWidthMm: geom.w,
+        physicalLengthMm: geom.h,
+      });
+    }
+
+    if (updates.length > 0) stateRef.current.onGroupResize(updates);
   }
 
   function syncLocationNodes(
@@ -267,59 +477,73 @@ export default function LayoutDesignerCanvas({
         container.eventMode = "static";
         container.cursor = "pointer";
         container.on("pointerdown", (e: FederatedPointerEvent) => {
-          if (stateRef.current.tool !== "select") return;
+          if (e.button !== 0) return;
+          if (stateRef.current.tool !== "transform") return;
           e.stopPropagation();
-          stateRef.current.onSelect(loc.locationId);
           const viewport = viewportRef.current;
           if (!viewport) return;
           const world = viewport.toWorld(e.global);
           const current = nodesRef.current.get(loc.locationId);
           if (!current) return;
-          dragRef.current = {
-            locationId: loc.locationId,
-            startWorldX: world.x,
-            startWorldY: world.y,
-            originX: current.loc.physicalX,
-            originY: current.loc.physicalY,
-          };
+
+          const fullLocationIds = resolveGroupIds(current.loc.locationId);
+
+          if (fullLocationIds.length > 1) {
+            const groupIdSet = new Set(fullLocationIds);
+            const memberNodeIds: number[] = [];
+            const origins = new Map<number, { x: number; y: number }>();
+            let minX = Infinity,
+              minY = Infinity,
+              maxX = -Infinity,
+              maxY = -Infinity;
+            for (const [id, n] of nodesRef.current) {
+              if (groupIdSet.has(id)) {
+                memberNodeIds.push(id);
+                origins.set(id, { x: n.loc.physicalX, y: n.loc.physicalY });
+                minX = Math.min(minX, n.loc.physicalX);
+                minY = Math.min(minY, n.loc.physicalY);
+                maxX = Math.max(maxX, n.loc.physicalX + n.loc.physicalWidthMm);
+                maxY = Math.max(maxY, n.loc.physicalY + n.loc.physicalLengthMm);
+              }
+            }
+            stateRef.current.onMultiSelect(fullLocationIds);
+            groupDragRef.current = {
+              memberNodeIds,
+              fullLocationIds,
+              startWorldX: world.x,
+              startWorldY: world.y,
+              origins,
+              originBBox: {
+                x: minX,
+                y: minY,
+                w: maxX - minX,
+                h: maxY - minY,
+              },
+            };
+          } else {
+            stateRef.current.onSelect(loc.locationId);
+            dragRef.current = {
+              locationId: loc.locationId,
+              startWorldX: world.x,
+              startWorldY: world.y,
+              originX: current.loc.physicalX,
+              originY: current.loc.physicalY,
+            };
+          }
         });
 
         container.on("pointerup", (e: FederatedPointerEvent) => {
-          if (stateRef.current.tool !== "select") return;
+          if (stateRef.current.tool !== "transform") return;
           e.stopPropagation();
-          const drag = dragRef.current;
-          if (drag) {
-            dragRef.current = null;
-            const draggedNode = nodesRef.current.get(drag.locationId);
-            if (draggedNode) {
-              stateRef.current.onGeometryChange(drag.locationId, {
-                physicalX: draggedNode.loc.physicalX,
-                physicalY: draggedNode.loc.physicalY,
-                physicalWidthMm: draggedNode.loc.physicalWidthMm,
-                physicalLengthMm: draggedNode.loc.physicalLengthMm,
-                rotationDegrees: draggedNode.loc.rotationDegrees,
-              });
-            }
-          }
+          commitSingleDrag();
+          commitGroupDrag();
         });
 
         container.on("pointerupoutside", (e: FederatedPointerEvent) => {
-          if (stateRef.current.tool !== "select") return;
+          if (stateRef.current.tool !== "transform") return;
           e.stopPropagation();
-          const drag = dragRef.current;
-          if (drag) {
-            dragRef.current = null;
-            const draggedNode = nodesRef.current.get(drag.locationId);
-            if (draggedNode) {
-              stateRef.current.onGeometryChange(drag.locationId, {
-                physicalX: draggedNode.loc.physicalX,
-                physicalY: draggedNode.loc.physicalY,
-                physicalWidthMm: draggedNode.loc.physicalWidthMm,
-                physicalLengthMm: draggedNode.loc.physicalLengthMm,
-                rotationDegrees: draggedNode.loc.rotationDegrees,
-              });
-            }
-          }
+          commitSingleDrag();
+          commitGroupDrag();
         });
         node = {
           container,
@@ -338,15 +562,12 @@ export default function LayoutDesignerCanvas({
       const isSelected =
         loc.locationId === selectedId ||
         stateRef.current.selectedLocationIds.includes(loc.locationId);
-      const color = colorForZone(loc.zoneId);
+      const color = colorForLocation(loc.zoneId);
       node.box
         .clear()
         .rect(0, 0, loc.physicalWidthMm, loc.physicalLengthMm)
         .fill({ color, alpha: loc.isBlocked ? 0.25 : 0.55 })
-        .stroke({
-          width: isSelected ? 45 : 18,
-          color: isSelected ? 0x0f172a : 0x1e293b,
-        });
+        .stroke(strokeForNode(loc.locationId, isSelected));
       node.container.position.set(loc.physicalX, loc.physicalY);
       node.container.pivot.set(0, 0);
       node.container.angle = loc.rotationDegrees;
@@ -388,6 +609,8 @@ export default function LayoutDesignerCanvas({
     if (!el) return;
 
     let destroyed = false;
+    let forceCancelInteractions: (() => void) | null = null;
+    let cancelBoxSelectOnLeave: (() => void) | null = null;
     const app = new Application();
 
     (async () => {
@@ -430,6 +653,9 @@ export default function LayoutDesignerCanvas({
       minFitScaleRef.current = minFitScale;
 
       viewport.drag().pinch().wheel().decelerate({ friction: 0.9 });
+      // Actual enable/disable of the drag plugin is driven entirely by the
+      // [tool] effect below (only "pan" keeps it active) -- start paused.
+      viewport.plugins.pause("drag");
 
       const safeMaxScale = Math.max(8, minFitScale * 1.5);
       viewport.clampZoom({ minScale: minFitScale, maxScale: safeMaxScale });
@@ -509,6 +735,8 @@ export default function LayoutDesignerCanvas({
       // A pointerdown that lands on the bare viewport (not a location
       // container, which calls e.stopPropagation()) starts either a draw
       // rectangle (in "draw" mode) or a drag-select box (in "select" mode).
+      // Marquee applies anywhere within the canvas/viewport bounds, even
+      // outside the drawn hall floor rect.
       viewport.on("pointerdown", (e: FederatedPointerEvent) => {
         if (e.button !== 0) return;
         const world = viewport.toWorld(e.global);
@@ -524,7 +752,10 @@ export default function LayoutDesignerCanvas({
           return;
         }
 
-        if (stateRef.current.tool === "select") {
+        if (
+          stateRef.current.tool === "select" ||
+          stateRef.current.tool === "transform"
+        ) {
           const rect = new Graphics();
           viewport.addChild(rect);
           boxSelectRef.current = {
@@ -532,7 +763,6 @@ export default function LayoutDesignerCanvas({
             startWorldY: world.y,
             rect,
           };
-          viewport.plugins.pause("drag");
         }
       });
 
@@ -549,6 +779,11 @@ export default function LayoutDesignerCanvas({
             .rect(x, y, w, h)
             .fill({ color: 0x0891b2, alpha: 0.2 })
             .stroke({ width: 15, color: 0x0891b2 });
+          showCoordOverlay(
+            e.global.x,
+            e.global.y,
+            formatFootprint(w, h, x, y, 0),
+          );
           return;
         }
 
@@ -571,7 +806,19 @@ export default function LayoutDesignerCanvas({
         const draw = drawRef.current;
         drawRef.current = null;
         if (draw) draw.rect.destroy();
+        hideCoordOverlay();
       };
+
+      // Leaving the canvas viewport entirely mid-marquee cancels it outright
+      // (rather than letting it linger/commit on eventual release).
+      cancelBoxSelectOnLeave = () => {
+        const box = boxSelectRef.current;
+        if (box) {
+          box.rect.destroy();
+          boxSelectRef.current = null;
+        }
+      };
+      app.canvas.addEventListener("pointerleave", cancelBoxSelectOnLeave);
 
       viewport.on("pointerup", (e: FederatedPointerEvent) => {
         const draw = drawRef.current;
@@ -583,6 +830,7 @@ export default function LayoutDesignerCanvas({
           const h = Math.abs(world.y - draw.startWorldY);
           draw.rect.destroy();
           drawRef.current = null;
+          hideCoordOverlay();
           if (w >= MIN_LOCATION_MM && h >= MIN_LOCATION_MM) {
             const snap = (v: number) => Math.round(v / 100) * 100;
             const clamped = clampLocation(
@@ -613,12 +861,33 @@ export default function LayoutDesignerCanvas({
           const y1 = Math.max(box.startWorldY, world.y);
           box.rect.destroy();
           boxSelectRef.current = null;
-          viewport.plugins.resume("drag");
 
-          // Zero-area drags (a simple click that missed every container)
-          // clear selection instead of running a hit test.
+          // Near-zero-movement release: a genuine single click. Point-in-box
+          // hit test against the click location instead of an area
+          // intersection, and instead of unconditionally clearing selection.
           if (x1 - x0 < 5 && y1 - y0 < 5) {
-            stateRef.current.onSelect(null);
+            let hitId: number | null = null;
+            for (const [id, node] of nodesRef.current) {
+              const {
+                physicalX: lx,
+                physicalY: ly,
+                physicalWidthMm: lw,
+                physicalLengthMm: lh,
+              } = node.loc;
+              if (x0 >= lx && x0 <= lx + lw && y0 >= ly && y0 <= ly + lh) {
+                hitId = id;
+                break;
+              }
+            }
+            if (hitId == null) {
+              // Clicking empty canvas clears the current selection and any
+              // open transform handles/property drawer.
+              stateRef.current.onSelect(null);
+              return;
+            }
+            const group = resolveSelectionForHits([hitId]);
+            if (group.length > 1) stateRef.current.onMultiSelect(group);
+            else stateRef.current.onSelect(hitId);
             return;
           }
 
@@ -630,13 +899,16 @@ export default function LayoutDesignerCanvas({
               physicalWidthMm: lw,
               physicalLengthMm: lh,
             } = node.loc;
-            const withinBox =
-              lx >= x0 && ly >= y0 && lx + lw <= x1 && ly + lh <= y1;
-            if (withinBox) hits.push(id);
+            // AABB intersection -- a location is hit if the marquee touches
+            // any part of its bounding box, not only when it fully encloses it.
+            const intersects =
+              lx < x1 && lx + lw > x0 && ly < y1 && ly + lh > y0;
+            if (intersects) hits.push(id);
           }
 
-          if (hits.length > 1) stateRef.current.onMultiSelect(hits);
-          else if (hits.length === 1) stateRef.current.onSelect(hits[0]);
+          const group = resolveSelectionForHits(hits);
+          if (group.length > 1) stateRef.current.onMultiSelect(group);
+          else if (group.length === 1) stateRef.current.onSelect(group[0]);
           else stateRef.current.onSelect(null);
           return;
         }
@@ -646,6 +918,32 @@ export default function LayoutDesignerCanvas({
         }
       });
       viewport.on("pointerupoutside", cancelDraw);
+
+      // Global safety net: guarantees any in-flight marquee/draw/drag/resize
+      // interaction is torn down even if the pointerup lands outside the
+      // canvas entirely (side panel, toolbar, zoom controls) or the window
+      // loses focus (alt-tab, cursor leaves the browser) -- Pixi's own
+      // pointerupoutside only covers "outside the object, still over the
+      // canvas", not these cases.
+      forceCancelInteractions = () => {
+        const box = boxSelectRef.current;
+        if (box) {
+          box.rect.destroy();
+          boxSelectRef.current = null;
+        }
+        const draw = drawRef.current;
+        if (draw) {
+          draw.rect.destroy();
+          drawRef.current = null;
+        }
+        dragRef.current = null;
+        resizeRef.current = null;
+        groupDragRef.current = null;
+        groupResizeRef.current = null;
+        hideCoordOverlay();
+      };
+      window.addEventListener("pointerup", forceCancelInteractions);
+      window.addEventListener("blur", forceCancelInteractions);
 
       setIsReady(true);
 
@@ -667,6 +965,13 @@ export default function LayoutDesignerCanvas({
       viewportRef.current = null;
       locationLayerRef.current = null;
       handleLayerRef.current = null;
+      if (forceCancelInteractions) {
+        window.removeEventListener("pointerup", forceCancelInteractions);
+        window.removeEventListener("blur", forceCancelInteractions);
+      }
+      if (app && cancelBoxSelectOnLeave) {
+        app.canvas.removeEventListener("pointerleave", cancelBoxSelectOnLeave);
+      }
       if (viewport) {
         try {
           viewport.destroy();
@@ -689,8 +994,8 @@ export default function LayoutDesignerCanvas({
   useEffect(() => {
     const viewport = viewportRef.current;
     if (!viewport) return;
-    if (tool === "draw") viewport.plugins.pause("drag");
-    else viewport.plugins.resume("drag");
+    if (tool === "pan") viewport.plugins.resume("drag");
+    else viewport.plugins.pause("drag");
   }, [tool]);
 
   useEffect(() => {
@@ -704,18 +1009,15 @@ export default function LayoutDesignerCanvas({
     for (const [id, node] of nodesRef.current) {
       const isSelected =
         id === selectedLocationId || selectedLocationIds.includes(id);
-      const color = colorForZone(node.loc.zoneId);
+      const color = colorForLocation(node.loc.zoneId);
       node.box
         .clear()
         .rect(0, 0, node.loc.physicalWidthMm, node.loc.physicalLengthMm)
         .fill({ color, alpha: node.loc.isBlocked ? 0.25 : 0.55 })
-        .stroke({
-          width: isSelected ? 45 : 18,
-          color: isSelected ? 0x0f172a : 0x1e293b,
-        });
+        .stroke(strokeForNode(id, isSelected));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedLocationId, selectedLocationIds]);
+  }, [selectedLocationId, selectedLocationIds, tool]);
 
   function updateLabelVisibility() {
     const viewport = viewportRef.current;
@@ -734,17 +1036,103 @@ export default function LayoutDesignerCanvas({
 
     for (const h of handlesRef.current) h.destroy();
     handlesRef.current = [];
+    handleCornerGraphicsRef.current = {};
+    handleOutlineRef.current = null;
 
-    // Resize handles only make sense for a single selected location -- multi-
-    // select is restricted to move/delete, per spec.
-    if (selectedLocationIds.length > 1) return;
+    // Handles (single or group) only render in the Transform tool -- Select
+    // is inspection-only and Pan is pure viewport navigation.
+    if (tool !== "transform") return;
+
+    const worldSize = HANDLE_SCREEN_SIZE / viewport.scale.x;
+
+    if (selectedLocationIds.length > 1) {
+      // Aisle-level group bounding box + handles.
+      const memberNodes = selectedLocationIds
+        .map((id) => nodesRef.current.get(id))
+        .filter((n): n is LocationNode => Boolean(n));
+      if (memberNodes.length === 0) return;
+
+      let minX = Infinity,
+        minY = Infinity,
+        maxX = -Infinity,
+        maxY = -Infinity;
+      for (const node of memberNodes) {
+        minX = Math.min(minX, node.loc.physicalX);
+        minY = Math.min(minY, node.loc.physicalY);
+        maxX = Math.max(maxX, node.loc.physicalX + node.loc.physicalWidthMm);
+        maxY = Math.max(maxY, node.loc.physicalY + node.loc.physicalLengthMm);
+      }
+
+      const aisle = memberNodes[0].loc.aisle;
+      if (aisle == null) return;
+
+      const outline = new Graphics()
+        .rect(minX, minY, maxX - minX, maxY - minY)
+        .stroke({ width: worldSize * 0.4, color: 0x0891b2 });
+      handleLayer.addChild(outline);
+      handlesRef.current.push(outline);
+      handleOutlineRef.current = outline;
+
+      const corners: Record<Corner, [number, number]> = {
+        nw: [minX, minY],
+        ne: [maxX, minY],
+        se: [maxX, maxY],
+        sw: [minX, maxY],
+      };
+
+      for (const corner of HANDLE_CORNERS) {
+        const [cx, cy] = corners[corner];
+        const handle = new Graphics()
+          .rect(-worldSize, -worldSize, worldSize * 2, worldSize * 2)
+          .fill({ color: 0xffffff })
+          .stroke({ width: worldSize * 0.3, color: 0x0891b2 });
+        handle.position.set(cx, cy);
+        handle.eventMode = "static";
+        handle.cursor =
+          corner === "nw" || corner === "se" ? "nwse-resize" : "nesw-resize";
+
+        handle.on("pointerdown", (e: FederatedPointerEvent) => {
+          e.stopPropagation();
+          const originGeoms = new Map<
+            number,
+            { x: number; y: number; w: number; h: number }
+          >();
+          for (const node of memberNodes) {
+            originGeoms.set(node.loc.locationId, {
+              x: node.loc.physicalX,
+              y: node.loc.physicalY,
+              w: node.loc.physicalWidthMm,
+              h: node.loc.physicalLengthMm,
+            });
+          }
+          groupResizeRef.current = {
+            aisle,
+            corner,
+            memberNodeIds: memberNodes.map((n) => n.loc.locationId),
+            originBBox: { x: minX, y: minY, w: maxX - minX, h: maxY - minY },
+            originGeoms,
+          };
+        });
+
+        const handleGroupResizeUp = (e: FederatedPointerEvent) => {
+          e.stopPropagation();
+          commitGroupResize();
+        };
+        handle.on("pointerup", handleGroupResizeUp);
+        handle.on("pointerupoutside", handleGroupResizeUp);
+
+        handleLayer.addChild(handle);
+        handlesRef.current.push(handle);
+        handleCornerGraphicsRef.current[corner] = handle;
+      }
+      return;
+    }
 
     const node = selectedLocationId
       ? nodesRef.current.get(selectedLocationId)
       : undefined;
     if (!node) return;
 
-    const worldSize = HANDLE_SCREEN_SIZE / viewport.scale.x;
     const { physicalWidthMm: w, physicalLengthMm: h } = node.loc;
     const corners: Record<Corner, [number, number]> = {
       nw: [0, 0],
@@ -778,20 +1166,7 @@ export default function LayoutDesignerCanvas({
 
       const handleResizeUp = (e: FederatedPointerEvent) => {
         e.stopPropagation();
-        const resize = resizeRef.current;
-        if (resize) {
-          resizeRef.current = null;
-          const targetNode = nodesRef.current.get(resize.locationId);
-          if (targetNode) {
-            stateRef.current.onGeometryChange(resize.locationId, {
-              physicalX: targetNode.loc.physicalX,
-              physicalY: targetNode.loc.physicalY,
-              physicalWidthMm: targetNode.loc.physicalWidthMm,
-              physicalLengthMm: targetNode.loc.physicalLengthMm,
-              rotationDegrees: targetNode.loc.rotationDegrees,
-            });
-          }
-        }
+        commitSingleResize();
       };
 
       handle.on("pointerup", handleResizeUp);
@@ -799,6 +1174,60 @@ export default function LayoutDesignerCanvas({
 
       node.container.addChild(handle);
       handlesRef.current.push(handle);
+      handleCornerGraphicsRef.current[corner] = handle;
+    }
+  }
+
+  // Lightweight reposition path for the single-location resize gesture --
+  // updates the 4 existing corner handles in place (they're children of the
+  // resized node's own container, so only their local corner offset needs
+  // to change) without touching Graphics identity or listeners.
+  function repositionSingleHandles(w: number, h: number) {
+    const corners: Record<Corner, [number, number]> = {
+      nw: [0, 0],
+      ne: [w, 0],
+      se: [w, h],
+      sw: [0, h],
+    };
+    for (const corner of HANDLE_CORNERS) {
+      const g = handleCornerGraphicsRef.current[corner];
+      if (g) g.position.set(...corners[corner]);
+    }
+  }
+
+  // Lightweight reposition path for group drag/resize -- updates the
+  // existing outline + 4 corner handles to a new bounding box in place.
+  function repositionGroupHandles(bbox: {
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+  }) {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    const worldSize = HANDLE_SCREEN_SIZE / viewport.scale.x;
+    const minX = bbox.x;
+    const minY = bbox.y;
+    const maxX = bbox.x + bbox.w;
+    const maxY = bbox.y + bbox.h;
+
+    const outline = handleOutlineRef.current;
+    if (outline) {
+      outline
+        .clear()
+        .rect(minX, minY, maxX - minX, maxY - minY)
+        .stroke({ width: worldSize * 0.4, color: 0x0891b2 });
+    }
+
+    const corners: Record<Corner, [number, number]> = {
+      nw: [minX, minY],
+      ne: [maxX, minY],
+      se: [maxX, maxY],
+      sw: [minX, maxY],
+    };
+    for (const corner of HANDLE_CORNERS) {
+      const g = handleCornerGraphicsRef.current[corner];
+      if (g) g.position.set(...corners[corner]);
     }
   }
 
@@ -866,6 +1295,17 @@ export default function LayoutDesignerCanvas({
             physicalY: clamped.y,
           };
           node.container.position.set(clamped.x, clamped.y);
+          showCoordOverlay(
+            e.global.x,
+            e.global.y,
+            formatFootprint(
+              node.loc.physicalWidthMm,
+              node.loc.physicalLengthMm,
+              clamped.x,
+              clamped.y,
+              node.loc.rotationDegrees,
+            ),
+          );
         }
         return;
       }
@@ -905,44 +1345,146 @@ export default function LayoutDesignerCanvas({
           node.box
             .clear()
             .rect(0, 0, w, h)
-            .fill({ color: colorForZone(node.loc.zoneId), alpha: 0.55 })
-            .stroke({ width: 45, color: 0x0f172a });
+            .fill({ color: colorForLocation(node.loc.zoneId), alpha: 0.55 })
+            .stroke(strokeForNode(resize.locationId, true));
           node.label.style.fontSize = fittedFontSize(w, h);
           node.label.position.set(w / 2, h / 2);
-          rebuildHandles();
+          repositionSingleHandles(w, h);
+          showCoordOverlay(
+            e.global.x,
+            e.global.y,
+            formatFootprint(w, h, x, y, node.loc.rotationDegrees),
+          );
         }
+        return;
+      }
+
+      const groupDrag = groupDragRef.current;
+      if (groupDrag) {
+        const rawDx = world.x - groupDrag.startWorldX;
+        const rawDy = world.y - groupDrag.startWorldY;
+        // Clamp using the group's aggregate bounding box so every member's
+        // relative offset is preserved exactly (a single uniform delta).
+        const dx = Math.max(
+          -groupDrag.originBBox.x,
+          Math.min(
+            rawDx,
+            hall.physicalWidthMm -
+              (groupDrag.originBBox.x + groupDrag.originBBox.w),
+          ),
+        );
+        const dy = Math.max(
+          -groupDrag.originBBox.y,
+          Math.min(
+            rawDy,
+            hall.physicalLengthMm -
+              (groupDrag.originBBox.y + groupDrag.originBBox.h),
+          ),
+        );
+
+        for (const id of groupDrag.memberNodeIds) {
+          const node = nodesRef.current.get(id);
+          const origin = groupDrag.origins.get(id);
+          if (!node || !origin) continue;
+          const nextX = origin.x + dx;
+          const nextY = origin.y + dy;
+          node.loc = { ...node.loc, physicalX: nextX, physicalY: nextY };
+          node.container.position.set(nextX, nextY);
+        }
+        // The group bbox outline/handles are separate Graphics positioned at
+        // fixed absolute coordinates (unlike single-location handles, which
+        // are children of the dragged container and move for free) -- they
+        // need repositioning every move to track the drag in real time, but
+        // (unlike a full rebuildHandles()) this only updates their
+        // position/size in place, not their identity or listeners.
+        repositionGroupHandles({
+          x: groupDrag.originBBox.x + dx,
+          y: groupDrag.originBBox.y + dy,
+          w: groupDrag.originBBox.w,
+          h: groupDrag.originBBox.h,
+        });
+        showCoordOverlay(
+          e.global.x,
+          e.global.y,
+          `${Math.round(groupDrag.originBBox.w)}mm × ${Math.round(groupDrag.originBBox.h)}mm at (${Math.round(groupDrag.originBBox.x + dx)}, ${Math.round(groupDrag.originBBox.y + dy)}) · ${groupDrag.memberNodeIds.length} locations`,
+        );
+        return;
+      }
+
+      const groupResize = groupResizeRef.current;
+      if (groupResize) {
+        const { originBBox } = groupResize;
+        let { x, y, w, h } = originBBox;
+        const farX = originBBox.x + originBBox.w;
+        const farY = originBBox.y + originBBox.h;
+        if (groupResize.corner === "nw") {
+          w = Math.max(MIN_LOCATION_MM, farX - world.x);
+          h = Math.max(MIN_LOCATION_MM, farY - world.y);
+          x = farX - w;
+          y = farY - h;
+        } else if (groupResize.corner === "ne") {
+          w = Math.max(MIN_LOCATION_MM, world.x - originBBox.x);
+          h = Math.max(MIN_LOCATION_MM, farY - world.y);
+          y = farY - h;
+        } else if (groupResize.corner === "se") {
+          w = Math.max(MIN_LOCATION_MM, world.x - originBBox.x);
+          h = Math.max(MIN_LOCATION_MM, world.y - originBBox.y);
+        } else if (groupResize.corner === "sw") {
+          w = Math.max(MIN_LOCATION_MM, farX - world.x);
+          h = Math.max(MIN_LOCATION_MM, world.y - originBBox.y);
+          x = farX - w;
+        }
+
+        const sx = w / originBBox.w;
+        const sy = h / originBBox.h;
+        // Fixed anchor corner (opposite the one being dragged) -- matches
+        // the single-location resize anchor logic above.
+        const anchorX =
+          groupResize.corner === "ne" || groupResize.corner === "se"
+            ? originBBox.x
+            : farX;
+        const anchorY =
+          groupResize.corner === "sw" || groupResize.corner === "se"
+            ? originBBox.y
+            : farY;
+
+        for (const [id, geom] of groupResize.originGeoms) {
+          const node = nodesRef.current.get(id);
+          if (!node) continue;
+          const nextX = anchorX + (geom.x - anchorX) * sx;
+          const nextY = anchorY + (geom.y - anchorY) * sy;
+          const nextW = geom.w * sx;
+          const nextH = geom.h * sy;
+          node.loc = {
+            ...node.loc,
+            physicalX: nextX,
+            physicalY: nextY,
+            physicalWidthMm: nextW,
+            physicalLengthMm: nextH,
+          };
+          node.container.position.set(nextX, nextY);
+          node.box
+            .clear()
+            .rect(0, 0, nextW, nextH)
+            .fill({ color: colorForLocation(node.loc.zoneId), alpha: 0.55 })
+            .stroke(strokeForNode(id, true));
+          node.label.style.fontSize = fittedFontSize(nextW, nextH);
+          node.label.position.set(nextW / 2, nextH / 2);
+        }
+        repositionGroupHandles({ x, y, w, h });
+        showCoordOverlay(
+          e.global.x,
+          e.global.y,
+          `${Math.round(w)}mm × ${Math.round(h)}mm at (${Math.round(x)}, ${Math.round(y)}) · ${groupResize.memberNodeIds.length} locations`,
+        );
       }
     }
 
     function handleUp() {
-      const drag = dragRef.current;
-      if (drag) {
-        dragRef.current = null;
-        const node = nodesRef.current.get(drag.locationId);
-        if (node) {
-          stateRef.current.onGeometryChange(drag.locationId, {
-            physicalX: node.loc.physicalX,
-            physicalY: node.loc.physicalY,
-            physicalWidthMm: node.loc.physicalWidthMm,
-            physicalLengthMm: node.loc.physicalLengthMm,
-            rotationDegrees: node.loc.rotationDegrees,
-          });
-        }
-      }
-      const resize = resizeRef.current;
-      if (resize) {
-        resizeRef.current = null;
-        const node = nodesRef.current.get(resize.locationId);
-        if (node) {
-          stateRef.current.onGeometryChange(resize.locationId, {
-            physicalX: node.loc.physicalX,
-            physicalY: node.loc.physicalY,
-            physicalWidthMm: node.loc.physicalWidthMm,
-            physicalLengthMm: node.loc.physicalLengthMm,
-            rotationDegrees: node.loc.rotationDegrees,
-          });
-        }
-      }
+      commitSingleDrag();
+      commitSingleResize();
+      commitGroupDrag();
+      commitGroupResize();
     }
 
     app.stage.eventMode = "static";
@@ -980,6 +1522,26 @@ export default function LayoutDesignerCanvas({
           {initError}
         </div>
       )}
+
+      {/* Blocks all pointer interaction with the canvas while Save Map is in
+          flight -- without this, a drag/resize/draw during the save window
+          could dispatch a draft change that Save Map's unconditional
+          RESET_ALL would then silently discard once the save completes. */}
+      {locked && (
+        <div className="pointer-events-auto absolute inset-0 z-[60] flex items-center justify-center bg-background/60 backdrop-blur-[1px]">
+          <div className="flex items-center gap-2 rounded-md border bg-background px-3 py-1.5 text-xs font-medium shadow-md">
+            <span className="h-2 w-2 animate-pulse rounded-full bg-amber-500" />
+            Saving map…
+          </div>
+        </div>
+      )}
+
+      {/* Live coordinate overlay -- shown while drawing/dragging/resizing */}
+      <div
+        ref={coordOverlayRef}
+        className="pointer-events-none absolute z-50 hidden rounded-md bg-slate-900/90 px-2 py-1 text-[11px] font-medium text-white shadow-sm"
+        style={{ display: "none" }}
+      />
 
       {/* UI OVERLAY */}
       <div className="pointer-events-none absolute right-4 top-4 z-50 flex flex-col items-end gap-3">
@@ -1019,6 +1581,25 @@ export default function LayoutDesignerCanvas({
             <ZoomOut className="h-4 w-4" />
           </Button>
         </div>
+
+        {/* Level selector -- consolidated into the same HUD dock as the
+            scale indicator and zoom controls above, instead of a separately
+            positioned overlay. */}
+        {availableLevels.length > 0 && (
+          <div className="pointer-events-auto flex gap-1 rounded-lg border bg-background p-1 shadow-md">
+            {availableLevels.map((lvl) => (
+              <Button
+                key={lvl}
+                size="sm"
+                variant={lvl === activeLevel ? "default" : "ghost"}
+                onClick={() => onLevelChange(lvl)}
+                className="h-8 px-2 text-xs"
+              >
+                L{lvl}
+              </Button>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );
