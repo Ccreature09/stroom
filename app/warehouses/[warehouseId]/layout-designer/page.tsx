@@ -227,7 +227,6 @@ export default async function WarehouseLayoutDesignerPage({
         aisle: locations.aisle,
         bay: locations.bay,
         level: locations.level,
-        position: locations.position,
         heightMm: locations.heightMm,
         maxWeightKg: locations.maxWeightKg,
         isBlocked: locations.isBlocked,
@@ -237,6 +236,10 @@ export default async function WarehouseLayoutDesignerPage({
         physicalLengthMm: locations.physicalLengthMm,
         rotationDegrees: locations.rotationDegrees,
         floorLevel: locations.floorLevel,
+        isRacking: locations.isRacking, // Added
+        isShelf: locations.isShelf, // Added
+        isFloorStorage: locations.isFloorStorage, // Added
+        row: locations.row,
       })
       .from(locations)
       .where(

@@ -4,6 +4,8 @@ import { useState, useTransition } from "react";
 import type { DraftGeometry, LocationDTO, ZoneTypeDTO } from "./types";
 import {
   createLocation,
+  moveLocations,
+  deleteLocations,
   deleteLocation,
   updateLocationDetails,
   updateLocationGeometry,
@@ -22,6 +24,8 @@ import {
 } from "@/components/ui/select";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { RotateCw, Trash2, X } from "lucide-react";
+
+type LocationTypeValue = "racking" | "shelf" | "floor" | "none";
 
 function ZoneSelect({
   zoneTypes,
@@ -53,6 +57,39 @@ function ZoneSelect({
         </SelectContent>
       </Select>
     </>
+  );
+}
+
+function LocationTypeSelect({
+  defaultValue = "none",
+}: {
+  defaultValue?: LocationTypeValue;
+}) {
+  const [value, setValue] = useState<LocationTypeValue>(defaultValue);
+
+  return (
+    <div className="space-y-1.5">
+      <Label htmlFor="locationType">Location type</Label>
+      <input type="hidden" name="locationType" value={value} />
+      <Select
+        value={value}
+        onValueChange={(v) => setValue(v as LocationTypeValue)}
+      >
+        <SelectTrigger id="locationType" className="w-full">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="none">None</SelectItem>
+          <SelectItem value="racking">Racking</SelectItem>
+          <SelectItem value="shelf">Shelf</SelectItem>
+          <SelectItem value="floor">Floor storage</SelectItem>
+        </SelectContent>
+      </Select>
+      <p className="text-[11px] text-muted-foreground">
+        Setting a type groups this location with others of the same zone + type
+        -- they move and delete together.
+      </p>
+    </div>
   );
 }
 
@@ -132,11 +169,20 @@ export function CreateLocationPanel({
           <ZoneSelect zoneTypes={zoneTypes} />
         </div>
 
-        <div className="grid grid-cols-3 gap-2">
+        <LocationTypeSelect />
+
+        <div className="grid grid-cols-2 gap-2">
           <div className="space-y-1.5">
             <Label htmlFor="aisle">Aisle</Label>
             <Input id="aisle" name="aisle" type="number" />
           </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="row">Row (optional)</Label>
+            <Input id="row" name="row" type="number" min={1} />
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-2">
           <div className="space-y-1.5">
             <Label htmlFor="bay">Bay</Label>
             <Input id="bay" name="bay" type="number" />
@@ -202,6 +248,14 @@ export function EditLocationPanel({
   );
   const [isPending, startTransition] = useTransition();
   const [isDeleting, startDeleteTransition] = useTransition();
+
+  const initialType: LocationTypeValue = location.isRacking
+    ? "racking"
+    : location.isShelf
+      ? "shelf"
+      : location.isFloorStorage
+        ? "floor"
+        : "none";
 
   function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -298,7 +352,9 @@ export function EditLocationPanel({
           <ZoneSelect zoneTypes={zoneTypes} defaultValue={location.zoneId} />
         </div>
 
-        <div className="grid grid-cols-3 gap-2">
+        <LocationTypeSelect defaultValue={initialType} />
+
+        <div className="grid grid-cols-2 gap-2">
           <div className="space-y-1.5">
             <Label htmlFor="aisle">Aisle</Label>
             <Input
@@ -308,6 +364,19 @@ export function EditLocationPanel({
               defaultValue={location.aisle ?? undefined}
             />
           </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="row">Row (optional)</Label>
+            <Input
+              id="row"
+              name="row"
+              type="number"
+              min={1}
+              defaultValue={location.row ?? undefined}
+            />
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-2">
           <div className="space-y-1.5">
             <Label htmlFor="bay">Bay</Label>
             <Input
@@ -387,6 +456,131 @@ export function EditLocationPanel({
       >
         <Trash2 className="mr-1.5 h-3.5 w-3.5" />
         {isDeleting ? "Deleting…" : "Delete location"}
+      </Button>
+    </div>
+  );
+}
+
+export function MultiSelectPanel({
+  warehouseId,
+  locationIds,
+  onClose,
+  onDone,
+}: {
+  warehouseId: number;
+  locationIds: number[];
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const [error, setError] = useState<string>();
+  const [isPending, startTransition] = useTransition();
+
+  function handleMove(dx: number, dy: number) {
+    setError(undefined);
+    startTransition(async () => {
+      const result = await moveLocations(warehouseId, locationIds, dx, dy);
+      if (result?.error) setError(result.error);
+    });
+  }
+
+  function handleDelete() {
+    if (
+      !confirm(
+        `Delete ${locationIds.length} selected locations? This cannot be undone.`,
+      )
+    )
+      return;
+    setError(undefined);
+    startTransition(async () => {
+      const result = await deleteLocations(warehouseId, locationIds);
+      if (result?.error) setError(result.error);
+      else onDone();
+    });
+  }
+
+  return (
+    <div className="flex h-full w-80 shrink-0 flex-col gap-4 border-l bg-background p-5">
+      <div className="flex items-center justify-between">
+        <h2 className="text-sm font-semibold text-foreground">
+          {locationIds.length} locations selected
+        </h2>
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={onClose}
+          className="h-8 px-2 text-xs text-muted-foreground hover:text-foreground"
+        >
+          <X className="mr-1 h-3.5 w-3.5" />
+          Close
+        </Button>
+      </div>
+
+      <p className="text-xs text-muted-foreground">
+        Multiple locations are selected -- only move and delete are available as
+        a group action.
+      </p>
+
+      <div className="space-y-1.5">
+        <Label className="text-xs">Nudge selection (500mm)</Label>
+        <div className="grid grid-cols-3 gap-2">
+          <div />
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={isPending}
+            onClick={() => handleMove(0, -500)}
+          >
+            ↑
+          </Button>
+          <div />
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={isPending}
+            onClick={() => handleMove(-500, 0)}
+          >
+            ←
+          </Button>
+          <div />
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={isPending}
+            onClick={() => handleMove(500, 0)}
+          >
+            →
+          </Button>
+          <div />
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={isPending}
+            onClick={() => handleMove(0, 500)}
+          >
+            ↓
+          </Button>
+          <div />
+        </div>
+      </div>
+
+      {error && (
+        <Alert variant="destructive" className="py-2 text-xs">
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      )}
+
+      <Button
+        variant="destructive"
+        disabled={isPending}
+        onClick={handleDelete}
+        className="w-full text-xs"
+      >
+        <Trash2 className="mr-1.5 h-3.5 w-3.5" />
+        Delete {locationIds.length} locations
       </Button>
     </div>
   );

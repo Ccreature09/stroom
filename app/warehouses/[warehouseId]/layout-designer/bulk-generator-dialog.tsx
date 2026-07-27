@@ -23,6 +23,7 @@ import {
 } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Boxes, Rows3, LayoutGrid } from "lucide-react";
 
 function ZoneSelect({
@@ -82,6 +83,27 @@ function OrientationSelect({
         </SelectContent>
       </Select>
     </>
+  );
+}
+
+function TemplateField({
+  id,
+  placeholder,
+}: {
+  id: string;
+  placeholder: string;
+}) {
+  return (
+    <div className="space-y-1.5 sm:col-span-2">
+      <Label htmlFor={id}>Naming template</Label>
+      <Input id={id} name="template" placeholder={placeholder} />
+      <p className="text-[11px] text-muted-foreground">
+        Tags: <code>{"{Aisle}"}</code> <code>{"{Row}"}</code>{" "}
+        <code>{"{Bay}"}</code> <code>{"{Level}"}</code>, each with{" "}
+        <code>:letter</code> or <code>:number</code> (default). Leave blank to
+        use the default layout for this generator.
+      </p>
+    </div>
   );
 }
 
@@ -202,7 +224,9 @@ function RackingForm({
   const [isPending, startTransition] = useTransition();
   const [result, setResult] = useState<BulkGenerateResult | null>(null);
   const [zoneId, setZoneId] = useState("none");
-  const [orientation, setOrientation] = useState("horizontal");
+  const [horizontalDirection, setHorizontalDirection] = useState("ltr");
+  const [verticalDirection, setVerticalDirection] = useState("utd");
+  const [useRows, setUseRows] = useState(false);
   const [aisleCount, setAisleCount] = useState(4);
   const [bayCount, setBayCount] = useState(10);
   const [levelCount, setLevelCount] = useState(4);
@@ -231,16 +255,10 @@ function RackingForm({
       <input type="hidden" name="hallId" value={hallId} />
 
       <div className="grid grid-cols-2 gap-3">
-        <div className="space-y-1.5">
-          <Label htmlFor="rk-codePrefix">Code prefix</Label>
-          <Input
-            id="rk-codePrefix"
-            name="codePrefix"
-            required
-            placeholder="WH1-BULK"
-            className="uppercase"
-          />
-        </div>
+        <TemplateField
+          id="rk-template"
+          placeholder="A{Aisle:letter}-{Row:number}-{Bay:number}-{Level:number}"
+        />
         <div className="space-y-1.5">
           <Label htmlFor="rk-zoneId">Zone</Label>
           <ZoneSelect
@@ -412,23 +430,72 @@ function RackingForm({
         </div>
       </div>
 
-      <div className="space-y-1.5">
-        <Label htmlFor="rk-orientation" className="text-xs">
-          Orientation
-        </Label>
-        <OrientationSelect
-          value={orientation}
-          onChange={setOrientation}
-          horizontalLabel="Aisles stacked in rows (bays run left-right)"
-          verticalLabel="Aisles side-by-side (bays run top-bottom)"
+      <div className="grid grid-cols-2 gap-3">
+        <div className="space-y-1.5">
+          <Label htmlFor="rk-horizontalDirection" className="text-xs">
+            Horizontal numbering
+          </Label>
+          <input
+            type="hidden"
+            name="horizontalDirection"
+            value={horizontalDirection}
+          />
+          <Select
+            value={horizontalDirection}
+            onValueChange={setHorizontalDirection}
+          >
+            <SelectTrigger id="rk-horizontalDirection" className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="ltr">Left → Right</SelectItem>
+              <SelectItem value="rtl">Right → Left</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="rk-verticalDirection" className="text-xs">
+            Vertical numbering
+          </Label>
+          <input
+            type="hidden"
+            name="verticalDirection"
+            value={verticalDirection}
+          />
+          <Select
+            value={verticalDirection}
+            onValueChange={setVerticalDirection}
+          >
+            <SelectTrigger id="rk-verticalDirection" className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="utd">Up → Down</SelectItem>
+              <SelectItem value="dtu">Down → Up</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
+
+      <div className="flex items-center space-x-2">
+        <input type="hidden" name="useRows" value={useRows ? "on" : "off"} />
+        <Checkbox
+          id="rk-useRows"
+          checked={useRows}
+          onCheckedChange={(c) => setUseRows(c === true)}
         />
+        <Label
+          htmlFor="rk-useRows"
+          className="text-xs font-medium cursor-pointer"
+        >
+          Group bays into rows (1 row = 4 bays)
+        </Label>
       </div>
 
       <p className="text-xs text-muted-foreground">
         Will create{" "}
         <span className="font-semibold text-foreground">{total}</span> location
-        {total === 1 ? "" : "s"} (aisle-bay-level codes, e.g.{" "}
-        {`{prefix}-01-01-01`}).
+        {total === 1 ? "" : "s"}.
       </p>
 
       <ResultBanner result={result} />
@@ -463,6 +530,7 @@ function FloorLineForm({
   const [result, setResult] = useState<BulkGenerateResult | null>(null);
   const [zoneId, setZoneId] = useState("none");
   const [orientation, setOrientation] = useState("horizontal");
+  const [sequenceDirection, setSequenceDirection] = useState("forward");
   const [slotCount, setSlotCount] = useState(8);
 
   function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
@@ -479,20 +547,11 @@ function FloorLineForm({
 
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
-      <Input type="hidden" name="warehouseId" value={warehouseId} />
-      <Input type="hidden" name="hallId" value={hallId} />
+      <input type="hidden" name="warehouseId" value={warehouseId} />
+      <input type="hidden" name="hallId" value={hallId} />
 
       <div className="grid grid-cols-2 gap-3">
-        <div className="space-y-1.5">
-          <Label htmlFor="fl-codePrefix">Code prefix</Label>
-          <Input
-            id="fl-codePrefix"
-            name="codePrefix"
-            required
-            placeholder="DOCK"
-            className="uppercase"
-          />
-        </div>
+        <TemplateField id="fl-template" placeholder="DOCK{Bay:number}" />
         <div className="space-y-1.5">
           <Label htmlFor="fl-zoneId">Zone</Label>
           <ZoneSelect
@@ -594,24 +653,47 @@ function FloorLineForm({
         </div>
       </div>
 
-      <div className="space-y-1.5">
-        <Label htmlFor="fl-orientation" className="text-xs">
-          Orientation
-        </Label>
-        <OrientationSelect
-          value={orientation}
-          onChange={setOrientation}
-          horizontalLabel="Left to right"
-          verticalLabel="Top to bottom"
-        />
+      <div className="grid grid-cols-2 gap-3">
+        <div className="space-y-1.5">
+          <Label htmlFor="fl-orientation" className="text-xs">
+            Placement orientation
+          </Label>
+          <OrientationSelect
+            value={orientation}
+            onChange={setOrientation}
+            horizontalLabel="Left to right"
+            verticalLabel="Top to bottom"
+          />
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="fl-sequenceDirection" className="text-xs">
+            Numbering direction
+          </Label>
+          <input
+            type="hidden"
+            name="sequenceDirection"
+            value={sequenceDirection}
+          />
+          <Select
+            value={sequenceDirection}
+            onValueChange={setSequenceDirection}
+          >
+            <SelectTrigger id="fl-sequenceDirection" className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="forward">Start → End</SelectItem>
+              <SelectItem value="reverse">End → Start</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
       </div>
 
       <p className="text-xs text-muted-foreground">
         Will create{" "}
         <span className="font-semibold text-foreground">{slotCount}</span>{" "}
-        location
-        {slotCount === 1 ? "" : "s"} (e.g. {`{prefix}-01`}, {`{prefix}-02`}…).
-        Good for dock doors, staging lanes, or drop lines.
+        location{slotCount === 1 ? "" : "s"}. Good for dock doors, staging
+        lanes, or drop lines.
       </p>
 
       <ResultBanner result={result} />
@@ -646,6 +728,7 @@ function ShelvingForm({
   const [result, setResult] = useState<BulkGenerateResult | null>(null);
   const [zoneId, setZoneId] = useState("none");
   const [orientation, setOrientation] = useState("horizontal");
+  const [sequenceDirection, setSequenceDirection] = useState("forward");
   const [bayCount, setBayCount] = useState(6);
   const [levelCount, setLevelCount] = useState(5);
 
@@ -672,16 +755,10 @@ function ShelvingForm({
       <input type="hidden" name="hallId" value={hallId} />
 
       <div className="grid grid-cols-2 gap-3">
-        <div className="space-y-1.5">
-          <Label htmlFor="sh-codePrefix">Code prefix</Label>
-          <Input
-            id="sh-codePrefix"
-            name="codePrefix"
-            required
-            placeholder="SHELF-A"
-            className="uppercase"
-          />
-        </div>
+        <TemplateField
+          id="sh-template"
+          placeholder="SHELF-A{Bay:number}-{Level:number}"
+        />
         <div className="space-y-1.5">
           <Label htmlFor="sh-zoneId">Zone</Label>
           <ZoneSelect
@@ -810,23 +887,47 @@ function ShelvingForm({
         </div>
       </div>
 
-      <div className="space-y-1.5">
-        <Label htmlFor="sh-orientation" className="text-xs">
-          Orientation
-        </Label>
-        <OrientationSelect
-          value={orientation}
-          onChange={setOrientation}
-          horizontalLabel="Bays run left-right"
-          verticalLabel="Bays run top-bottom"
-        />
+      <div className="grid grid-cols-2 gap-3">
+        <div className="space-y-1.5">
+          <Label htmlFor="sh-orientation" className="text-xs">
+            Placement orientation
+          </Label>
+          <OrientationSelect
+            value={orientation}
+            onChange={setOrientation}
+            horizontalLabel="Bays run left-right"
+            verticalLabel="Bays run top-bottom"
+          />
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="sh-sequenceDirection" className="text-xs">
+            Numbering direction
+          </Label>
+          <input
+            type="hidden"
+            name="sequenceDirection"
+            value={sequenceDirection}
+          />
+          <Select
+            value={sequenceDirection}
+            onValueChange={setSequenceDirection}
+          >
+            <SelectTrigger id="sh-sequenceDirection" className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="forward">Start → End</SelectItem>
+              <SelectItem value="reverse">End → Start</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
       </div>
 
       <p className="text-xs text-muted-foreground">
         Will create{" "}
         <span className="font-semibold text-foreground">{total}</span> location
-        {total === 1 ? "" : "s"} (e.g. {`{prefix}-01-01`}). No aisle dimension
-        -- good for a single run of wall shelving.
+        {total === 1 ? "" : "s"}. No aisle dimension -- good for a single run of
+        wall shelving.
       </p>
 
       <ResultBanner result={result} />

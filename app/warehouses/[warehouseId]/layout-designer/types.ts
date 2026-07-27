@@ -15,7 +15,10 @@ export type LocationDTO = {
   aisle: number | null;
   bay: number | null;
   level: number | null;
-  position: number | null;
+  row: number | null;
+  isRacking: boolean;
+  isShelf: boolean;
+  isFloorStorage: boolean;
   heightMm: number | null;
   maxWeightKg: number | null;
   isBlocked: boolean | null;
@@ -65,4 +68,65 @@ export function colorForZone(zoneId: number | null): number {
 
 export function cssColorForZone(zoneId: number | null): string {
   return `#${colorForZone(zoneId).toString(16).padStart(6, "0")}`;
+}
+
+// ---------------------------------------------------------------------------
+// Grouping
+// ---------------------------------------------------------------------------
+
+export type LocationTypeKey = "racking" | "shelf" | "floor" | "none";
+
+export function locationTypeKeyFor(
+  loc: Pick<LocationDTO, "isRacking" | "isShelf" | "isFloorStorage">,
+): LocationTypeKey {
+  if (loc.isRacking) return "racking";
+  if (loc.isShelf) return "shelf";
+  if (loc.isFloorStorage) return "floor";
+  return "none";
+}
+
+/**
+ * Locations sharing a group key move and delete together as a single unit.
+ * A group is Zone + Location Type (e.g. "Zone A + Racking"), computed
+ * on the fly rather than persisted as its own column.
+ */
+export function groupKeyFor(
+  loc: Pick<LocationDTO, "zoneId" | "isRacking" | "isShelf" | "isFloorStorage">,
+): string {
+  return `${loc.zoneId ?? "none"}:${locationTypeKeyFor(loc)}`;
+}
+
+export function locationIdsInGroup(
+  locations: LocationDTO[],
+  groupKey: string,
+): number[] {
+  return locations
+    .filter((loc) => groupKeyFor(loc) === groupKey)
+    .map((loc) => loc.locationId);
+}
+
+/**
+ * Bay aggregation: for racking/shelf locations, many rows in the DB (one per
+ * level) share the same physical footprint (aisle+bay). The canvas should
+ * only render one representative node per (aisle, bay) at a time, switchable
+ * via the level overlay. This groups locations by that footprint key.
+ */
+export function bayFootprintKey(
+  loc: Pick<LocationDTO, "aisle" | "bay">,
+): string {
+  return `${loc.aisle ?? "x"}:${loc.bay ?? "x"}`;
+}
+
+export function groupByBayFootprint(
+  locations: LocationDTO[],
+): Map<string, LocationDTO[]> {
+  const groups = new Map<string, LocationDTO[]>();
+  for (const loc of locations) {
+    if (!loc.isRacking && !loc.isShelf) continue;
+    const key = bayFootprintKey(loc);
+    const existing = groups.get(key) ?? [];
+    existing.push(loc);
+    groups.set(key, existing);
+  }
+  return groups;
 }

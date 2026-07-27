@@ -1,6 +1,6 @@
 "use server";
 
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { db } from "@/lib/db";
@@ -13,6 +13,12 @@ import {
   zoneTypes,
 } from "@/drizzle/schema";
 import { createClient } from "@/lib/server";
+import {
+  locationTypeFlagsFor,
+  readLocationTypeFlag,
+  renderLocationTemplate,
+  validateTemplate,
+} from "./naming";
 
 type ActionResult = { error?: string; success?: true };
 
@@ -160,7 +166,7 @@ export async function createZoneType(
 }
 
 // ---------------------------------------------------------------------------
-// Locations
+// Locations (manual create/edit)
 // ---------------------------------------------------------------------------
 
 export async function createLocation(
@@ -199,15 +205,24 @@ export async function createLocation(
   const aisle = parseNullableInt(formData.get("aisle"));
   const bay = parseNullableInt(formData.get("bay"));
   const level = parseNullableInt(formData.get("level"));
+  const row = parseNullableInt(formData.get("row"));
   const heightMm = parseNullableInt(formData.get("heightMm"));
   const maxWeightKg = parseNullableInt(formData.get("maxWeightKg"));
   const floorLevel = parsePositiveInt(formData.get("floorLevel")) ?? 1;
 
-  if ([aisle, bay, level, heightMm, maxWeightKg].some((v) => Number.isNaN(v))) {
+  if (
+    [aisle, bay, level, row, heightMm, maxWeightKg].some((v) => Number.isNaN(v))
+  ) {
     return {
-      error: "Aisle, bay, level, height, and max weight must be whole numbers.",
+      error:
+        "Aisle, row, bay, level, height, and max weight must be whole numbers.",
     };
   }
+
+  // Manual creation: user picks which single type flag is true; defaults to
+  // all-false ("none") if nothing was selected.
+  const typeFlag = readLocationTypeFlag(formData);
+  const typeFlags = locationTypeFlagsFor(typeFlag);
 
   if (!(await hallBelongsToWarehouse(hallId, warehouseId))) {
     return { error: "Selected hall does not belong to this warehouse." };
@@ -225,6 +240,8 @@ export async function createLocation(
       aisle,
       bay,
       level,
+      row,
+      ...typeFlags,
       heightMm,
       maxWeightKg,
       floorLevel,
@@ -263,15 +280,22 @@ export async function updateLocationDetails(
   const aisle = parseNullableInt(formData.get("aisle"));
   const bay = parseNullableInt(formData.get("bay"));
   const level = parseNullableInt(formData.get("level"));
+  const row = parseNullableInt(formData.get("row"));
   const heightMm = parseNullableInt(formData.get("heightMm"));
   const maxWeightKg = parseNullableInt(formData.get("maxWeightKg"));
   const isBlocked = formData.get("isBlocked") === "on";
 
-  if ([aisle, bay, level, heightMm, maxWeightKg].some((v) => Number.isNaN(v))) {
+  if (
+    [aisle, bay, level, row, heightMm, maxWeightKg].some((v) => Number.isNaN(v))
+  ) {
     return {
-      error: "Aisle, bay, level, height, and max weight must be whole numbers.",
+      error:
+        "Aisle, row, bay, level, height, and max weight must be whole numbers.",
     };
   }
+
+  const typeFlag = readLocationTypeFlag(formData);
+  const typeFlags = locationTypeFlagsFor(typeFlag);
 
   if (zoneId !== null && !(await zoneBelongsToWarehouse(zoneId, warehouseId))) {
     return { error: "Selected zone does not belong to this warehouse." };
@@ -286,6 +310,8 @@ export async function updateLocationDetails(
         aisle,
         bay,
         level,
+        row,
+        ...typeFlags,
         heightMm,
         maxWeightKg,
         isBlocked,
@@ -375,6 +401,89 @@ export async function deleteLocation(
   return { success: true };
 }
 
+// ---------------------------------------------------------------------------
+// Multi-select group actions (drag-select move/delete)
+// ---------------------------------------------------------------------------
+
+// Groups (Zone + Location Type) and drag-selected sets both resolve to a
+// plain list of location ids client-side (see groupKeyFor / locationIdsInGroup
+// in ./types.ts) -- these actions operate on whatever ids the caller passes,
+// whether that's a drag-selection or every member of a computed group.
+
+export async function moveLocations(
+  warehouseId: number,
+  locationIds: number[],
+  deltaX: number,
+  deltaY: number,
+): Promise<ActionResult> {
+  try {
+    await requireLayoutContext(warehouseId);
+  } catch (err) {
+    return { error: (err as Error).message };
+  }
+  if (locationIds.length === 0) return { error: "No locations selected." };
+
+  const rows = await db
+    .select({
+      locationId: locations.locationId,
+      physicalX: locations.physicalX,
+      physicalY: locations.physicalY,
+    })
+    .from(locations)
+    .where(
+      and(
+        inArray(locations.locationId, locationIds),
+        eq(locations.warehouseId, warehouseId),
+      ),
+    );
+
+  if (rows.length === 0) return { error: "Selected locations were not found." };
+
+  await db.transaction(async (tx) => {
+    for (const row of rows) {
+      await tx
+        .update(locations)
+        .set({
+          physicalX: Math.max(0, Math.round(row.physicalX + deltaX)),
+          physicalY: Math.max(0, Math.round(row.physicalY + deltaY)),
+          updatedAt: new Date().toISOString(),
+        })
+        .where(eq(locations.locationId, row.locationId));
+    }
+  });
+
+  revalidateLayout(warehouseId);
+  return { success: true };
+}
+
+export async function deleteLocations(
+  warehouseId: number,
+  locationIds: number[],
+): Promise<ActionResult> {
+  try {
+    await requireLayoutContext(warehouseId);
+  } catch (err) {
+    return { error: (err as Error).message };
+  }
+  if (locationIds.length === 0) return { error: "No locations selected." };
+
+  await db
+    .delete(locations)
+    .where(
+      and(
+        inArray(locations.locationId, locationIds),
+        eq(locations.warehouseId, warehouseId),
+      ),
+    );
+
+  revalidateLayout(warehouseId);
+  return { success: true };
+}
+
+// ---------------------------------------------------------------------------
+// Shared lookups
+// ---------------------------------------------------------------------------
+
 async function hallBelongsToWarehouse(hallId: number, warehouseId: number) {
   const [row] = await db
     .select({ hallId: halls.hallId })
@@ -401,6 +510,33 @@ async function zoneBelongsToWarehouse(zoneId: number, warehouseId: number) {
 
 type BulkGeneratorType = "racking" | "floor_line" | "shelving";
 type Orientation = "horizontal" | "vertical";
+type Axis1DDirection = "forward" | "reverse";
+
+const GENERATOR_TO_LOCATION_TYPE: Record<
+  BulkGeneratorType,
+  "racking" | "shelf" | "floor"
+> = {
+  racking: "racking",
+  floor_line: "floor",
+  shelving: "shelf",
+};
+
+const DEFAULT_TEMPLATES: Record<BulkGeneratorType, string> = {
+  racking: "{Aisle:letter}-{Bay:number}-{Level:number}",
+  floor_line: "{Bay:number}",
+  shelving: "{Bay:number}-{Level:number}",
+};
+
+// 1 Row groups every 4 bays within an aisle, and is optional -- only relevant
+// to racking. Rows are a labeling/grouping convenience, not a physical change.
+const BAYS_PER_ROW = 4;
+function rowForBayIndex(
+  bayIndexZeroBased: number,
+  useRows: boolean,
+): number | null {
+  if (!useRows) return null;
+  return Math.floor(bayIndexZeroBased / BAYS_PER_ROW) + 1;
+}
 
 type BulkLocationDraft = {
   locationCode: string;
@@ -408,18 +544,11 @@ type BulkLocationDraft = {
   aisle: number | null;
   bay: number | null;
   level: number | null;
+  row: number | null;
   physicalX: number;
   physicalY: number;
   physicalWidthMm: number;
   physicalLengthMm: number;
-};
-
-export type BulkGenerateResult = {
-  error?: string;
-  success?: true;
-  created?: number;
-  skipped?: number;
-  total?: number;
 };
 
 function padNumber(value: number, width: number) {
@@ -458,8 +587,16 @@ function readOptionalNonNegativeInt(
   return Number.isInteger(parsed) && parsed >= 0 ? parsed : null;
 }
 
+/**
+ * Racking is a true 2D grid (aisle x bay), so it gets full independent
+ * horizontal/vertical directional numbering, per spec. Physical placement on
+ * the canvas always proceeds top-to-bottom / left-to-right; only the
+ * *numbers* assigned to each bay/aisle are reversed when a direction is
+ * flipped, so "RTL" racking still occupies the same physical footprint,
+ * just numbered from the other end.
+ */
 function buildRackingLocations(params: {
-  codePrefix: string;
+  template: string;
   aisleCount: number;
   aisleStart: number;
   bayCount: number;
@@ -472,44 +609,46 @@ function buildRackingLocations(params: {
   bayGapMm: number;
   startX: number;
   startY: number;
-  orientation: Orientation;
+  horizontalDirection: "ltr" | "rtl";
+  verticalDirection: "utd" | "dtu";
+  useRows: boolean;
   zoneId: number | null;
 }): BulkLocationDraft[] {
   const drafts: BulkLocationDraft[] = [];
+
   for (let i = 0; i < params.aisleCount; i++) {
-    const aisleNum = params.aisleStart + i;
+    const aisleIndexForNumber =
+      params.verticalDirection === "utd" ? i : params.aisleCount - 1 - i;
+    const aisleNum = params.aisleStart + aisleIndexForNumber;
+
+    const y = params.startY + i * (params.bayDepthMm + params.aisleGapMm);
+
     for (let j = 0; j < params.bayCount; j++) {
-      const bayNum = params.bayStart + j;
+      const bayIndexForNumber =
+        params.horizontalDirection === "ltr" ? j : params.bayCount - 1 - j;
+      const bayNum = params.bayStart + bayIndexForNumber;
+      const rowNum = rowForBayIndex(bayIndexForNumber, params.useRows);
 
-      let x: number, y: number, width: number, length: number;
-      if (params.orientation === "horizontal") {
-        // Aisles stack vertically (rows); bays extend left-to-right within a row.
-        x = params.startX + j * (params.bayWidthMm + params.bayGapMm);
-        y = params.startY + i * (params.bayDepthMm + params.aisleGapMm);
-        width = params.bayWidthMm;
-        length = params.bayDepthMm;
-      } else {
-        // Aisles sit side-by-side (columns); bays extend top-to-bottom within a column.
-        x = params.startX + i * (params.bayDepthMm + params.aisleGapMm);
-        y = params.startY + j * (params.bayWidthMm + params.bayGapMm);
-        width = params.bayDepthMm;
-        length = params.bayWidthMm;
-      }
+      const x = params.startX + j * (params.bayWidthMm + params.bayGapMm);
 
-      // Every level in a bay shares the same floor footprint -- only the code
-      // and level number differ, mirroring a real vertical rack column.
       for (let k = 0; k < params.levelCount; k++) {
         const levelNum = params.levelStart + k;
         drafts.push({
-          locationCode: `${params.codePrefix}-${padNumber(aisleNum, 2)}-${padNumber(bayNum, 2)}-${padNumber(levelNum, 2)}`,
+          locationCode: renderLocationTemplate(params.template, {
+            aisle: aisleNum,
+            row: rowNum,
+            bay: bayNum,
+            level: levelNum,
+          }),
           zoneId: params.zoneId,
           aisle: aisleNum,
           bay: bayNum,
           level: levelNum,
+          row: rowNum,
           physicalX: Math.round(x),
           physicalY: Math.round(y),
-          physicalWidthMm: Math.round(width),
-          physicalLengthMm: Math.round(length),
+          physicalWidthMm: Math.round(params.bayWidthMm),
+          physicalLengthMm: Math.round(params.bayDepthMm),
         });
       }
     }
@@ -517,8 +656,15 @@ function buildRackingLocations(params: {
   return drafts;
 }
 
+/**
+ * Floor lines and shelving are single-axis layouts (one row of slots/bays),
+ * so rather than two independent axes we expose one "sequenceDirection"
+ * toggle: forward numbers from the start point, reverse numbers from the
+ * far end. This is a deliberate simplification of the general 2-axis
+ * direction control, since there is no second axis to reverse here.
+ */
 function buildFloorLineLocations(params: {
-  codePrefix: string;
+  template: string;
   slotCount: number;
   slotStart: number;
   slotWidthMm: number;
@@ -527,11 +673,15 @@ function buildFloorLineLocations(params: {
   startX: number;
   startY: number;
   orientation: Orientation;
+  sequenceDirection: Axis1DDirection;
   zoneId: number | null;
 }): BulkLocationDraft[] {
   const drafts: BulkLocationDraft[] = [];
   for (let s = 0; s < params.slotCount; s++) {
-    const slotNum = params.slotStart + s;
+    const slotIndexForNumber =
+      params.sequenceDirection === "forward" ? s : params.slotCount - 1 - s;
+    const slotNum = params.slotStart + slotIndexForNumber;
+
     const x =
       params.orientation === "horizontal"
         ? params.startX + s * (params.slotWidthMm + params.gapMm)
@@ -542,11 +692,17 @@ function buildFloorLineLocations(params: {
         : params.startY + s * (params.slotDepthMm + params.gapMm);
 
     drafts.push({
-      locationCode: `${params.codePrefix}-${padNumber(slotNum, 2)}`,
+      locationCode: renderLocationTemplate(params.template, {
+        aisle: null,
+        row: null,
+        bay: slotNum,
+        level: null,
+      }),
       zoneId: params.zoneId,
       aisle: null,
       bay: slotNum,
       level: null,
+      row: null,
       physicalX: Math.round(x),
       physicalY: Math.round(y),
       physicalWidthMm: Math.round(params.slotWidthMm),
@@ -557,7 +713,7 @@ function buildFloorLineLocations(params: {
 }
 
 function buildShelvingLocations(params: {
-  codePrefix: string;
+  template: string;
   bayCount: number;
   bayStart: number;
   levelCount: number;
@@ -568,11 +724,15 @@ function buildShelvingLocations(params: {
   startX: number;
   startY: number;
   orientation: Orientation;
+  sequenceDirection: Axis1DDirection;
   zoneId: number | null;
 }): BulkLocationDraft[] {
   const drafts: BulkLocationDraft[] = [];
   for (let j = 0; j < params.bayCount; j++) {
-    const bayNum = params.bayStart + j;
+    const bayIndexForNumber =
+      params.sequenceDirection === "forward" ? j : params.bayCount - 1 - j;
+    const bayNum = params.bayStart + bayIndexForNumber;
+
     let x: number, y: number, width: number, length: number;
     if (params.orientation === "horizontal") {
       x = params.startX + j * (params.bayWidthMm + params.bayGapMm);
@@ -589,11 +749,17 @@ function buildShelvingLocations(params: {
     for (let k = 0; k < params.levelCount; k++) {
       const levelNum = params.levelStart + k;
       drafts.push({
-        locationCode: `${params.codePrefix}-${padNumber(bayNum, 2)}-${padNumber(levelNum, 2)}`,
+        locationCode: renderLocationTemplate(params.template, {
+          aisle: null,
+          row: null,
+          bay: bayNum,
+          level: levelNum,
+        }),
         zoneId: params.zoneId,
         aisle: null,
         bay: bayNum,
         level: levelNum,
+        row: null,
         physicalX: Math.round(x),
         physicalY: Math.round(y),
         physicalWidthMm: Math.round(width),
@@ -603,6 +769,14 @@ function buildShelvingLocations(params: {
   }
   return drafts;
 }
+
+export type BulkGenerateResult = {
+  error?: string;
+  success?: true;
+  created?: number;
+  skipped?: number;
+  total?: number;
+};
 
 export async function bulkGenerateLocations(
   formData: FormData,
@@ -624,13 +798,13 @@ export async function bulkGenerateLocations(
   const generatorType = String(
     formData.get("generatorType") ?? "",
   ) as BulkGeneratorType;
+  const locationType = GENERATOR_TO_LOCATION_TYPE[generatorType];
+  if (!locationType) return { error: "Unknown generator type." };
 
-  const codePrefix = String(formData.get("codePrefix") ?? "")
-    .trim()
-    .toUpperCase();
-  if (!codePrefix) return { error: "A location code prefix is required." };
-  if (codePrefix.length > 40)
-    return { error: "Code prefix must be 40 characters or fewer." };
+  const templateInput = String(formData.get("template") ?? "").trim();
+  const template = templateInput || DEFAULT_TEMPLATES[generatorType];
+  const templateError = validateTemplate(template);
+  if (templateError) return { error: templateError };
 
   const zoneId = parsePositiveInt(formData.get("zoneId"));
   if (zoneId !== null && !(await zoneBelongsToWarehouse(zoneId, warehouseId))) {
@@ -672,8 +846,14 @@ export async function bulkGenerateLocations(
       return { error: "Gap values must be whole numbers." };
     }
 
+    const horizontalDirection =
+      formData.get("horizontalDirection") === "rtl" ? "rtl" : "ltr";
+    const verticalDirection =
+      formData.get("verticalDirection") === "dtu" ? "dtu" : "utd";
+    const useRows = formData.get("useRows") === "on";
+
     drafts = buildRackingLocations({
-      codePrefix,
+      template,
       aisleCount,
       aisleStart,
       bayCount,
@@ -686,7 +866,9 @@ export async function bulkGenerateLocations(
       bayGapMm,
       startX,
       startY,
-      orientation,
+      horizontalDirection,
+      verticalDirection,
+      useRows,
       zoneId,
     });
   } else if (generatorType === "floor_line") {
@@ -704,8 +886,11 @@ export async function bulkGenerateLocations(
       return { error: "Slot start must be a positive whole number." };
     if (gapMm === null) return { error: "Gap must be a whole number." };
 
+    const sequenceDirection: Axis1DDirection =
+      formData.get("sequenceDirection") === "reverse" ? "reverse" : "forward";
+
     drafts = buildFloorLineLocations({
-      codePrefix,
+      template,
       slotCount,
       slotStart,
       slotWidthMm,
@@ -714,6 +899,7 @@ export async function bulkGenerateLocations(
       startX,
       startY,
       orientation,
+      sequenceDirection,
       zoneId,
     });
   } else if (generatorType === "shelving") {
@@ -735,8 +921,11 @@ export async function bulkGenerateLocations(
     }
     if (bayGapMm === null) return { error: "Gap must be a whole number." };
 
+    const sequenceDirection: Axis1DDirection =
+      formData.get("sequenceDirection") === "reverse" ? "reverse" : "forward";
+
     drafts = buildShelvingLocations({
-      codePrefix,
+      template,
       bayCount,
       bayStart,
       levelCount,
@@ -747,6 +936,7 @@ export async function bulkGenerateLocations(
       startX,
       startY,
       orientation,
+      sequenceDirection,
       zoneId,
     });
   } else {
@@ -767,13 +957,23 @@ export async function bulkGenerateLocations(
   // Guard against duplicate codes colliding within this same batch.
   const seen = new Set<string>();
   for (const draft of drafts) {
+    if (!draft.locationCode) {
+      return {
+        error:
+          "The template produced an empty code for at least one location -- check that it includes a tag matching this generator (e.g. {Bay}).",
+      };
+    }
     if (seen.has(draft.locationCode)) {
       return {
-        error: `Generated codes collide (e.g. "${draft.locationCode}"). Adjust the start numbers or prefix.`,
+        error: `Generated codes collide (e.g. "${draft.locationCode}"). Adjust the template, start numbers, or prefix.`,
       };
     }
     seen.add(draft.locationCode);
   }
+
+  // Bulk creation: setting one location type automatically sets that flag
+  // true and the other two false.
+  const typeFlags = locationTypeFlagsFor(locationType);
 
   // location_code is globally unique, so skip rows that collide with existing
   // locations (e.g. re-running a generator over the same range) instead of
@@ -789,6 +989,8 @@ export async function bulkGenerateLocations(
         aisle: draft.aisle,
         bay: draft.bay,
         level: draft.level,
+        row: draft.row,
+        ...typeFlags,
         physicalX: draft.physicalX,
         physicalY: draft.physicalY,
         physicalWidthMm: draft.physicalWidthMm,
@@ -806,7 +1008,7 @@ export async function bulkGenerateLocations(
 
   if (created === 0) {
     return {
-      error: `None of the ${drafts.length} location codes could be created -- they already exist. Try a different prefix or start number.`,
+      error: `None of the ${drafts.length} location codes could be created -- they already exist. Try a different template, prefix, or start number.`,
     };
   }
 

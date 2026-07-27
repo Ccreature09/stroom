@@ -7,9 +7,11 @@ import {
   CreateLocationPanel,
   EditLocationPanel,
   EmptyLocationPanel,
+  MultiSelectPanel,
 } from "./location-panel";
 import type { DraftGeometry, HallDTO, LocationDTO, ZoneTypeDTO } from "./types";
 import { updateLocationGeometry } from "./actions";
+import { Button } from "@/components/ui/button";
 
 export default function LayoutDesigner({
   warehouseId,
@@ -28,6 +30,7 @@ export default function LayoutDesigner({
   const [selectedLocationId, setSelectedLocationId] = useState<number | null>(
     null,
   );
+  const [selectedLocationIds, setSelectedLocationIds] = useState<number[]>([]);
   const [draft, setDraft] = useState<DraftGeometry | null>(null);
 
   const hall = useMemo(
@@ -39,9 +42,24 @@ export default function LayoutDesigner({
     [locations, selectedLocationId],
   );
 
+  // Level overlay: which height level is active for rackings/shelves. Only
+  // shown when the hall actually has multi-level racking/shelf locations.
+  const availableLevels = useMemo(() => {
+    const levels = new Set<number>();
+    for (const loc of locations) {
+      if ((loc.isRacking || loc.isShelf) && loc.level != null)
+        levels.add(loc.level);
+    }
+    return Array.from(levels).sort((a, b) => a - b);
+  }, [locations]);
+  const [activeLevel, setActiveLevel] = useState<number | null>(
+    availableLevels[0] ?? null,
+  );
+
   function handleToolChange(next: Tool) {
     setTool(next);
     setSelectedLocationId(null);
+    setSelectedLocationIds([]);
     setDraft(null);
   }
 
@@ -50,11 +68,22 @@ export default function LayoutDesigner({
   }
 
   function handleSelect(locationId: number | null) {
+    setSelectedLocationIds([]);
     setSelectedLocationId(locationId);
   }
 
+  function handleMultiSelect(locationIds: number[]) {
+    setSelectedLocationId(null);
+    setSelectedLocationIds(locationIds);
+  }
+
+  function handleClearSelection() {
+    setSelectedLocationId(null);
+    setSelectedLocationIds([]);
+  }
+
   return (
-    <div className="flex h-full min-h-0 flex-1 flex-row overflow-hidden rounded-xl border bg-background/40">
+    <div className="relative flex h-full min-h-0 flex-1 flex-row overflow-hidden rounded-xl border bg-background/40">
       {/* 1. Left Sidebar: Toolbar */}
       <HallToolbar
         warehouseId={warehouseId}
@@ -66,14 +95,33 @@ export default function LayoutDesigner({
       />
 
       {/* 2. Middle Column: Canvas Container */}
-      <div className="flex min-w-0 flex-1 items-center justify-center p-6 bg-muted/30">
+      <div className="relative flex min-w-0 flex-1 items-center justify-center p-6 bg-muted/30">
+        {/* Level overlay */}
+        {availableLevels.length > 0 && (
+          <div className="pointer-events-auto absolute left-4 top-4 z-50 flex gap-1 rounded-lg border bg-background p-1 shadow-md">
+            {availableLevels.map((lvl) => (
+              <Button
+                key={lvl}
+                size="sm"
+                variant={lvl === activeLevel ? "default" : "ghost"}
+                onClick={() => setActiveLevel(lvl)}
+              >
+                L{lvl}
+              </Button>
+            ))}
+          </div>
+        )}
+
         <div className="h-[600px] w-full max-w-5xl overflow-hidden rounded-xl shadow-sm">
           <LayoutDesignerCanvas
             hall={hall}
             locations={locations}
             selectedLocationId={selectedLocationId}
+            selectedLocationIds={selectedLocationIds}
+            activeLevel={activeLevel}
             tool={tool}
             onSelect={handleSelect}
+            onMultiSelect={handleMultiSelect}
             onDraftDrawn={handleDraftDrawn}
             onGeometryChange={(locationId, geometry) => {
               void updateLocationGeometry(warehouseId, locationId, geometry);
@@ -90,6 +138,13 @@ export default function LayoutDesigner({
           draft={draft}
           zoneTypes={zoneTypes}
           onClose={() => setDraft(null)}
+        />
+      ) : selectedLocationIds.length > 1 ? (
+        <MultiSelectPanel
+          warehouseId={warehouseId}
+          locationIds={selectedLocationIds}
+          onClose={handleClearSelection}
+          onDone={handleClearSelection}
         />
       ) : selectedLocation ? (
         <EditLocationPanel

@@ -11,7 +11,7 @@ import {
 } from "pixi.js";
 import { Viewport } from "pixi-viewport";
 import type { HallDTO, LocationDTO } from "./types";
-import { colorForZone } from "./types";
+import { colorForZone, groupByBayFootprint } from "./types";
 
 import { Button } from "@/components/ui/button";
 import { ZoomIn, ZoomOut } from "lucide-react";
@@ -33,8 +33,11 @@ type Props = {
   hall: HallDTO;
   locations: LocationDTO[];
   selectedLocationId: number | null;
+  selectedLocationIds: number[];
+  activeLevel: number | null;
   tool: Tool;
   onSelect: (locationId: number | null) => void;
+  onMultiSelect: (locationIds: number[]) => void;
   onDraftDrawn: (geometry: Geometry) => void;
   onGeometryChange: (
     locationId: number,
@@ -46,7 +49,9 @@ type LocationNode = {
   container: Container;
   box: Graphics;
   label: Text;
+  badge: Text;
   loc: LocationDTO;
+  memberCount: number; // how many levels this node aggregates (bay aggregation)
 };
 
 const HANDLE_CORNERS = ["nw", "ne", "se", "sw"] as const;
@@ -70,12 +75,56 @@ function clampLocation(
   };
 }
 
+/**
+ * Bay Aggregation: for racking/shelf locations, multiple DB rows can share
+ * the same physical footprint (aisle+bay), one per level. On the top-level
+ * canvas we only want to render ONE node per footprint -- preferring the
+ * currently active level if it has a member there, otherwise falling back to
+ * the lowest level present -- plus every other location (floor storage, or
+ * anything without aisle/bay) rendered as-is.
+ */
+function resolveVisibleLocations(
+  allLocations: LocationDTO[],
+  activeLevel: number | null,
+): { visible: LocationDTO[]; memberCountByLocationId: Map<number, number> } {
+  const memberCountByLocationId = new Map<number, number>();
+  const bayGroups = groupByBayFootprint(allLocations);
+  const aggregatedIds = new Set<number>();
+  for (const group of bayGroups.values()) {
+    for (const loc of group) aggregatedIds.add(loc.locationId);
+  }
+
+  const visible: LocationDTO[] = [];
+
+  for (const group of bayGroups.values()) {
+    if (group.length === 0) continue;
+    const sorted = [...group].sort((a, b) => (a.level ?? 0) - (b.level ?? 0));
+    const preferred =
+      (activeLevel != null && sorted.find((l) => l.level === activeLevel)) ||
+      sorted[0];
+    visible.push(preferred);
+    memberCountByLocationId.set(preferred.locationId, sorted.length);
+  }
+
+  for (const loc of allLocations) {
+    if (!aggregatedIds.has(loc.locationId)) {
+      visible.push(loc);
+      memberCountByLocationId.set(loc.locationId, 1);
+    }
+  }
+
+  return { visible, memberCountByLocationId };
+}
+
 export default function LayoutDesignerCanvas({
   hall,
   locations,
   selectedLocationId,
+  selectedLocationIds,
+  activeLevel,
   tool,
   onSelect,
+  onMultiSelect,
   onDraftDrawn,
   onGeometryChange,
 }: Props) {
@@ -112,7 +161,9 @@ export default function LayoutDesignerCanvas({
   const stateRef = useRef({
     tool,
     selectedLocationId,
+    selectedLocationIds,
     onSelect,
+    onMultiSelect,
     onDraftDrawn,
     onGeometryChange,
     hall,
@@ -120,7 +171,9 @@ export default function LayoutDesignerCanvas({
   stateRef.current = {
     tool,
     selectedLocationId,
+    selectedLocationIds,
     onSelect,
+    onMultiSelect,
     onDraftDrawn,
     onGeometryChange,
     hall,
@@ -128,6 +181,9 @@ export default function LayoutDesignerCanvas({
 
   const locationsRef = useRef(locations);
   locationsRef.current = locations;
+
+  const activeLevelRef = useRef(activeLevel);
+  activeLevelRef.current = activeLevel;
 
   const dragRef = useRef<null | {
     locationId: number;
@@ -149,15 +205,37 @@ export default function LayoutDesignerCanvas({
     originW: number;
     originH: number;
   }>(null);
+  // Drag-to-select box (only active in "select" tool, when the pointer-down
+  // did not land on an existing location container).
+  const boxSelectRef = useRef<null | {
+    startWorldX: number;
+    startWorldY: number;
+    rect: Graphics;
+  }>(null);
 
-  function syncLocationNodes(locs: LocationDTO[], selectedId: number | null) {
+  function fittedFontSize(widthMm: number, lengthMm: number) {
+    // Adaptive label sizing: scale with the smaller box dimension so text
+    // never overflows a narrow bay, but stays readable in larger footprints.
+    const raw = Math.min(widthMm, lengthMm) * 0.28;
+    return Math.max(90, Math.min(raw, 420));
+  }
+
+  function syncLocationNodes(
+    allLocs: LocationDTO[],
+    selectedId: number | null,
+  ) {
     const layer = locationLayerRef.current;
     if (!layer) return;
+
+    const { visible, memberCountByLocationId } = resolveVisibleLocations(
+      allLocs,
+      activeLevelRef.current,
+    );
 
     const nodes = nodesRef.current;
     const seen = new Set<number>();
 
-    for (const loc of locs) {
+    for (const loc of visible) {
       seen.add(loc.locationId);
       let node = nodes.get(loc.locationId);
       if (!node) {
@@ -172,7 +250,18 @@ export default function LayoutDesignerCanvas({
           }),
         });
         label.anchor.set(0.5);
-        container.addChild(box, label);
+
+        const badge = new Text({
+          text: "",
+          style: new TextStyle({
+            fontSize: 140,
+            fill: 0xffffff,
+            fontWeight: "700",
+          }),
+        });
+        badge.anchor.set(1, 0);
+
+        container.addChild(box, label, badge);
         layer.addChild(container);
 
         container.eventMode = "static";
@@ -201,14 +290,14 @@ export default function LayoutDesignerCanvas({
           const drag = dragRef.current;
           if (drag) {
             dragRef.current = null;
-            const node = nodesRef.current.get(drag.locationId);
-            if (node) {
+            const draggedNode = nodesRef.current.get(drag.locationId);
+            if (draggedNode) {
               stateRef.current.onGeometryChange(drag.locationId, {
-                physicalX: node.loc.physicalX,
-                physicalY: node.loc.physicalY,
-                physicalWidthMm: node.loc.physicalWidthMm,
-                physicalLengthMm: node.loc.physicalLengthMm,
-                rotationDegrees: node.loc.rotationDegrees,
+                physicalX: draggedNode.loc.physicalX,
+                physicalY: draggedNode.loc.physicalY,
+                physicalWidthMm: draggedNode.loc.physicalWidthMm,
+                physicalLengthMm: draggedNode.loc.physicalLengthMm,
+                rotationDegrees: draggedNode.loc.rotationDegrees,
               });
             }
           }
@@ -220,24 +309,35 @@ export default function LayoutDesignerCanvas({
           const drag = dragRef.current;
           if (drag) {
             dragRef.current = null;
-            const node = nodesRef.current.get(drag.locationId);
-            if (node) {
+            const draggedNode = nodesRef.current.get(drag.locationId);
+            if (draggedNode) {
               stateRef.current.onGeometryChange(drag.locationId, {
-                physicalX: node.loc.physicalX,
-                physicalY: node.loc.physicalY,
-                physicalWidthMm: node.loc.physicalWidthMm,
-                physicalLengthMm: node.loc.physicalLengthMm,
-                rotationDegrees: node.loc.rotationDegrees,
+                physicalX: draggedNode.loc.physicalX,
+                physicalY: draggedNode.loc.physicalY,
+                physicalWidthMm: draggedNode.loc.physicalWidthMm,
+                physicalLengthMm: draggedNode.loc.physicalLengthMm,
+                rotationDegrees: draggedNode.loc.rotationDegrees,
               });
             }
           }
         });
-        node = { container, box, label, loc };
+        node = {
+          container,
+          box,
+          label,
+          badge,
+          loc,
+          memberCount: memberCountByLocationId.get(loc.locationId) ?? 1,
+        };
         nodes.set(loc.locationId, node);
       }
 
       node.loc = loc;
-      const isSelected = loc.locationId === selectedId;
+      node.memberCount = memberCountByLocationId.get(loc.locationId) ?? 1;
+
+      const isSelected =
+        loc.locationId === selectedId ||
+        stateRef.current.selectedLocationIds.includes(loc.locationId);
       const color = colorForZone(loc.zoneId);
       node.box
         .clear()
@@ -250,11 +350,26 @@ export default function LayoutDesignerCanvas({
       node.container.position.set(loc.physicalX, loc.physicalY);
       node.container.pivot.set(0, 0);
       node.container.angle = loc.rotationDegrees;
+
       node.label.text = loc.locationCode;
+      node.label.style.fontSize = fittedFontSize(
+        loc.physicalWidthMm,
+        loc.physicalLengthMm,
+      );
       node.label.position.set(
         loc.physicalWidthMm / 2,
         loc.physicalLengthMm / 2,
       );
+
+      // Bay aggregation badge: show "×N" in the corner when this node
+      // represents more than one stacked level.
+      if (node.memberCount > 1) {
+        node.badge.text = `×${node.memberCount}`;
+        node.badge.visible = true;
+        node.badge.position.set(loc.physicalWidthMm - 20, 20);
+      } else {
+        node.badge.visible = false;
+      }
     }
 
     for (const [id, node] of nodes) {
@@ -390,28 +505,66 @@ export default function LayoutDesignerCanvas({
       updateScale();
 
       viewport.eventMode = "static";
+
+      // A pointerdown that lands on the bare viewport (not a location
+      // container, which calls e.stopPropagation()) starts either a draw
+      // rectangle (in "draw" mode) or a drag-select box (in "select" mode).
       viewport.on("pointerdown", (e: FederatedPointerEvent) => {
-        if (stateRef.current.tool !== "draw") return;
         if (e.button !== 0) return;
         const world = viewport.toWorld(e.global);
-        const rect = new Graphics();
-        viewport.addChild(rect);
-        drawRef.current = { startWorldX: world.x, startWorldY: world.y, rect };
+
+        if (stateRef.current.tool === "draw") {
+          const rect = new Graphics();
+          viewport.addChild(rect);
+          drawRef.current = {
+            startWorldX: world.x,
+            startWorldY: world.y,
+            rect,
+          };
+          return;
+        }
+
+        if (stateRef.current.tool === "select") {
+          const rect = new Graphics();
+          viewport.addChild(rect);
+          boxSelectRef.current = {
+            startWorldX: world.x,
+            startWorldY: world.y,
+            rect,
+          };
+          viewport.plugins.pause("drag");
+        }
       });
 
       viewport.on("pointermove", (e: FederatedPointerEvent) => {
         const draw = drawRef.current;
-        if (!draw) return;
-        const world = viewport.toWorld(e.global);
-        const x = Math.min(draw.startWorldX, world.x);
-        const y = Math.min(draw.startWorldY, world.y);
-        const w = Math.abs(world.x - draw.startWorldX);
-        const h = Math.abs(world.y - draw.startWorldY);
-        draw.rect
-          .clear()
-          .rect(x, y, w, h)
-          .fill({ color: 0x0891b2, alpha: 0.2 })
-          .stroke({ width: 15, color: 0x0891b2 });
+        if (draw) {
+          const world = viewport.toWorld(e.global);
+          const x = Math.min(draw.startWorldX, world.x);
+          const y = Math.min(draw.startWorldY, world.y);
+          const w = Math.abs(world.x - draw.startWorldX);
+          const h = Math.abs(world.y - draw.startWorldY);
+          draw.rect
+            .clear()
+            .rect(x, y, w, h)
+            .fill({ color: 0x0891b2, alpha: 0.2 })
+            .stroke({ width: 15, color: 0x0891b2 });
+          return;
+        }
+
+        const box = boxSelectRef.current;
+        if (box) {
+          const world = viewport.toWorld(e.global);
+          const x = Math.min(box.startWorldX, world.x);
+          const y = Math.min(box.startWorldY, world.y);
+          const w = Math.abs(world.x - box.startWorldX);
+          const h = Math.abs(world.y - box.startWorldY);
+          box.rect
+            .clear()
+            .rect(x, y, w, h)
+            .fill({ color: 0x2563eb, alpha: 0.15 })
+            .stroke({ width: 15, color: 0x2563eb });
+        }
       });
 
       const cancelDraw = () => {
@@ -450,6 +603,44 @@ export default function LayoutDesignerCanvas({
           }
           return;
         }
+
+        const box = boxSelectRef.current;
+        if (box) {
+          const world = viewport.toWorld(e.global);
+          const x0 = Math.min(box.startWorldX, world.x);
+          const y0 = Math.min(box.startWorldY, world.y);
+          const x1 = Math.max(box.startWorldX, world.x);
+          const y1 = Math.max(box.startWorldY, world.y);
+          box.rect.destroy();
+          boxSelectRef.current = null;
+          viewport.plugins.resume("drag");
+
+          // Zero-area drags (a simple click that missed every container)
+          // clear selection instead of running a hit test.
+          if (x1 - x0 < 5 && y1 - y0 < 5) {
+            stateRef.current.onSelect(null);
+            return;
+          }
+
+          const hits: number[] = [];
+          for (const [id, node] of nodesRef.current) {
+            const {
+              physicalX: lx,
+              physicalY: ly,
+              physicalWidthMm: lw,
+              physicalLengthMm: lh,
+            } = node.loc;
+            const withinBox =
+              lx >= x0 && ly >= y0 && lx + lw <= x1 && ly + lh <= y1;
+            if (withinBox) hits.push(id);
+          }
+
+          if (hits.length > 1) stateRef.current.onMultiSelect(hits);
+          else if (hits.length === 1) stateRef.current.onSelect(hits[0]);
+          else stateRef.current.onSelect(null);
+          return;
+        }
+
         if (stateRef.current.tool === "select") {
           stateRef.current.onSelect(null);
         }
@@ -506,12 +697,13 @@ export default function LayoutDesignerCanvas({
     if (!isReady) return;
     syncLocationNodes(locations, selectedLocationId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [locations, isReady]);
+  }, [locations, isReady, activeLevel]);
 
   useEffect(() => {
     rebuildHandles();
     for (const [id, node] of nodesRef.current) {
-      const isSelected = id === selectedLocationId;
+      const isSelected =
+        id === selectedLocationId || selectedLocationIds.includes(id);
       const color = colorForZone(node.loc.zoneId);
       node.box
         .clear()
@@ -523,7 +715,7 @@ export default function LayoutDesignerCanvas({
         });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedLocationId]);
+  }, [selectedLocationId, selectedLocationIds]);
 
   function updateLabelVisibility() {
     const viewport = viewportRef.current;
@@ -531,6 +723,7 @@ export default function LayoutDesignerCanvas({
     const visible = viewport.scale.x >= LABEL_ZOOM_THRESHOLD;
     for (const node of nodesRef.current.values()) {
       node.label.visible = visible;
+      node.badge.visible = visible && node.memberCount > 1;
     }
   }
 
@@ -541,6 +734,10 @@ export default function LayoutDesignerCanvas({
 
     for (const h of handlesRef.current) h.destroy();
     handlesRef.current = [];
+
+    // Resize handles only make sense for a single selected location -- multi-
+    // select is restricted to move/delete, per spec.
+    if (selectedLocationIds.length > 1) return;
 
     const node = selectedLocationId
       ? nodesRef.current.get(selectedLocationId)
@@ -710,6 +907,7 @@ export default function LayoutDesignerCanvas({
             .rect(0, 0, w, h)
             .fill({ color: colorForZone(node.loc.zoneId), alpha: 0.55 })
             .stroke({ width: 45, color: 0x0f172a });
+          node.label.style.fontSize = fittedFontSize(w, h);
           node.label.position.set(w / 2, h / 2);
           rebuildHandles();
         }
@@ -770,7 +968,7 @@ export default function LayoutDesignerCanvas({
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [locations, selectedLocationId, isReady]);
+  }, [locations, selectedLocationId, selectedLocationIds, isReady]);
 
   return (
     <div className="relative flex h-full w-full overflow-hidden rounded-xl border bg-background/60">
