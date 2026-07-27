@@ -1223,6 +1223,7 @@ export const zoneTypes = pgTable(
     storagePermanence: varchar("storage_permanence", { length: 20 })
       .default("PERMANENT")
       .notNull(),
+    color: varchar({ length: 7 }),
   },
   (table) => [
     foreignKey({
