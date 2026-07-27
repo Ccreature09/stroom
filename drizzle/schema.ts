@@ -1150,9 +1150,9 @@ export const locations = pgTable(
     heightMm: integer("height_mm"),
     maxWeightKg: integer("max_weight_kg"),
     isBlocked: boolean("is_blocked").default(false),
-    isRacking: boolean("is_racking"),
-    isShelf: boolean("is_shelf"),
-    isFloorStorage: boolean("is_floor_storage"),
+    isRacking: boolean("is_racking").notNull(),
+    isShelf: boolean("is_shelf").notNull(),
+    isFloorStorage: boolean("is_floor_storage").notNull(),
     updatedAt: timestamp("updated_at", { mode: "string" }).default(
       sql`CURRENT_TIMESTAMP`,
     ),
