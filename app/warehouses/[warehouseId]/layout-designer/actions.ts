@@ -6,6 +6,7 @@ import { redirect } from "next/navigation";
 import { db } from "@/lib/db";
 import {
   employees,
+  layoutFeatures,
   locations,
   positionTypes,
   halls,
@@ -14,11 +15,19 @@ import {
 } from "@/drizzle/schema";
 import { createClient } from "@/lib/server";
 import {
-  locationTypeFlagsFor,
+  parseLocationType,
   renderLocationTemplate,
   validateTemplate,
+  type LocationType,
 } from "./naming";
-import type { HallState } from "./types";
+import { validateAttrs } from "./feature-kinds";
+import {
+  computeEnvelope,
+  normalizeRotation,
+  sanitizePoints,
+  type GeometryKind,
+} from "./geometry";
+import type { FeaturePatch, HallState, NewFeatureDraft } from "./types";
 
 type ActionResult = { error?: string; success?: true };
 
@@ -112,6 +121,87 @@ export async function createHall(formData: FormData) {
   );
 }
 
+const GEOMETRY_KINDS: readonly GeometryKind[] = [
+  "RECT",
+  "POLYGON",
+  "POLYLINE",
+  "POINT",
+  "CIRCLE",
+];
+
+/**
+ * Turns a client-side new-feature draft into a row. Everything derived --
+ * envelope, rotation range, rounding -- is computed here rather than trusted
+ * from the payload, and attrs are validated against the kind's spec because a
+ * jsonb column enforces nothing on its own.
+ */
+function buildFeatureInsert(
+  draft: NewFeatureDraft,
+  organizationId: number,
+  warehouseId: number,
+  hallId: number,
+  remapZoneId: (zoneId: number | null | undefined) => number | null,
+) {
+  const kind = String(draft.kind ?? "").trim();
+  if (!kind) throw new Error("A new map feature is missing its kind.");
+
+  const geometryKind = draft.geometryKind;
+  if (!GEOMETRY_KINDS.includes(geometryKind)) {
+    throw new Error(`Feature "${kind}" has an unknown geometry kind.`);
+  }
+
+  const geometry = {
+    geometryKind,
+    originXMm: Math.round(draft.originXMm ?? 0),
+    originYMm: Math.round(draft.originYMm ?? 0),
+    widthMm: Math.max(0, Math.round(draft.widthMm ?? 0)),
+    lengthMm: Math.max(0, Math.round(draft.lengthMm ?? 0)),
+    rotationDegrees: normalizeRotation(draft.rotationDegrees ?? 0),
+    points: sanitizePoints(draft.points),
+  };
+
+  if (
+    (geometryKind === "POLYGON" || geometryKind === "POLYLINE") &&
+    (!geometry.points || geometry.points.length < 2)
+  ) {
+    throw new Error(`Feature "${kind}" needs at least two points.`);
+  }
+
+  const validated = validateAttrs(kind, draft.attrs);
+  if (!validated.ok) throw new Error(validated.error);
+
+  const envelope = computeEnvelope(geometry);
+
+  return {
+    organizationId,
+    warehouseId,
+    hallId,
+    floorLevel: Math.max(1, Math.round(draft.floorLevel ?? 1)),
+    kind,
+    geometryKind,
+    originXMm: geometry.originXMm,
+    originYMm: geometry.originYMm,
+    widthMm: geometry.widthMm,
+    lengthMm: geometry.lengthMm,
+    rotationDegrees: geometry.rotationDegrees,
+    points: geometry.points,
+    envelopeMinXMm: envelope.minX,
+    envelopeMinYMm: envelope.minY,
+    envelopeMaxXMm: envelope.maxX,
+    envelopeMaxYMm: envelope.maxY,
+    elevationMm: Math.round(draft.elevationMm ?? 0),
+    heightMm:
+      draft.heightMm == null ? null : Math.max(0, Math.round(draft.heightMm)),
+    layerIndex: Math.round(draft.layerIndex ?? 0),
+    isObstacle: draft.isObstacle ?? true,
+    isVisualOnly: draft.isVisualOnly ?? false,
+    zoneId: remapZoneId(draft.zoneId),
+    label: draft.label?.trim() || null,
+    color: draft.color ?? null,
+    attrs: validated.value,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Draft engine commit ("Save Map") -- the only place client-staged hall,
 // location, and zone drafts ever turn into database mutations. Everything
@@ -124,8 +214,9 @@ export async function commitHallStates(
   warehouseId: number,
   states: Record<number, HallState>,
 ): Promise<ActionResult> {
+  let organizationId: number;
   try {
-    await requireLayoutContext(warehouseId);
+    ({ organizationId } = await requireLayoutContext(warehouseId));
   } catch (err) {
     return { error: (err as Error).message };
   }
@@ -251,9 +342,7 @@ export async function commitHallStates(
             bay: locDraft.bay ?? null,
             level: locDraft.level ?? null,
             row: locDraft.row ?? null,
-            isRacking: locDraft.isRacking ?? false,
-            isShelf: locDraft.isShelf ?? false,
-            isFloorStorage: locDraft.isFloorStorage ?? false,
+            locationType: parseLocationType(locDraft.locationType),
             heightMm: locDraft.heightMm ?? null,
             maxWeightKg: locDraft.maxWeightKg ?? null,
             isBlocked: locDraft.isBlocked ?? false,
@@ -292,12 +381,8 @@ export async function commitHallStates(
               ...(patch.bay !== undefined && { bay: patch.bay }),
               ...(patch.level !== undefined && { level: patch.level }),
               ...(patch.row !== undefined && { row: patch.row }),
-              ...(patch.isRacking !== undefined && {
-                isRacking: patch.isRacking,
-              }),
-              ...(patch.isShelf !== undefined && { isShelf: patch.isShelf }),
-              ...(patch.isFloorStorage !== undefined && {
-                isFloorStorage: patch.isFloorStorage,
+              ...(patch.locationType !== undefined && {
+                locationType: parseLocationType(patch.locationType),
               }),
               ...(patch.heightMm !== undefined && { heightMm: patch.heightMm }),
               ...(patch.maxWeightKg !== undefined && {
@@ -352,7 +437,141 @@ export async function commitHallStates(
             );
         }
 
-        // 7. Hall patch.
+        // 7. New layout features. Geometry is re-derived server-side: the
+        // envelope is never taken from the client, since it is what spatial
+        // queries index and a wrong one silently breaks containment tests.
+        for (const featureDraft of state.newFeatures ?? []) {
+          const values = buildFeatureInsert(
+            featureDraft,
+            organizationId,
+            warehouseId,
+            hallId,
+            remapZoneId,
+          );
+          await tx.insert(layoutFeatures).values(values);
+        }
+
+        // 8. Feature patches. A patch is partial, but the envelope depends on
+        // every geometry field at once, so the current row is read back and
+        // merged before recomputing it.
+        for (const [featureIdStr, patch] of Object.entries(
+          state.featurePatches ?? {},
+        )) {
+          const featureId = Number(featureIdStr);
+          const [existing] = await tx
+            .select({
+              kind: layoutFeatures.kind,
+              geometryKind: layoutFeatures.geometryKind,
+              originXMm: layoutFeatures.originXMm,
+              originYMm: layoutFeatures.originYMm,
+              widthMm: layoutFeatures.widthMm,
+              lengthMm: layoutFeatures.lengthMm,
+              rotationDegrees: layoutFeatures.rotationDegrees,
+              points: layoutFeatures.points,
+            })
+            .from(layoutFeatures)
+            .where(
+              and(
+                eq(layoutFeatures.featureId, featureId),
+                eq(layoutFeatures.warehouseId, warehouseId),
+                eq(layoutFeatures.hallId, hallId),
+              ),
+            )
+            .limit(1);
+          if (!existing) continue;
+
+          const geometry = {
+            geometryKind: existing.geometryKind as GeometryKind,
+            originXMm: patch.originXMm ?? existing.originXMm,
+            originYMm: patch.originYMm ?? existing.originYMm,
+            widthMm: patch.widthMm ?? existing.widthMm,
+            lengthMm: patch.lengthMm ?? existing.lengthMm,
+            rotationDegrees: normalizeRotation(
+              patch.rotationDegrees ?? existing.rotationDegrees,
+            ),
+            points:
+              patch.points !== undefined
+                ? sanitizePoints(patch.points)
+                : sanitizePoints(existing.points),
+          };
+          const envelope = computeEnvelope(geometry);
+
+          let attrs: FeaturePatch["attrs"];
+          if (patch.attrs !== undefined) {
+            const validated = validateAttrs(existing.kind, patch.attrs);
+            if (!validated.ok) throw new Error(validated.error);
+            attrs = validated.value;
+          }
+
+          await tx
+            .update(layoutFeatures)
+            .set({
+              originXMm: Math.round(geometry.originXMm),
+              originYMm: Math.round(geometry.originYMm),
+              widthMm: Math.max(0, Math.round(geometry.widthMm)),
+              lengthMm: Math.max(0, Math.round(geometry.lengthMm)),
+              rotationDegrees: geometry.rotationDegrees,
+              points: geometry.points,
+              envelopeMinXMm: envelope.minX,
+              envelopeMinYMm: envelope.minY,
+              envelopeMaxXMm: envelope.maxX,
+              envelopeMaxYMm: envelope.maxY,
+              ...(patch.floorLevel !== undefined && {
+                floorLevel: Math.max(1, Math.round(patch.floorLevel)),
+              }),
+              ...(patch.elevationMm !== undefined && {
+                elevationMm: Math.round(patch.elevationMm),
+              }),
+              ...(patch.heightMm !== undefined && {
+                heightMm:
+                  patch.heightMm === null
+                    ? null
+                    : Math.max(0, Math.round(patch.heightMm)),
+              }),
+              ...(patch.layerIndex !== undefined && {
+                layerIndex: Math.round(patch.layerIndex),
+              }),
+              ...(patch.isObstacle !== undefined && {
+                isObstacle: patch.isObstacle,
+              }),
+              ...(patch.isVisualOnly !== undefined && {
+                isVisualOnly: patch.isVisualOnly,
+              }),
+              ...(patch.zoneId !== undefined && {
+                zoneId: remapZoneId(patch.zoneId),
+              }),
+              ...(patch.label !== undefined && {
+                label: patch.label?.trim() || null,
+              }),
+              ...(patch.color !== undefined && { color: patch.color }),
+              ...(attrs !== undefined && { attrs }),
+              updatedAt: new Date().toISOString(),
+            })
+            .where(
+              and(
+                eq(layoutFeatures.featureId, featureId),
+                eq(layoutFeatures.warehouseId, warehouseId),
+              ),
+            );
+        }
+
+        // 9. Feature deletes. Features are not referenced by inventory or
+        // movement history yet, so a hard delete is still safe here -- once
+        // nav edges reference them this must become a soft delete
+        // (is_active = false) instead.
+        if ((state.deletedFeatureIds ?? []).length > 0) {
+          await tx
+            .delete(layoutFeatures)
+            .where(
+              and(
+                inArray(layoutFeatures.featureId, state.deletedFeatureIds),
+                eq(layoutFeatures.warehouseId, warehouseId),
+                eq(layoutFeatures.hallId, hallId),
+              ),
+            );
+        }
+
+        // 10. Hall patch.
         if (Object.keys(state.hallPatch).length > 0) {
           const patch = state.hallPatch;
           await tx
@@ -426,13 +645,10 @@ type BulkGeneratorType = "racking" | "floor_line" | "shelving";
 type Orientation = "horizontal" | "vertical";
 type Axis1DDirection = "forward" | "reverse";
 
-const GENERATOR_TO_LOCATION_TYPE: Record<
-  BulkGeneratorType,
-  "racking" | "shelf" | "floor"
-> = {
-  racking: "racking",
-  floor_line: "floor",
-  shelving: "shelf",
+const GENERATOR_TO_LOCATION_TYPE: Record<BulkGeneratorType, LocationType> = {
+  racking: "RACKING",
+  floor_line: "FLOOR",
+  shelving: "SHELF",
 };
 
 const DEFAULT_TEMPLATES: Record<BulkGeneratorType, string> = {
@@ -881,13 +1097,9 @@ export async function bulkGenerateLocations(
     seen.add(draft.locationCode);
   }
 
-  // Bulk creation: setting one location type automatically sets that flag
-  // true and the other two false.
-  const typeFlags = locationTypeFlagsFor(locationType);
-
-  // location_code is globally unique, so skip rows that collide with existing
-  // locations (e.g. re-running a generator over the same range) instead of
-  // failing the whole batch.
+  // Location codes are unique per warehouse, so skip rows that collide with
+  // existing locations in *this* warehouse (e.g. re-running a generator over
+  // the same range) instead of failing the whole batch.
   const inserted = await db
     .insert(locations)
     .values(
@@ -900,7 +1112,7 @@ export async function bulkGenerateLocations(
         bay: draft.bay,
         level: draft.level,
         row: draft.row,
-        ...typeFlags,
+        locationType,
         physicalX: draft.physicalX,
         physicalY: draft.physicalY,
         physicalWidthMm: draft.physicalWidthMm,
@@ -908,7 +1120,9 @@ export async function bulkGenerateLocations(
         rotationDegrees: 0,
       })),
     )
-    .onConflictDoNothing({ target: locations.locationCode })
+    .onConflictDoNothing({
+      target: [locations.warehouseId, locations.locationCode],
+    })
     .returning({ locationId: locations.locationId });
 
   revalidateLayout(warehouseId);
