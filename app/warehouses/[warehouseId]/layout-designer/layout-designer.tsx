@@ -8,6 +8,9 @@ import {
   useState,
   useTransition,
 } from "react";
+import { useRouter } from "next/navigation";
+import { AlertTriangle, History, X } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import HallToolbar from "./hall-toolbar";
 import LayoutDesignerCanvas, {
   type GeometryUpdate,
@@ -28,12 +31,16 @@ import type {
   HallDTO,
   HallPatch,
   HallState,
+  LayoutVersionDTO,
   LocationDTO,
   LocationPatch,
+  RecoveredDraft,
+  UnderlayDTO,
   ZonePatch,
   ZoneTypeDTO,
 } from "./types";
 import {
+  DRAFT_STATE_VERSION,
   EMPTY_HALL_STATE,
   applyHallStateToFeatures,
   applyHallStateToLocations,
@@ -41,7 +48,8 @@ import {
   hallStateChangeCount,
 } from "./types";
 import { defaultPointsForDrawnRect } from "./geometry";
-import { commitHallStates } from "./actions";
+import { commitHallStates, type PublishConflict } from "./actions";
+import { saveHallDraft } from "./lifecycle-actions";
 
 type HallHistory = {
   past: HallState[];
@@ -323,10 +331,16 @@ function draftReducer(state: DraftState, action: DraftAction): DraftState {
 // Recovering an in-progress draft after a refresh/crash, and warning before
 // a navigation that would otherwise silently discard one -- the draft store
 // is the only place unsaved layout edits exist until "Save Map" runs.
-// Bumped to 2 when layout features joined HallState: a v1 draft has no
-// featurePatches/newFeatures/deletedFeatureIds keys, and the version check
-// below discards it rather than hydrating a shape the reducer would crash on.
-const DRAFT_STORAGE_VERSION = 2;
+// localStorage is now only the offline fallback -- layout_drafts on the server
+// is authoritative and wins whenever both exist. This still matters for edits
+// made while the network is down, which the server autosave cannot capture.
+// Shares DRAFT_STATE_VERSION so both persistence layers invalidate together.
+const DRAFT_STORAGE_VERSION = DRAFT_STATE_VERSION;
+
+// How long the designer sits idle before autosaving to the server. Long
+// enough that a drag gesture is one save rather than thirty, short enough that
+// a closed tab loses seconds of work rather than minutes.
+const DRAFT_AUTOSAVE_DEBOUNCE_MS = 1500;
 
 function draftStorageKey(warehouseId: number) {
   return `stroom:layout-draft:${warehouseId}`;
@@ -340,6 +354,10 @@ export default function LayoutDesigner({
   zoneTypes,
   features,
   featureKinds,
+  currentVersionNumber,
+  versionHistory,
+  recoveredDrafts,
+  underlays,
 }: {
   warehouseId: number;
   halls: HallDTO[];
@@ -348,7 +366,12 @@ export default function LayoutDesigner({
   zoneTypes: ZoneTypeDTO[];
   features: FeatureDTO[];
   featureKinds: FeatureKindDTO[];
+  currentVersionNumber: number;
+  versionHistory: LayoutVersionDTO[];
+  recoveredDrafts: RecoveredDraft[];
+  underlays: UnderlayDTO[];
 }) {
+  const router = useRouter();
   const [tool, setTool] = useState<Tool>("select");
   const [selectedLocationId, setSelectedLocationId] = useState<number | null>(
     null,
@@ -365,6 +388,12 @@ export default function LayoutDesigner({
   } | null>(null);
   const [draft, setDraft] = useState<DraftGeometry | null>(null);
   const [isSavingMap, startSaveMapTransition] = useTransition();
+  const [publishConflict, setPublishConflict] =
+    useState<PublishConflict | null>(null);
+  const [publishError, setPublishError] = useState<string | null>(null);
+  // Result of the last two-click measurement, waiting for the user to say
+  // what that distance really is.
+  const [measuredMm, setMeasuredMm] = useState<number | null>(null);
 
   const [draftState, dispatch] = useReducer(draftReducer, {} as DraftState);
   const tempIdRef = useRef(0);
@@ -374,23 +403,45 @@ export default function LayoutDesigner({
   }
 
   // Recover any draft left over from a previous session (refresh, crash,
-  // closed tab) before anything else touches the store.
+  // closed tab, different machine) before anything else touches the store.
+  //
+  // The server's layout_drafts rows win over localStorage: they follow the
+  // user between browsers and they carry the layout version the edits were
+  // authored against, which localStorage cannot know. localStorage is only
+  // consulted for halls the server has no draft for, which is what covers
+  // edits made while offline.
   useEffect(() => {
+    let next: DraftState = {};
+
     try {
       const raw = localStorage.getItem(draftStorageKey(warehouseId));
       if (raw) {
         const parsed = JSON.parse(raw);
         if (parsed && parsed.version === DRAFT_STORAGE_VERSION && parsed.state) {
-          dispatch({ type: "HYDRATE", state: parsed.state as DraftState });
+          next = parsed.state as DraftState;
         } else {
           localStorage.removeItem(draftStorageKey(warehouseId));
         }
       }
     } catch {
-      // Corrupt or unavailable storage -- proceed with an empty draft.
+      // Corrupt or unavailable storage -- fall through to the server drafts.
+    }
+
+    for (const draft of recoveredDrafts) {
+      next[draft.hallId] = { past: [], present: draft.state, future: [] };
+    }
+
+    if (Object.keys(next).length > 0) {
+      dispatch({ type: "HYDRATE", state: next });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const staleDrafts = useMemo(
+    () => recoveredDrafts.filter((d) => d.isStale),
+    [recoveredDrafts],
+  );
+  const [staleNoticeDismissed, setStaleNoticeDismissed] = useState(false);
 
   // Skips its very first run (mount) -- that run reflects the pre-hydration
   // render, which lands in the same commit as the hydrate effect above but
@@ -416,9 +467,65 @@ export default function LayoutDesigner({
     }
   }, [draftState, warehouseId]);
 
+  // Debounced server autosave. Only halls whose draft actually changed since
+  // the last flush are sent, so switching halls or nudging one box never
+  // rewrites every draft row.
+  const [draftSaveState, setDraftSaveState] = useState<
+    "idle" | "saving" | "saved" | "error"
+  >("idle");
+  const lastSavedRef = useRef<Record<number, HallState>>({});
+  const autosaveSkipRef = useRef(true);
+
+  useEffect(() => {
+    // The first run is the pre-hydration render; saving then would push an
+    // empty draft over whatever is about to be recovered.
+    if (autosaveSkipRef.current) {
+      autosaveSkipRef.current = false;
+      return;
+    }
+    if (isSavingMap) return;
+
+    const timer = setTimeout(async () => {
+      const pending: Array<[number, HallState]> = [];
+      for (const [hallIdStr, history] of Object.entries(draftState)) {
+        const hallId = Number(hallIdStr);
+        if (lastSavedRef.current[hallId] !== history.present) {
+          pending.push([hallId, history.present]);
+        }
+      }
+      if (pending.length === 0) return;
+
+      setDraftSaveState("saving");
+      try {
+        for (const [hallId, state] of pending) {
+          const result = await saveHallDraft(
+            warehouseId,
+            hallId,
+            state,
+            currentVersionNumber,
+          );
+          if (result?.error) throw new Error(result.error);
+          lastSavedRef.current[hallId] = state;
+        }
+        setDraftSaveState("saved");
+      } catch {
+        // localStorage still holds the draft, so this is recoverable -- the
+        // indicator tells the user the server copy is behind.
+        setDraftSaveState("error");
+      }
+    }, DRAFT_AUTOSAVE_DEBOUNCE_MS);
+
+    return () => clearTimeout(timer);
+  }, [draftState, warehouseId, currentVersionNumber, isSavingMap]);
+
   const hall = useMemo(
     () => halls.find((h) => h.hallId === selectedHallId) ?? halls[0],
     [halls, selectedHallId],
+  );
+
+  const hallUnderlay = useMemo(
+    () => underlays.find((u) => u.hallId === selectedHallId) ?? null,
+    [underlays, selectedHallId],
   );
 
   const hallHistory = draftState[hall.hallId];
@@ -661,15 +768,109 @@ export default function LayoutDesigner({
       }
     }
     startSaveMapTransition(async () => {
-      const result = await commitHallStates(warehouseId, statesToSave);
-      if (!result?.error) {
-        dispatch({ type: "RESET_ALL" });
+      setPublishConflict(null);
+      setPublishError(null);
+      const result = await commitHallStates(
+        warehouseId,
+        statesToSave,
+        currentVersionNumber,
+      );
+      if (result?.conflict) {
+        // The draft is deliberately kept. Someone else published underneath
+        // this session, so discarding the user's work to resolve it would be
+        // the worst possible outcome -- they reload, review, and republish.
+        setPublishConflict(result.conflict);
+        return;
       }
+      if (result?.error) {
+        setPublishError(result.error);
+        return;
+      }
+      lastSavedRef.current = {};
+      setDraftSaveState("idle");
+      dispatch({ type: "RESET_ALL" });
     });
   }
 
+  const showStaleNotice = staleDrafts.length > 0 && !staleNoticeDismissed;
+
   return (
-    <div className="relative flex h-full min-h-0 flex-1 flex-row overflow-hidden rounded-xl border bg-background/40">
+    <div className="relative flex h-full min-h-0 flex-1 flex-col overflow-hidden rounded-xl border bg-background/40">
+      {publishConflict && (
+        <div className="flex items-start gap-3 border-b border-amber-300 bg-amber-50 px-4 py-3 text-xs text-amber-900">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+          <div className="min-w-0 flex-1">
+            <p className="font-semibold">
+              Someone else published while you were editing.
+            </p>
+            <p className="mt-0.5 leading-relaxed">
+              The layout moved from version {currentVersionNumber} to{" "}
+              {publishConflict.currentVersion}
+              {publishConflict.publishedByName
+                ? ` (published by ${publishConflict.publishedByName})`
+                : ""}
+              . Your {pendingCount} unsaved change
+              {pendingCount === 1 ? "" : "s"} have been kept — reload to see
+              their version, then re-apply and publish again.
+            </p>
+          </div>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => router.refresh()}
+            className="h-7 shrink-0 border-amber-400 bg-white text-xs"
+          >
+            Reload layout
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => setPublishConflict(null)}
+            className="h-7 shrink-0 px-2 text-xs"
+          >
+            <X className="h-3.5 w-3.5" />
+          </Button>
+        </div>
+      )}
+
+      {publishError && (
+        <div className="flex items-start gap-3 border-b border-destructive/40 bg-destructive/10 px-4 py-3 text-xs text-destructive">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+          <p className="min-w-0 flex-1 font-medium">{publishError}</p>
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => setPublishError(null)}
+            className="h-7 shrink-0 px-2 text-xs"
+          >
+            <X className="h-3.5 w-3.5" />
+          </Button>
+        </div>
+      )}
+
+      {showStaleNotice && (
+        <div className="flex items-start gap-3 border-b border-sky-300 bg-sky-50 px-4 py-3 text-xs text-sky-900">
+          <History className="mt-0.5 h-4 w-4 shrink-0" />
+          <p className="min-w-0 flex-1 leading-relaxed">
+            <span className="font-semibold">Recovered draft is older.</span>{" "}
+            {staleDrafts.length === 1 ? "A draft was" : "Drafts were"} written
+            against layout version {staleDrafts[0].baseVersionNumber}, but the
+            published layout is now version {currentVersionNumber}. Review the
+            changes before publishing — they may reference locations that have
+            since moved.
+          </p>
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => setStaleNoticeDismissed(true)}
+            className="h-7 shrink-0 px-2 text-xs"
+          >
+            <X className="h-3.5 w-3.5" />
+          </Button>
+        </div>
+      )}
+
+      <div className="relative flex min-h-0 flex-1 flex-row overflow-hidden">
       {/* 1. Left Sidebar: Toolbar */}
       <HallToolbar
         warehouseId={warehouseId}
@@ -691,6 +892,12 @@ export default function LayoutDesigner({
         onPatchZone={handlePatchZone}
         onDeleteZone={handleDeleteZone}
         locked={isSavingMap}
+        currentVersionNumber={currentVersionNumber}
+        versionHistory={versionHistory}
+        draftSaveState={draftSaveState}
+        underlay={hallUnderlay}
+        measuredMm={measuredMm}
+        onClearMeasurement={() => setMeasuredMm(null)}
       />
 
       {/* 2. Middle Column: Canvas Container */}
@@ -702,6 +909,8 @@ export default function LayoutDesigner({
             zoneTypes={effectiveZoneTypes}
             features={effectiveFeatures}
             featureKinds={featureKinds}
+            underlay={hallUnderlay}
+            onMeasured={setMeasuredMm}
             selectedFeatureId={selectedFeatureId}
             onSelectFeature={handleSelectFeature}
             onFeatureDrawn={handleFeatureDrawn}
@@ -805,6 +1014,7 @@ export default function LayoutDesigner({
       ) : (
         <EmptyLocationPanel />
       )}
+      </div>
     </div>
   );
 }
