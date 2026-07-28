@@ -48,7 +48,8 @@ export function AddSupplierDialog({ warehouseId }: { warehouseId: number }) {
           <DialogHeader>
             <DialogTitle>Add New Supplier</DialogTitle>
             <DialogDescription>
-              Record a new vendor in your organization's master contacts list.
+              Record a new vendor in your organization&apos;s master contacts
+              list.
             </DialogDescription>
           </DialogHeader>
 
