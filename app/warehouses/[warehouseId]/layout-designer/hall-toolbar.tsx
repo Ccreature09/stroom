@@ -32,6 +32,7 @@ import {
   Hand,
   Move,
   SquarePlus,
+  Blocks,
   Layers,
   Undo2,
   Redo2,
@@ -206,7 +207,22 @@ export default function HallToolbar({
               <SquarePlus className="mr-2 h-3.5 w-3.5" />
               Add location
             </Button>
+            <Button
+              variant={tool === "feature" ? "default" : "ghost"}
+              size="sm"
+              onClick={() => onToolChange("feature")}
+              className="justify-start text-xs font-medium"
+            >
+              <Blocks className="mr-2 h-3.5 w-3.5" />
+              Add feature
+            </Button>
           </div>
+          {tool === "feature" && (
+            <p className="px-1 text-[11px] leading-snug text-muted-foreground">
+              Drag out an area, then pick what it is -- walls, columns, docks,
+              staging, workstations, hazard areas.
+            </p>
+          )}
         </div>
         <div className="flex flex-col gap-2">
           <Label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
