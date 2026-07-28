@@ -84,14 +84,10 @@ export default async function WarehouseLayoutDesignerPage({
       physicalWidthMm: hallsTable.physicalWidthMm,
       physicalLengthMm: hallsTable.physicalLengthMm,
       clearHeightMm: hallsTable.clearHeightMm,
+      isActive: hallsTable.isActive,
     })
     .from(hallsTable)
-    .where(
-      and(
-        eq(hallsTable.warehouseId, parsedWarehouseId),
-        eq(hallsTable.isActive, true),
-      ),
-    )
+    .where(eq(hallsTable.warehouseId, parsedWarehouseId))
     .orderBy(hallsTable.name);
 
   // No halls yet -- show a minimal empty state instead of an empty canvas.
@@ -257,6 +253,7 @@ export default async function WarehouseLayoutDesignerPage({
         requiresHazmatClearance: zoneTypes.requiresHazmatClearance,
         requiresBarcodeScan: zoneTypes.requiresBarcodeScan,
         storagePermanence: zoneTypes.storagePermanence,
+        color: zoneTypes.color,
       })
       .from(zoneTypes)
       .where(eq(zoneTypes.warehouseId, parsedWarehouseId))

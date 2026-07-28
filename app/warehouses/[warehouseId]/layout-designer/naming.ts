@@ -88,12 +88,6 @@ export function locationTypeFlagsFor(type: LocationTypeFlag) {
   };
 }
 
-export function readLocationTypeFlag(formData: FormData): LocationTypeFlag {
-  const raw = String(formData.get("locationType") ?? "none");
-  if (raw === "racking" || raw === "shelf" || raw === "floor") return raw;
-  return "none";
-}
-
 export function flagsToLocationType(flags: {
   isRacking?: boolean | null;
   isShelf?: boolean | null;
