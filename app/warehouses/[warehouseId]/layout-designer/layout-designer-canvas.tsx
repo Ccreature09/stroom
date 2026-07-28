@@ -3,8 +3,10 @@
 import { useEffect, useState, useRef } from "react";
 import {
   Application,
+  Assets,
   Container,
   Graphics,
+  Sprite,
   Text,
   TextStyle,
   type FederatedPointerEvent,
@@ -15,6 +17,7 @@ import type {
   FeatureKindDTO,
   HallDTO,
   LocationDTO,
+  UnderlayDTO,
   ZoneTypeDTO,
 } from "./types";
 import {
@@ -43,7 +46,13 @@ const LABEL_ZOOM_THRESHOLD = 0.55;
 const POINT_MARKER_MM = 350;
 const FEATURE_HIT_TOLERANCE_MM = 250;
 
-export type Tool = "select" | "pan" | "transform" | "draw" | "feature";
+export type Tool =
+  | "select"
+  | "pan"
+  | "transform"
+  | "draw"
+  | "feature"
+  | "measure";
 
 export type FeatureGeometryUpdate = {
   originXMm: number;
@@ -68,6 +77,9 @@ type Props = {
   zoneTypes: ZoneTypeDTO[];
   features: FeatureDTO[];
   featureKinds: FeatureKindDTO[];
+  underlay: UnderlayDTO | null;
+  /** Two clicks in Measure mode report the distance between them, in mm. */
+  onMeasured: (distanceMm: number) => void;
   selectedFeatureId: number | null;
   onSelectFeature: (featureId: number | null) => void;
   onFeatureDrawn: (geometry: {
@@ -209,6 +221,8 @@ export default function LayoutDesignerCanvas({
   zoneTypes,
   features,
   featureKinds,
+  underlay,
+  onMeasured,
   selectedFeatureId,
   onSelectFeature,
   onFeatureDrawn,
@@ -232,6 +246,10 @@ export default function LayoutDesignerCanvas({
   const viewportRef = useRef<Viewport | null>(null);
   const locationLayerRef = useRef<Container | null>(null);
   const featureLayerRef = useRef<Container | null>(null);
+  const underlayLayerRef = useRef<Container | null>(null);
+  const underlaySpriteRef = useRef<Sprite | null>(null);
+  const underlayUrlRef = useRef<string | null>(null);
+  const measureLayerRef = useRef<Graphics | null>(null);
   const handleLayerRef = useRef<Container | null>(null);
   const featureHandlesRef = useRef<Graphics[]>([]);
   const featureNodesRef = useRef<Map<number, FeatureNode>>(new Map());
@@ -293,6 +311,7 @@ export default function LayoutDesignerCanvas({
     onSelectFeature,
     onFeatureDrawn,
     onFeatureGeometryChange,
+    onMeasured,
   });
   stateRef.current = {
     tool,
@@ -309,6 +328,7 @@ export default function LayoutDesignerCanvas({
     onSelectFeature,
     onFeatureDrawn,
     onFeatureGeometryChange,
+    onMeasured,
   };
 
   const locationsRef = useRef(locations);
@@ -322,6 +342,10 @@ export default function LayoutDesignerCanvas({
 
   const featureKindsRef = useRef(featureKinds);
   featureKindsRef.current = featureKinds;
+
+  // First click of a measure gesture, in world mm; the second click reports
+  // the distance and resets.
+  const measureAnchorRef = useRef<Point | null>(null);
 
   function kindMetaFor(kind: string): FeatureKindDTO | undefined {
     return featureKindsRef.current.find((k) => k.kind === kind);
@@ -1160,6 +1184,12 @@ export default function LayoutDesignerCanvas({
       viewport.on("zoomed", updateScale);
       viewport.on("moved", updateScale);
 
+      // Bottom of the stack: the traced floorplan sits under everything, so
+      // the drawing on top of it is always readable.
+      const underlayLayer = new Container();
+      viewport.addChild(underlayLayer);
+      underlayLayerRef.current = underlayLayer;
+
       // Beneath the location layer: structures, docks and staging polygons
       // are context for the racking, never on top of it.
       const featureLayer = new Container();
@@ -1174,6 +1204,10 @@ export default function LayoutDesignerCanvas({
       const handleLayer = new Container();
       viewport.addChild(handleLayer);
       handleLayerRef.current = handleLayer;
+
+      const measureLayer = new Graphics();
+      viewport.addChild(measureLayer);
+      measureLayerRef.current = measureLayer;
 
       viewport.fit(true);
       viewport.moveCenter(hall.physicalWidthMm / 2, hall.physicalLengthMm / 2);
@@ -1191,6 +1225,25 @@ export default function LayoutDesignerCanvas({
       viewport.on("pointerdown", (e: FederatedPointerEvent) => {
         if (e.button !== 0) return;
         const world = viewport.toWorld(e.global);
+
+        // Measure is a two-click gesture rather than a drag: on a large
+        // floorplan the two ends of a known dimension are often further
+        // apart than one comfortable drag, and each end wants to be placed
+        // precisely (with a zoom in between if need be).
+        if (stateRef.current.tool === "measure") {
+          const anchor = measureAnchorRef.current;
+          if (!anchor) {
+            measureAnchorRef.current = { x: world.x, y: world.y };
+            drawMeasureOverlay(null);
+          } else {
+            const distance = Math.hypot(world.x - anchor.x, world.y - anchor.y);
+            measureAnchorRef.current = null;
+            measureLayerRef.current?.clear();
+            hideCoordOverlay();
+            if (distance > 0) stateRef.current.onMeasured(distance);
+          }
+          return;
+        }
 
         if (
           stateRef.current.tool === "draw" ||
@@ -1243,6 +1296,24 @@ export default function LayoutDesignerCanvas({
       });
 
       viewport.on("pointermove", (e: FederatedPointerEvent) => {
+        if (stateRef.current.tool === "measure") {
+          const world = viewport.toWorld(e.global);
+          if (measureAnchorRef.current) {
+            drawMeasureOverlay(world);
+            const anchor = measureAnchorRef.current;
+            const distance = Math.hypot(
+              world.x - anchor.x,
+              world.y - anchor.y,
+            );
+            showCoordOverlay(
+              e.global.x,
+              e.global.y,
+              `${(distance / 1000).toFixed(2)} m (${Math.round(distance)} mm)`,
+            );
+          }
+          return;
+        }
+
         const draw = drawRef.current;
         if (draw) {
           const world = viewport.toWorld(e.global);
@@ -1462,6 +1533,11 @@ export default function LayoutDesignerCanvas({
       viewportRef.current = null;
       locationLayerRef.current = null;
       featureLayerRef.current = null;
+      underlayLayerRef.current = null;
+      underlaySpriteRef.current = null;
+      underlayUrlRef.current = null;
+      measureLayerRef.current = null;
+      measureAnchorRef.current = null;
       handleLayerRef.current = null;
       if (forceCancelInteractions) {
         window.removeEventListener("pointerup", forceCancelInteractions);
@@ -1507,6 +1583,90 @@ export default function LayoutDesignerCanvas({
     syncFeatureNodes(features);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [features, isReady]);
+
+  // Underlay sprite. The texture is only re-fetched when the URL changes;
+  // placement (scale/offset/rotation/opacity) is applied every render, so
+  // calibrating or nudging it never round-trips the image again.
+  useEffect(() => {
+    if (!isReady) return;
+    const layer = underlayLayerRef.current;
+    if (!layer) return;
+
+    let cancelled = false;
+
+    async function sync() {
+      if (!underlay?.signedUrl || !underlay.isVisible) {
+        underlaySpriteRef.current?.destroy();
+        underlaySpriteRef.current = null;
+        underlayUrlRef.current = null;
+        return;
+      }
+
+      if (underlayUrlRef.current !== underlay.signedUrl) {
+        underlaySpriteRef.current?.destroy();
+        underlaySpriteRef.current = null;
+        try {
+          const texture = await Assets.load(underlay.signedUrl);
+          if (cancelled) return;
+          const sprite = new Sprite(texture);
+          sprite.eventMode = "none";
+          layer!.addChild(sprite);
+          underlaySpriteRef.current = sprite;
+          underlayUrlRef.current = underlay.signedUrl;
+        } catch (err) {
+          // An expired signed URL or a corrupt upload should not take the
+          // whole designer down -- the layout is still fully editable.
+          console.error("Failed to load underlay image:", err);
+          return;
+        }
+      }
+
+      const sprite = underlaySpriteRef.current;
+      if (!sprite) return;
+      // scale = mm per image pixel, which is exactly what calibration solves
+      // for, so the raster ends up measured in the same millimetres as every
+      // location and feature.
+      sprite.scale.set(underlay.scaleMmPerPx);
+      sprite.position.set(underlay.offsetXMm, underlay.offsetYMm);
+      sprite.angle = underlay.rotationDegrees;
+      sprite.alpha = underlay.opacity;
+    }
+
+    sync();
+    return () => {
+      cancelled = true;
+    };
+  }, [underlay, isReady]);
+
+  // Measure overlay: anchor marker plus the rubber-band line to the cursor.
+  function drawMeasureOverlay(cursor: Point | null) {
+    const g = measureLayerRef.current;
+    const viewport = viewportRef.current;
+    if (!g || !viewport) return;
+    g.clear();
+    const anchor = measureAnchorRef.current;
+    if (!anchor) return;
+
+    const markerRadius = 6 / viewport.scale.x;
+    const lineWidth = 2 / viewport.scale.x;
+    g.circle(anchor.x, anchor.y, markerRadius).fill({ color: 0x7c3aed });
+    if (cursor) {
+      g.moveTo(anchor.x, anchor.y)
+        .lineTo(cursor.x, cursor.y)
+        .stroke({ width: lineWidth, color: 0x7c3aed });
+      g.circle(cursor.x, cursor.y, markerRadius).stroke({
+        width: lineWidth,
+        color: 0x7c3aed,
+      });
+    }
+  }
+
+  // Leaving Measure mode abandons any half-finished measurement.
+  useEffect(() => {
+    if (tool === "measure") return;
+    measureAnchorRef.current = null;
+    measureLayerRef.current?.clear();
+  }, [tool]);
 
   // Selection styling for features is a redraw of the existing Graphics only,
   // never a node rebuild -- rebuilding on every click would drop the drag
