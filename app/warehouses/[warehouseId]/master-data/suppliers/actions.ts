@@ -53,7 +53,7 @@ export async function createSupplier(formData: FormData) {
 
     if (warehouseId) {
       revalidatePath(
-        `/dashboard/warehouses/${warehouseId}/master-data/suppliers`,
+        `/warehouses/${warehouseId}/master-data/suppliers`,
       );
     }
 
@@ -61,6 +61,70 @@ export async function createSupplier(formData: FormData) {
   } catch (error) {
     console.error("Failed to create supplier:", error);
     return { success: false, error: "Failed to create supplier" };
+  }
+}
+
+export async function updateSupplier(formData: FormData) {
+  const supabase = await createClient();
+  const { data } = await supabase.auth.getClaims();
+  const userId = data?.claims?.sub;
+
+  if (!userId) {
+    return { success: false, error: "Unauthorized" };
+  }
+
+  const [employee] = await db
+    .select({ organizationId: employees.organizationId })
+    .from(employees)
+    .where(and(eq(employees.authUserId, userId), eq(employees.isActive, true)))
+    .limit(1);
+
+  if (!employee) {
+    return { success: false, error: "Unauthorized" };
+  }
+
+  const supplierId = Number(formData.get("supplierId"));
+  const warehouseId = formData.get("warehouseId");
+  const name = formData.get("name") as string;
+  const contactName = formData.get("contactName") as string;
+  const contactEmail = formData.get("contactEmail") as string;
+  const contactPhone = formData.get("contactPhone") as string;
+  const address = formData.get("address") as string;
+  const leadTimeDaysRaw = formData.get("leadTimeDays");
+
+  if (!supplierId || !name) {
+    return { success: false, error: "Supplier name is required" };
+  }
+
+  const leadTimeDays = leadTimeDaysRaw ? Number(leadTimeDaysRaw) : null;
+
+  try {
+    await db
+      .update(suppliers)
+      .set({
+        name,
+        contactName: contactName || null,
+        contactEmail: contactEmail || null,
+        contactPhone: contactPhone || null,
+        address: address || null,
+        leadTimeDays,
+        updatedAt: new Date().toISOString(),
+      })
+      .where(
+        and(
+          eq(suppliers.supplierId, supplierId),
+          eq(suppliers.organizationId, employee.organizationId),
+        ),
+      );
+
+    if (warehouseId) {
+      revalidatePath(`/warehouses/${warehouseId}/master-data/suppliers`);
+    }
+
+    return { success: true };
+  } catch (error) {
+    console.error("Failed to update supplier:", error);
+    return { success: false, error: "Failed to update supplier" };
   }
 }
 
@@ -95,7 +159,7 @@ export async function deleteSupplier(formData: FormData) {
 
   if (warehouseId) {
     revalidatePath(
-      `/dashboard/warehouses/${warehouseId}/master-data/suppliers`,
+      `/warehouses/${warehouseId}/master-data/suppliers`,
     );
   }
 }
