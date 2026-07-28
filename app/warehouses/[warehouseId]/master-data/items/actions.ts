@@ -82,7 +82,91 @@ export async function createItem(formData: FormData) {
     minStockLevel,
   });
 
-  revalidatePath(`/dashboard/warehouses/${warehouseId}/master-data/items`);
+  revalidatePath(`/warehouses/${warehouseId}/master-data/items`);
+  return { success: true };
+}
+
+export async function updateItem(formData: FormData) {
+  const itemId = Number(formData.get("itemId"));
+  const warehouseId = Number(formData.get("warehouseId"));
+
+  const sku = formData.get("sku") as string;
+  const name = formData.get("name") as string;
+
+  const barcode = formData.get("barcode") as string;
+  const description = formData.get("description") as string;
+  const category = formData.get("category") as string;
+  const hazardClass = formData.get("hazardClass") as string;
+
+  const lengthCm = formData.get("lengthCm")
+    ? String(formData.get("lengthCm"))
+    : "0.00";
+  const widthCm = formData.get("widthCm")
+    ? String(formData.get("widthCm"))
+    : "0.00";
+  const heightCm = formData.get("heightCm")
+    ? String(formData.get("heightCm"))
+    : "0.00";
+  const weightKg = formData.get("weightKg")
+    ? String(formData.get("weightKg"))
+    : "0.000";
+
+  const shelfLifeDays = formData.get("shelfLifeDays")
+    ? Number(formData.get("shelfLifeDays"))
+    : null;
+  const minStockLevel = formData.get("minStockLevel")
+    ? Number(formData.get("minStockLevel"))
+    : 0;
+
+  const isBatchTracked = formData.get("isBatchTracked") === "on";
+  const isLotTracked = formData.get("isLotTracked") === "on";
+  const hasExpiry = formData.get("hasExpiry") === "on";
+
+  if (!itemId || !sku || !name || !warehouseId) {
+    return { error: "SKU and Name are required." };
+  }
+
+  const supabase = await createClient();
+  const { data } = await supabase.auth.getClaims();
+  const userId = data?.claims?.sub;
+  if (!userId) return { error: "Unauthorized" };
+
+  const [currentEmployee] = await db
+    .select({ organizationId: employees.organizationId })
+    .from(employees)
+    .where(and(eq(employees.authUserId, userId), eq(employees.isActive, true)))
+    .limit(1);
+
+  if (!currentEmployee) return { error: "Employee profile not found." };
+
+  await db
+    .update(items)
+    .set({
+      sku,
+      name,
+      barcode: barcode || null,
+      description: description || null,
+      category: category || null,
+      lengthCm,
+      widthCm,
+      heightCm,
+      weightKg,
+      hazardClass: hazardClass || "None",
+      isBatchTracked,
+      isLotTracked,
+      hasExpiry,
+      shelfLifeDays,
+      minStockLevel,
+      updatedAt: new Date().toISOString(),
+    })
+    .where(
+      and(
+        eq(items.itemId, itemId),
+        eq(items.organizationId, currentEmployee.organizationId),
+      ),
+    );
+
+  revalidatePath(`/warehouses/${warehouseId}/master-data/items`);
   return { success: true };
 }
 
@@ -114,5 +198,5 @@ export async function deleteItem(formData: FormData) {
       ),
     );
 
-  revalidatePath(`/dashboard/warehouses/${warehouseId}/master-data/items`);
+  revalidatePath(`/warehouses/${warehouseId}/master-data/items`);
 }
