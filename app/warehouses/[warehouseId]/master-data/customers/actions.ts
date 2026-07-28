@@ -39,7 +39,54 @@ export async function createCustomer(formData: FormData) {
     isActive: true,
   });
 
-  revalidatePath(`/dashboard/warehouses/${warehouseId}/master-data/customers`);
+  revalidatePath(`/warehouses/${warehouseId}/master-data/customers`);
+  return { success: true };
+}
+
+export async function updateCustomer(formData: FormData) {
+  const customerId = Number(formData.get("customerId"));
+  const warehouseId = Number(formData.get("warehouseId"));
+  const name = formData.get("name") as string;
+  const email = formData.get("email") as string;
+  const phone = formData.get("phone") as string;
+  const defaultShippingAddress = formData.get(
+    "defaultShippingAddress",
+  ) as string;
+
+  if (!customerId || !name || !warehouseId) {
+    return { error: "Customer name is required." };
+  }
+
+  const supabase = await createClient();
+  const { data } = await supabase.auth.getClaims();
+  const userId = data?.claims?.sub;
+  if (!userId) return { error: "Unauthorized" };
+
+  const [currentEmployee] = await db
+    .select({ organizationId: employees.organizationId })
+    .from(employees)
+    .where(and(eq(employees.authUserId, userId), eq(employees.isActive, true)))
+    .limit(1);
+
+  if (!currentEmployee) return { error: "Employee profile not found." };
+
+  await db
+    .update(customers)
+    .set({
+      name,
+      contactEmail: email || null,
+      contactPhone: phone || null,
+      defaultShippingAddress: defaultShippingAddress || null,
+      updatedAt: new Date().toISOString(),
+    })
+    .where(
+      and(
+        eq(customers.customerId, customerId),
+        eq(customers.organizationId, currentEmployee.organizationId),
+      ),
+    );
+
+  revalidatePath(`/warehouses/${warehouseId}/master-data/customers`);
   return { success: true };
 }
 
@@ -73,5 +120,5 @@ export async function toggleCustomerStatus(formData: FormData) {
       ),
     );
 
-  revalidatePath(`/dashboard/warehouses/${warehouseId}/master-data/customers`);
+  revalidatePath(`/warehouses/${warehouseId}/master-data/customers`);
 }
