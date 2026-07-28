@@ -1,19 +1,24 @@
 "use server";
 
-import { and, eq, inArray } from "drizzle-orm";
-import { revalidatePath } from "next/cache";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import { redirect } from "next/navigation";
 import { db } from "@/lib/db";
 import {
   employees,
+  layoutDrafts,
   layoutFeatures,
+  layoutVersions,
   locations,
-  positionTypes,
   halls,
-  warehouses,
   zoneTypes,
 } from "@/drizzle/schema";
-import { createClient } from "@/lib/server";
+import {
+  LayoutVersionConflictError,
+  hallBelongsToWarehouse,
+  requireLayoutContext,
+  revalidateLayout,
+  zoneBelongsToWarehouse,
+} from "./layout-context";
 import {
   parseLocationType,
   renderLocationTemplate,
@@ -27,63 +32,28 @@ import {
   sanitizePoints,
   type GeometryKind,
 } from "./geometry";
+import { hallStateChangeCount } from "./types";
 import type { FeaturePatch, HallState, NewFeatureDraft } from "./types";
 
-type ActionResult = { error?: string; success?: true };
+export type PublishConflict = {
+  currentVersion: number;
+  publishedByName: string | null;
+  publishedAt: string | null;
+};
+
+export type PublishResult = {
+  error?: string;
+  success?: true;
+  /** Set instead of `error` when the save was built on a stale layout version. */
+  conflict?: PublishConflict;
+  /** The version number this publish created. */
+  versionNumber?: number;
+};
 
 function parsePositiveInt(value: FormDataEntryValue | null) {
   if (value === null) return null;
   const parsed = Number(String(value));
   return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
-}
-
-// Every mutation below is scoped to the caller's organization and requires
-// the "can modify locations" permission -- redirects on auth failure, throws
-// on permission failure so it surfaces as an error to the calling form.
-async function requireLayoutContext(warehouseId: number) {
-  const supabase = await createClient();
-  const { data } = await supabase.auth.getClaims();
-  const userId = data?.claims?.sub;
-  if (!userId) redirect("/sign-in");
-
-  const [employee] = await db
-    .select({
-      organizationId: employees.organizationId,
-      canModifyLocations: positionTypes.canModifyLocations,
-    })
-    .from(employees)
-    .innerJoin(
-      positionTypes,
-      eq(employees.positionId, positionTypes.positionId),
-    )
-    .where(and(eq(employees.authUserId, userId), eq(employees.isActive, true)))
-    .limit(1);
-
-  if (!employee) redirect("/sign-in");
-  if (employee.canModifyLocations !== true) {
-    throw new Error(
-      "You do not have permission to modify the warehouse layout.",
-    );
-  }
-
-  const [warehouse] = await db
-    .select({ warehouseId: warehouses.warehouseId })
-    .from(warehouses)
-    .where(
-      and(
-        eq(warehouses.warehouseId, warehouseId),
-        eq(warehouses.organizationId, employee.organizationId),
-      ),
-    )
-    .limit(1);
-
-  if (!warehouse) redirect("/warehouses");
-
-  return { organizationId: employee.organizationId };
-}
-
-function revalidateLayout(warehouseId: number) {
-  revalidatePath(`/warehouses/${warehouseId}/layout-designer`);
 }
 
 // ---------------------------------------------------------------------------
@@ -213,10 +183,18 @@ function buildFeatureInsert(
 export async function commitHallStates(
   warehouseId: number,
   states: Record<number, HallState>,
-): Promise<ActionResult> {
+  /**
+   * The layout version the client had loaded when it built this draft. The
+   * publish is rejected if someone else has published since -- last-write-wins
+   * on a whole warehouse layout is not a safe default.
+   */
+  baseVersionNumber: number,
+  notes?: string,
+): Promise<PublishResult> {
   let organizationId: number;
+  let employeeId: number;
   try {
-    ({ organizationId } = await requireLayoutContext(warehouseId));
+    ({ organizationId, employeeId } = await requireLayoutContext(warehouseId));
   } catch (err) {
     return { error: (err as Error).message };
   }
@@ -237,8 +215,47 @@ export async function commitHallStates(
     }
   }
 
+  let publishedVersion = 0;
+  const totalChanges = Object.values(states).reduce(
+    (sum, state) => sum + hallStateChangeCount(state),
+    0,
+  );
+
   try {
     await db.transaction(async (tx) => {
+      // Optimistic concurrency, checked before any write. The unique key on
+      // (warehouse_id, version_number) is what makes this race-safe: if two
+      // publishes both read version N and both try to insert N+1, the loser's
+      // INSERT fails and its whole transaction rolls back.
+      const [current] = await tx
+        .select({
+          versionNumber: layoutVersions.versionNumber,
+          graphEpoch: layoutVersions.graphEpoch,
+          publishedAt: layoutVersions.publishedAt,
+          firstName: employees.firstName,
+          lastName: employees.lastName,
+        })
+        .from(layoutVersions)
+        .leftJoin(
+          employees,
+          eq(layoutVersions.publishedBy, employees.employeeId),
+        )
+        .where(eq(layoutVersions.warehouseId, warehouseId))
+        .orderBy(desc(layoutVersions.versionNumber))
+        .limit(1);
+
+      const currentNumber = current?.versionNumber ?? 0;
+      if (currentNumber !== baseVersionNumber) {
+        throw new LayoutVersionConflictError({
+          currentVersion: currentNumber,
+          publishedByName:
+            [current?.firstName, current?.lastName]
+              .filter(Boolean)
+              .join(" ") || null,
+          publishedAt: current?.publishedAt ?? null,
+        });
+      }
+
       for (const [hallIdStr, state] of Object.entries(states)) {
         const hallId = Number(hallIdStr);
 
@@ -600,37 +617,60 @@ export async function commitHallStates(
             .where(eq(halls.hallId, hallId));
         }
       }
+
+      // 11. Record the publish. Same transaction as the writes, so a layout
+      // change can never exist without a version marking it.
+      publishedVersion = baseVersionNumber + 1;
+      await tx.insert(layoutVersions).values({
+        organizationId,
+        warehouseId,
+        versionNumber: publishedVersion,
+        status: "PUBLISHED",
+        graphEpoch: (current?.graphEpoch ?? 0) + 1,
+        changeCount: totalChanges,
+        notes: notes?.trim() || null,
+        publishedBy: employeeId,
+      });
+
+      // 12. The published halls' drafts are now redundant. Only this
+      // employee's are cleared -- someone else's in-progress draft for the
+      // same hall is still their work to reconcile, and they will be told it
+      // is stale the next time they open the designer.
+      await tx
+        .delete(layoutDrafts)
+        .where(
+          and(
+            inArray(layoutDrafts.hallId, hallIds),
+            eq(layoutDrafts.employeeId, employeeId),
+          ),
+        );
     });
   } catch (err) {
+    if (err instanceof LayoutVersionConflictError) {
+      return {
+        conflict: {
+          currentVersion: err.currentVersion,
+          publishedByName: err.publishedByName,
+          publishedAt: err.publishedAt,
+        },
+      };
+    }
+    // A unique violation on (warehouse_id, version_number) is the same
+    // conflict, just lost at commit time instead of at read time.
+    if ((err as { code?: string }).code === "23505") {
+      return {
+        conflict: {
+          currentVersion: baseVersionNumber + 1,
+          publishedByName: null,
+          publishedAt: null,
+        },
+      };
+    }
     return { error: (err as Error).message || "Failed to save changes." };
   }
 
   revalidateLayout(warehouseId);
-  return { success: true };
-}
-
-// ---------------------------------------------------------------------------
-// Shared lookups
-// ---------------------------------------------------------------------------
-
-async function hallBelongsToWarehouse(hallId: number, warehouseId: number) {
-  const [row] = await db
-    .select({ hallId: halls.hallId })
-    .from(halls)
-    .where(and(eq(halls.hallId, hallId), eq(halls.warehouseId, warehouseId)))
-    .limit(1);
-  return Boolean(row);
-}
-
-async function zoneBelongsToWarehouse(zoneId: number, warehouseId: number) {
-  const [row] = await db
-    .select({ zoneId: zoneTypes.zoneId })
-    .from(zoneTypes)
-    .where(
-      and(eq(zoneTypes.zoneId, zoneId), eq(zoneTypes.warehouseId, warehouseId)),
-    )
-    .limit(1);
-  return Boolean(row);
+  return { success: true, versionNumber: publishedVersion };
 }
 
 // ---------------------------------------------------------------------------
