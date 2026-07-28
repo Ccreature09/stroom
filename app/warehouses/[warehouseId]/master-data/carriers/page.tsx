@@ -3,18 +3,9 @@ import { redirect } from "next/navigation";
 import { db } from "@/lib/db";
 import { carriers, employees } from "@/drizzle/schema";
 import { createClient } from "@/lib/server";
-import { ExternalLink, MoreHorizontal, Search } from "lucide-react";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuGroup,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { toggleCarrierStatus } from "./actions";
+import { ExternalLink, Search } from "lucide-react";
 import { AddCarrierDialog } from "./add-carrier-dialog";
+import { CarrierRowActions } from "./carrier-row-actions";
 
 type SearchParams = Promise<{ q?: string }>;
 
@@ -30,7 +21,7 @@ export default async function WarehouseCarriersMasterDataPage({
   const parsedWarehouseId = Number(warehouseId);
 
   if (!Number.isInteger(parsedWarehouseId) || parsedWarehouseId <= 0) {
-    redirect("/dashboard/warehouses");
+    redirect("/warehouses");
   }
 
   const supabase = await createClient();
@@ -129,51 +120,10 @@ export default async function WarehouseCarriersMasterDataPage({
                   </span>
                 </td>
                 <td className="px-6 py-4 text-right">
-                  <DropdownMenu>
-                    <DropdownMenuTrigger className="h-8 w-8 p-0 inline-flex items-center justify-center rounded-md text-sm font-medium hover:bg-slate-100 focus:outline-none">
-                      <MoreHorizontal className="h-4 w-4" />
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end">
-                      {/* DropdownMenuGroup provides the required Base UI context */}
-                      <DropdownMenuGroup>
-                        <DropdownMenuLabel>Actions</DropdownMenuLabel>
-                        <DropdownMenuItem>Edit Carrier</DropdownMenuItem>
-                      </DropdownMenuGroup>
-
-                      <DropdownMenuSeparator />
-
-                      <form action={toggleCarrierStatus}>
-                        <input
-                          type="hidden"
-                          name="carrierId"
-                          value={carrier.carrierId}
-                        />
-                        <input
-                          type="hidden"
-                          name="warehouseId"
-                          value={parsedWarehouseId}
-                        />
-                        <input
-                          type="hidden"
-                          name="isActive"
-                          value={String(carrier.isActive)}
-                        />
-                        <button type="submit" className="w-full text-left">
-                          <DropdownMenuItem
-                            className={
-                              carrier.isActive
-                                ? "text-red-600"
-                                : "text-emerald-700"
-                            }
-                          >
-                            {carrier.isActive
-                              ? "Deactivate Carrier"
-                              : "Activate Carrier"}
-                          </DropdownMenuItem>
-                        </button>
-                      </form>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
+                  <CarrierRowActions
+                    carrier={carrier}
+                    warehouseId={parsedWarehouseId}
+                  />
                 </td>
               </tr>
             ))}
