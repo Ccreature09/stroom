@@ -1508,6 +1508,187 @@ export const layoutFeatures = pgTable(
   ],
 );
 
+// ---------------------------------------------------------------------------
+// Layout lifecycle: versions, drafts, underlays
+// ---------------------------------------------------------------------------
+
+// One row per publish. `version_number` is monotonic per warehouse and is what
+// the designer carries as its optimistic-concurrency base: a save built on
+// version N is rejected if someone else has already published N+1.
+//
+// `graph_epoch` is bumped separately because it also has to move for changes
+// that invalidate cached routes without being a publish (a temporary blockage,
+// once those exist), so routes reference (version_number, graph_epoch).
+export const layoutVersions = pgTable(
+  "layout_versions",
+  {
+    versionId: serial("version_id").primaryKey().notNull(),
+    organizationId: integer("organization_id").notNull(),
+    warehouseId: integer("warehouse_id").notNull(),
+    versionNumber: integer("version_number").notNull(),
+    status: varchar({ length: 20 }).default("PUBLISHED").notNull(),
+    graphEpoch: integer("graph_epoch").default(1).notNull(),
+    changeCount: integer("change_count").default(0).notNull(),
+    notes: varchar({ length: 500 }),
+    publishedBy: integer("published_by"),
+    publishedAt: timestamp("published_at", {
+      withTimezone: true,
+      mode: "string",
+    }).default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    index("idx_layout_versions_current").using(
+      "btree",
+      table.warehouseId.asc().nullsLast().op("int4_ops"),
+      table.versionNumber.desc().nullsLast().op("int4_ops"),
+    ),
+    foreignKey({
+      columns: [table.warehouseId],
+      foreignColumns: [warehouses.warehouseId],
+      name: "layout_versions_warehouse_id_fkey",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.publishedBy],
+      foreignColumns: [employees.employeeId],
+      name: "layout_versions_published_by_fkey",
+    }).onDelete("set null"),
+    // The unique key is what actually enforces the concurrency check: two
+    // supervisors racing to publish version N+1 means the loser's INSERT
+    // fails rather than silently overwriting.
+    unique("uq_layout_versions_wh_number").on(
+      table.warehouseId,
+      table.versionNumber,
+    ),
+    check(
+      "chk_layout_version_status",
+      sql`(status)::text = ANY ((ARRAY['DRAFT'::character varying, 'PUBLISHED'::character varying, 'ARCHIVED'::character varying])::text[])`,
+    ),
+  ],
+);
+
+// Server-side home for the designer's in-progress HallState. localStorage
+// already survives a refresh, but it is per-browser: the draft is invisible
+// from another machine and gives no way to tell that someone else has
+// published underneath it.
+export const layoutDrafts = pgTable(
+  "layout_drafts",
+  {
+    draftId: serial("draft_id").primaryKey().notNull(),
+    organizationId: integer("organization_id").notNull(),
+    warehouseId: integer("warehouse_id").notNull(),
+    hallId: integer("hall_id").notNull(),
+    employeeId: integer("employee_id").notNull(),
+    state: jsonb().notNull(),
+    stateVersion: integer("state_version").default(1).notNull(),
+    baseVersionNumber: integer("base_version_number").default(0).notNull(),
+    changeCount: integer("change_count").default(0).notNull(),
+    updatedAt: timestamp("updated_at", {
+      withTimezone: true,
+      mode: "string",
+    }).default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.hallId],
+      foreignColumns: [halls.hallId],
+      name: "layout_drafts_hall_id_fkey",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.warehouseId],
+      foreignColumns: [warehouses.warehouseId],
+      name: "layout_drafts_warehouse_id_fkey",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.employeeId],
+      foreignColumns: [employees.employeeId],
+      name: "layout_drafts_employee_id_fkey",
+    }).onDelete("cascade"),
+    // One draft per person per hall -- the autosave upserts onto this.
+    unique("uq_layout_drafts_hall_employee").on(
+      table.hallId,
+      table.employeeId,
+    ),
+  ],
+);
+
+// An imported floorplan (PDF export, CAD raster, survey scan) traced by the
+// designer. Nobody hand-draws a 20,000 m² DC from measurements, so this is
+// what makes the tool usable on a real building.
+export const hallUnderlays = pgTable(
+  "hall_underlays",
+  {
+    underlayId: serial("underlay_id").primaryKey().notNull(),
+    organizationId: integer("organization_id").notNull(),
+    warehouseId: integer("warehouse_id").notNull(),
+    hallId: integer("hall_id").notNull(),
+    floorLevel: integer("floor_level").default(1).notNull(),
+
+    // Object path inside the private storage bucket. Never a public URL --
+    // a floorplan is commercially sensitive, so reads go through a
+    // short-lived signed URL minted server-side.
+    storagePath: text("storage_path").notNull(),
+    originalFilename: varchar("original_filename", { length: 255 }),
+    mimeType: varchar("mime_type", { length: 100 }),
+    fileSizeBytes: integer("file_size_bytes"),
+    imageWidthPx: integer("image_width_px"),
+    imageHeightPx: integer("image_height_px"),
+
+    // Placement. scale_mm_per_px is the whole point of calibration: it turns
+    // an arbitrary raster into something measured in the same millimetres as
+    // every location and feature.
+    scaleMmPerPx: numeric("scale_mm_per_px", { precision: 12, scale: 6 })
+      .default("10.000000")
+      .notNull(),
+    offsetXMm: integer("offset_x_mm").default(0).notNull(),
+    offsetYMm: integer("offset_y_mm").default(0).notNull(),
+    rotationDegrees: integer("rotation_degrees").default(0).notNull(),
+    opacity: numeric({ precision: 3, scale: 2 }).default("0.60").notNull(),
+    isVisible: boolean("is_visible").default(true).notNull(),
+
+    // Kept for audit: what the user measured and what they said it really is.
+    // Lets a later calibration be re-derived instead of guessed at.
+    calibMeasuredMm: integer("calib_measured_mm"),
+    calibKnownMm: integer("calib_known_mm"),
+
+    uploadedBy: integer("uploaded_by"),
+    createdAt: timestamp("created_at", {
+      withTimezone: true,
+      mode: "string",
+    }).default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: timestamp("updated_at", {
+      withTimezone: true,
+      mode: "string",
+    }).default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.hallId],
+      foreignColumns: [halls.hallId],
+      name: "hall_underlays_hall_id_fkey",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.warehouseId],
+      foreignColumns: [warehouses.warehouseId],
+      name: "hall_underlays_warehouse_id_fkey",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.uploadedBy],
+      foreignColumns: [employees.employeeId],
+      name: "hall_underlays_uploaded_by_fkey",
+    }).onDelete("set null"),
+    unique("uq_hall_underlays_hall_floor").on(table.hallId, table.floorLevel),
+    check(
+      "chk_underlay_rotation_range",
+      sql`(rotation_degrees >= 0) AND (rotation_degrees < 360)`,
+    ),
+    check(
+      "chk_underlay_opacity_range",
+      sql`(opacity >= 0) AND (opacity <= 1)`,
+    ),
+    check("chk_underlay_scale_positive", sql`scale_mm_per_px > 0`),
+  ],
+);
+
 // Zones were attributes-only (zone_types), which meant nothing could answer
 // "which zone is this worker standing in". A zone can be several disjoint
 // polygons, so geometry lives here rather than on zone_types itself.

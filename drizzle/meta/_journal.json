@@ -22,6 +22,13 @@
       "when": 1785264089636,
       "tag": "0002_drop_location_type_booleans",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1785268642288,
+      "tag": "0003_layout_lifecycle",
+      "breakpoints": true
     }
   ]
 }
