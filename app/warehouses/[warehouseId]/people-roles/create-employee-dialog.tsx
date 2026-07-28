@@ -46,6 +46,7 @@ interface MheTypeOption {
 }
 
 interface CreateEmployeeDialogProps {
+  pageWarehouseId: number;
   roles: RoleOption[];
   warehouses: WarehouseOption[];
   departments: DepartmentOption[];
@@ -53,6 +54,7 @@ interface CreateEmployeeDialogProps {
 }
 
 export function CreateEmployeeDialog({
+  pageWarehouseId,
   roles,
   warehouses,
   departments,
@@ -79,7 +81,7 @@ export function CreateEmployeeDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <form action={createEmployee} className="space-y-4 pt-2">
+        <form action={createEmployee.bind(null, pageWarehouseId)} className="space-y-4 pt-2">
           <div className="grid gap-4 sm:grid-cols-2">
             <div className="space-y-2">
               <Label htmlFor="create-workEmail">Work email</Label>
