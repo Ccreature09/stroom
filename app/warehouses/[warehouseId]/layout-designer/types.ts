@@ -75,6 +75,49 @@ export type LocationPatch = Partial<{
 }>;
 
 // ---------------------------------------------------------------------------
+// Layout lifecycle
+// ---------------------------------------------------------------------------
+
+export type LayoutVersionDTO = {
+  versionNumber: number;
+  graphEpoch: number;
+  changeCount: number;
+  notes: string | null;
+  publishedByName: string | null;
+  publishedAt: string | null;
+};
+
+// A draft recovered from the server. `isStale` means it was authored against
+// an older published version -- the edits may no longer make sense against the
+// layout as it now stands, so the user is told rather than silently merged.
+export type RecoveredDraft = {
+  hallId: number;
+  state: HallState;
+  baseVersionNumber: number;
+  changeCount: number;
+  updatedAt: string | null;
+  isStale: boolean;
+};
+
+export type UnderlayDTO = {
+  underlayId: number;
+  hallId: number;
+  floorLevel: number;
+  signedUrl: string | null;
+  originalFilename: string | null;
+  imageWidthPx: number | null;
+  imageHeightPx: number | null;
+  scaleMmPerPx: number;
+  offsetXMm: number;
+  offsetYMm: number;
+  rotationDegrees: number;
+  opacity: number;
+  isVisible: boolean;
+  calibMeasuredMm: number | null;
+  calibKnownMm: number | null;
+};
+
+// ---------------------------------------------------------------------------
 // Layout features -- everything on the floor that is not a storage bin.
 // ---------------------------------------------------------------------------
 
@@ -175,6 +218,12 @@ export type HallState = {
   deletedFeatureIds: number[];
   newFeatures: NewFeatureDraft[];
 };
+
+// Bumped whenever the HallState shape changes. Both persistence layers check
+// it -- localStorage in layout-designer.tsx and layout_drafts.state_version on
+// the server -- and discard anything older rather than rehydrating a shape the
+// reducer no longer understands.
+export const DRAFT_STATE_VERSION = 2;
 
 export const EMPTY_HALL_STATE: HallState = {
   hallPatch: {},
