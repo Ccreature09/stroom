@@ -33,11 +33,12 @@ interface RoleRecord {
 }
 
 interface RolesTableProps {
+  pageWarehouseId: number;
   roles: RoleRecord[];
   roleUsage: Map<number, number>;
 }
 
-export function RolesTable({ roles, roleUsage }: RolesTableProps) {
+export function RolesTable({ pageWarehouseId, roles, roleUsage }: RolesTableProps) {
   return (
     <div className="rounded-2xl border border-slate-200 bg-white shadow-sm overflow-hidden">
       <Table>
@@ -104,7 +105,7 @@ export function RolesTable({ roles, roleUsage }: RolesTableProps) {
                       </DialogDescription>
                     </DialogHeader>
 
-                    <form action={updateRole} className="space-y-4 pt-2">
+                    <form action={updateRole.bind(null, pageWarehouseId)} className="space-y-4 pt-2">
                       <input
                         type="hidden"
                         name="positionId"

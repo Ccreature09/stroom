@@ -1,5 +1,4 @@
-import Link from "next/link";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, isNull, or } from "drizzle-orm";
 import { redirect } from "next/navigation";
 import { db } from "@/lib/db";
 import {
@@ -18,7 +17,6 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { CreateRoleDialog } from "./create-role-dialog";
 import { CreateEmployeeDialog } from "./create-employee-dialog";
@@ -32,10 +30,14 @@ type SearchParams = {
 };
 
 export default async function PeopleRolesPage({
+  params: routeParams,
   searchParams,
 }: {
+  params: Promise<{ warehouseId: string }>;
   searchParams?: Promise<SearchParams>;
 }) {
+  const { warehouseId: warehouseIdParam } = await routeParams;
+  const pageWarehouseId = Number(warehouseIdParam);
   const params = (await searchParams) ?? {};
 
   const supabase = await createClient();
@@ -62,9 +64,31 @@ export default async function PeopleRolesPage({
   if (!currentEmployee) redirect("/sign-in");
   if (currentEmployee.canManageUsers !== true) redirect("/warehouses");
 
+  const [currentWarehouse] = await db
+    .select({ warehouseId: warehouses.warehouseId })
+    .from(warehouses)
+    .where(
+      and(
+        eq(warehouses.organizationId, currentEmployee.organizationId),
+        eq(warehouses.warehouseId, pageWarehouseId),
+      ),
+    )
+    .limit(1);
+
+  if (!currentWarehouse) redirect("/warehouses");
+
   const [roles, orgWarehouses, orgDepartments, allMheTypes, orgEmployees] =
     await Promise.all([
-      db.select().from(positionTypes),
+      // Roles scoped to this warehouse, plus org-wide roles (warehouseId IS NULL).
+      db
+        .select()
+        .from(positionTypes)
+        .where(
+          or(
+            isNull(positionTypes.warehouseId),
+            eq(positionTypes.warehouseId, pageWarehouseId),
+          ),
+        ),
       db
         .select({
           warehouseId: warehouses.warehouseId,
@@ -74,6 +98,7 @@ export default async function PeopleRolesPage({
         })
         .from(warehouses)
         .where(eq(warehouses.organizationId, currentEmployee.organizationId)),
+      // Departments scoped to this warehouse, plus org-wide departments (warehouseId IS NULL).
       db
         .select({
           departmentId: departments.departmentId,
@@ -82,12 +107,15 @@ export default async function PeopleRolesPage({
           isActive: departments.isActive,
         })
         .from(departments)
-        .innerJoin(
-          warehouses,
-          eq(departments.warehouseId, warehouses.warehouseId),
-        )
-        .where(eq(warehouses.organizationId, currentEmployee.organizationId)),
+        .where(
+          or(
+            isNull(departments.warehouseId),
+            eq(departments.warehouseId, pageWarehouseId),
+          ),
+        ),
       db.select().from(mheTypes),
+      // Employees assigned to this warehouse (primary or current), plus
+      // employees with no warehouse assignment at all (org-wide staff).
       db
         .select({
           employeeId: employees.employeeId,
@@ -104,7 +132,19 @@ export default async function PeopleRolesPage({
           createdAt: employees.createdAt,
         })
         .from(employees)
-        .where(eq(employees.organizationId, currentEmployee.organizationId)),
+        .where(
+          and(
+            eq(employees.organizationId, currentEmployee.organizationId),
+            or(
+              eq(employees.primaryWarehouseId, pageWarehouseId),
+              eq(employees.currentWarehouseId, pageWarehouseId),
+              and(
+                isNull(employees.primaryWarehouseId),
+                isNull(employees.currentWarehouseId),
+              ),
+            ),
+          ),
+        ),
     ]);
 
   const employeeIds = orgEmployees.map((employee) => employee.employeeId);
@@ -213,6 +253,7 @@ export default async function PeopleRolesPage({
           <TabsContent value="employees" className="space-y-4">
             <div className="flex justify-end">
               <CreateEmployeeDialog
+                pageWarehouseId={pageWarehouseId}
                 roles={roles}
                 warehouses={orgWarehouses}
                 departments={orgDepartments}
@@ -220,6 +261,7 @@ export default async function PeopleRolesPage({
               />
             </div>
             <EmployeeTable
+              pageWarehouseId={pageWarehouseId}
               employees={orgEmployees}
               roles={roles}
               warehouses={orgWarehouses}
@@ -234,9 +276,9 @@ export default async function PeopleRolesPage({
 
           <TabsContent value="roles" className="space-y-4">
             <div className="flex justify-end">
-              <CreateRoleDialog />
+              <CreateRoleDialog pageWarehouseId={pageWarehouseId} />
             </div>
-            <RolesTable roles={roles} roleUsage={roleUsage} />
+            <RolesTable pageWarehouseId={pageWarehouseId} roles={roles} roleUsage={roleUsage} />
           </TabsContent>
         </Tabs>
       </div>
