@@ -1,16 +1,30 @@
 import { redirect } from "next/navigation";
-import { and, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import { db } from "@/lib/db";
 import {
   employees,
   featureKinds as featureKindsTable,
+  hallUnderlays,
+  layoutDrafts,
   layoutFeatures,
+  layoutVersions,
   locations,
   positionTypes,
   halls as hallsTable,
   warehouses,
   zoneTypes,
 } from "@/drizzle/schema";
+import {
+  UNDERLAY_BUCKET,
+  UNDERLAY_SIGNED_URL_TTL_SECONDS,
+  createStorageClient,
+} from "./layout-context";
+import {
+  DRAFT_STATE_VERSION,
+  type HallState,
+  type RecoveredDraft,
+  type UnderlayDTO,
+} from "./types";
 import { createClient } from "@/lib/server";
 import { createHall } from "./actions";
 import LayoutDesigner from "./layout-designer";
@@ -53,6 +67,7 @@ export default async function WarehouseLayoutDesignerPage({
 
   const [employee] = await db
     .select({
+      employeeId: employees.employeeId,
       firstName: employees.firstName,
       lastName: employees.lastName,
       organizationId: employees.organizationId,
@@ -332,6 +347,128 @@ export default async function WarehouseLayoutDesignerPage({
     defaultGeometryKind: row.defaultGeometryKind as GeometryKind,
   }));
 
+  // --- Layout lifecycle -----------------------------------------------------
+
+  const [versionRows, draftRows, underlayRows] = await Promise.all([
+    db
+      .select({
+        versionNumber: layoutVersions.versionNumber,
+        graphEpoch: layoutVersions.graphEpoch,
+        changeCount: layoutVersions.changeCount,
+        notes: layoutVersions.notes,
+        publishedAt: layoutVersions.publishedAt,
+        firstName: employees.firstName,
+        lastName: employees.lastName,
+      })
+      .from(layoutVersions)
+      .leftJoin(employees, eq(layoutVersions.publishedBy, employees.employeeId))
+      .where(eq(layoutVersions.warehouseId, parsedWarehouseId))
+      .orderBy(desc(layoutVersions.versionNumber))
+      .limit(10),
+    db
+      .select({
+        hallId: layoutDrafts.hallId,
+        state: layoutDrafts.state,
+        stateVersion: layoutDrafts.stateVersion,
+        baseVersionNumber: layoutDrafts.baseVersionNumber,
+        changeCount: layoutDrafts.changeCount,
+        updatedAt: layoutDrafts.updatedAt,
+      })
+      .from(layoutDrafts)
+      .where(
+        and(
+          eq(layoutDrafts.warehouseId, parsedWarehouseId),
+          eq(layoutDrafts.employeeId, employee.employeeId),
+        ),
+      ),
+    db
+      .select({
+        underlayId: hallUnderlays.underlayId,
+        hallId: hallUnderlays.hallId,
+        floorLevel: hallUnderlays.floorLevel,
+        storagePath: hallUnderlays.storagePath,
+        originalFilename: hallUnderlays.originalFilename,
+        imageWidthPx: hallUnderlays.imageWidthPx,
+        imageHeightPx: hallUnderlays.imageHeightPx,
+        scaleMmPerPx: hallUnderlays.scaleMmPerPx,
+        offsetXMm: hallUnderlays.offsetXMm,
+        offsetYMm: hallUnderlays.offsetYMm,
+        rotationDegrees: hallUnderlays.rotationDegrees,
+        opacity: hallUnderlays.opacity,
+        isVisible: hallUnderlays.isVisible,
+        calibMeasuredMm: hallUnderlays.calibMeasuredMm,
+        calibKnownMm: hallUnderlays.calibKnownMm,
+      })
+      .from(hallUnderlays)
+      .where(eq(hallUnderlays.hallId, selectedHall.hallId)),
+  ]);
+
+  const versionHistory = versionRows.map((row) => ({
+    versionNumber: row.versionNumber,
+    graphEpoch: row.graphEpoch,
+    changeCount: row.changeCount,
+    notes: row.notes,
+    publishedAt: row.publishedAt,
+    publishedByName:
+      [row.firstName, row.lastName].filter(Boolean).join(" ") || null,
+  }));
+  // 0 means "never published" -- the first publish creates version 1.
+  const currentVersionNumber = versionHistory[0]?.versionNumber ?? 0;
+
+  const recoveredDrafts: RecoveredDraft[] = draftRows
+    // A draft written against an older HallState shape is not migratable in
+    // general, so it is dropped rather than rehydrated into the reducer.
+    .filter((row) => row.stateVersion === DRAFT_STATE_VERSION)
+    .map((row) => ({
+      hallId: row.hallId,
+      state: row.state as HallState,
+      baseVersionNumber: row.baseVersionNumber,
+      changeCount: row.changeCount,
+      updatedAt: row.updatedAt,
+      isStale: row.baseVersionNumber !== currentVersionNumber,
+    }));
+
+  // Underlays live in a private bucket, so each one needs a short-lived signed
+  // URL minted here. A failure to sign is not fatal -- the designer still
+  // works, it just has no tracing image.
+  const underlays: UnderlayDTO[] = [];
+  if (underlayRows.length > 0) {
+    try {
+      const storage = createStorageClient().storage.from(UNDERLAY_BUCKET);
+      const signed = await storage.createSignedUrls(
+        underlayRows.map((row) => row.storagePath),
+        UNDERLAY_SIGNED_URL_TTL_SECONDS,
+      );
+      const urlByPath = new Map<string, string>();
+      for (const entry of signed.data ?? []) {
+        if (entry.path && entry.signedUrl) {
+          urlByPath.set(entry.path, entry.signedUrl);
+        }
+      }
+      for (const row of underlayRows) {
+        underlays.push({
+          underlayId: row.underlayId,
+          hallId: row.hallId,
+          floorLevel: row.floorLevel,
+          signedUrl: urlByPath.get(row.storagePath) ?? null,
+          originalFilename: row.originalFilename,
+          imageWidthPx: row.imageWidthPx,
+          imageHeightPx: row.imageHeightPx,
+          scaleMmPerPx: Number(row.scaleMmPerPx),
+          offsetXMm: row.offsetXMm,
+          offsetYMm: row.offsetYMm,
+          rotationDegrees: row.rotationDegrees,
+          opacity: Number(row.opacity),
+          isVisible: row.isVisible,
+          calibMeasuredMm: row.calibMeasuredMm,
+          calibKnownMm: row.calibKnownMm,
+        });
+      }
+    } catch (err) {
+      console.error("Failed to sign underlay URLs:", err);
+    }
+  }
+
   return (
     <main className="flex min-h-[calc(100vh-64px)] flex-1 flex-col gap-4 bg-[linear-gradient(180deg,#ebe7dc_0%,#f7f4ed_24%,#f4f1e8_100%)] p-4 sm:p-6">
       <Card className="rounded-2xl shadow-sm">
@@ -359,6 +496,10 @@ export default async function WarehouseLayoutDesignerPage({
           zoneTypes={hallZoneTypes}
           features={hallFeatures}
           featureKinds={featureKinds}
+          currentVersionNumber={currentVersionNumber}
+          versionHistory={versionHistory}
+          recoveredDrafts={recoveredDrafts}
+          underlays={underlays}
         />
       </div>
     </main>
