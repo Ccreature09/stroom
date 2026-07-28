@@ -3,7 +3,15 @@
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { cssColorForZone } from "./types";
-import type { HallDTO, HallPatch, ZonePatch, ZoneTypeDTO } from "./types";
+import type {
+  HallDTO,
+  HallPatch,
+  LayoutVersionDTO,
+  UnderlayDTO,
+  ZonePatch,
+  ZoneTypeDTO,
+} from "./types";
+import UnderlayPanel from "./underlay-panel";
 import type { Tool } from "./layout-designer-canvas";
 import { createHall } from "./actions";
 
@@ -63,6 +71,12 @@ export default function HallToolbar({
   onPatchZone,
   onDeleteZone,
   locked,
+  currentVersionNumber,
+  versionHistory,
+  draftSaveState,
+  underlay,
+  measuredMm,
+  onClearMeasurement,
 }: {
   warehouseId: number;
   halls: HallDTO[];
@@ -86,6 +100,12 @@ export default function HallToolbar({
   onPatchZone: (zoneId: number, patch: ZonePatch) => void;
   onDeleteZone: (zoneId: number) => void;
   locked: boolean;
+  currentVersionNumber: number;
+  versionHistory: LayoutVersionDTO[];
+  draftSaveState: "idle" | "saving" | "saved" | "error";
+  underlay: UnderlayDTO | null;
+  measuredMm: number | null;
+  onClearMeasurement: () => void;
 }) {
   const router = useRouter();
   const [showNewHall, setShowNewHall] = useState(false);
@@ -224,6 +244,19 @@ export default function HallToolbar({
             </p>
           )}
         </div>
+        <UnderlayPanel
+          warehouseId={warehouseId}
+          hall={selectedHall}
+          underlay={underlay}
+          measuredMm={measuredMm}
+          onClearMeasurement={onClearMeasurement}
+          isMeasuring={tool === "measure"}
+          onToggleMeasure={() =>
+            onToolChange(tool === "measure" ? "select" : "measure")
+          }
+          locked={locked}
+        />
+
         <div className="flex flex-col gap-2">
           <Label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
             Bulk Generate
@@ -303,8 +336,41 @@ export default function HallToolbar({
         </fieldset>
       </div>
 
-      {/* Save Map Button */}
-      <div className="mt-6 border-t pt-4">
+      {/* Publish: version state, autosave status, then Save Map */}
+      <div className="mt-6 space-y-2 border-t pt-4">
+        <div className="flex items-center justify-between text-[11px] text-muted-foreground">
+          <span
+            title={
+              versionHistory[0]?.publishedAt
+                ? `Published ${new Date(versionHistory[0].publishedAt).toLocaleString()}${
+                    versionHistory[0].publishedByName
+                      ? ` by ${versionHistory[0].publishedByName}`
+                      : ""
+                  }`
+                : "This layout has never been published."
+            }
+          >
+            {currentVersionNumber > 0
+              ? `Layout v${currentVersionNumber}`
+              : "Unpublished layout"}
+          </span>
+
+          {/* Autosave is about the *draft*, not the published layout -- the
+              wording keeps those separate so nobody reads "Draft saved" as
+              "the map is live". */}
+          <span
+            className={
+              draftSaveState === "error"
+                ? "font-medium text-destructive"
+                : undefined
+            }
+          >
+            {draftSaveState === "saving" && "Saving draft…"}
+            {draftSaveState === "saved" && "Draft saved"}
+            {draftSaveState === "error" && "Draft not synced"}
+          </span>
+        </div>
+
         <Button
           onClick={onSaveMap}
           disabled={isSavingMap || pendingCount === 0}
