@@ -16,9 +16,15 @@ import {
 import { createClient } from "@/lib/server";
 import { PERMISSION_FIELDS, type PermissionField } from "@/lib/people-roles/constants";
 
-function buildReturnUrl(status: "success" | "error", message: string) {
+// pageWarehouseId is the [warehouseId] route segment this page was opened
+// from -- bound onto each form action via `.bind(null, pageWarehouseId)` at
+// the call site, since server actions have no direct access to the page's
+// own URL. Used only to build a return URL that matches the real route
+// (/warehouses/[warehouseId]/people-roles), not /dashboard/people-roles,
+// which doesn't exist.
+function buildReturnUrl(pageWarehouseId: number, status: "success" | "error", message: string) {
   const params = new URLSearchParams({ status, message });
-  return `/dashboard/people-roles?${params.toString()}`;
+  return `/warehouses/${pageWarehouseId}/people-roles?${params.toString()}`;
 }
 
 function parseBooleanFromForm(formData: FormData, key: string) {
@@ -104,17 +110,22 @@ async function getValidDepartmentIds(organizationId: number, departmentIds: numb
   if (departmentIds.length === 0) return new Set<number>();
 
   const rows = await db
-    .select({ departmentId: departments.departmentId })
+    .select({ departmentId: departments.departmentId, warehouseId: departments.warehouseId })
     .from(departments)
-    .innerJoin(warehouses, eq(departments.warehouseId, warehouses.warehouseId))
-    .where(
-      and(
-        eq(warehouses.organizationId, organizationId),
-        inArray(departments.departmentId, departmentIds)
-      )
-    );
+    .where(inArray(departments.departmentId, departmentIds));
 
-  return new Set(rows.map((row) => row.departmentId));
+  // Org-wide departments (warehouseId IS NULL) are valid for every warehouse
+  // in the org; warehouse-scoped departments must belong to this org.
+  const scopedWarehouseIds = rows
+    .map((row) => row.warehouseId)
+    .filter((warehouseId): warehouseId is number => warehouseId !== null);
+  const validWarehouseIds = await getValidWarehouseIds(organizationId, scopedWarehouseIds);
+
+  return new Set(
+    rows
+      .filter((row) => row.warehouseId === null || validWarehouseIds.has(row.warehouseId))
+      .map((row) => row.departmentId)
+  );
 }
 
 async function getValidRoleIds(roleIds: number[]) {
@@ -149,7 +160,7 @@ async function ensureEmployeeBelongsToOrg(employeeId: number, organizationId: nu
   return row;
 }
 
-export async function createRole(formData: FormData) {
+export async function createRole(pageWarehouseId: number, formData: FormData) {
   const actor = await requireManageUsersAccess();
 
   const title = String(formData.get("title") ?? "").trim();
@@ -158,17 +169,17 @@ export async function createRole(formData: FormData) {
   const permissions = parsePermissionValues(formData);
 
   if (!title) {
-    redirect(buildReturnUrl("error", "Role title is required."));
+    redirect(buildReturnUrl(pageWarehouseId, "error", "Role title is required."));
   }
   if (title.length > 50) {
-    redirect(buildReturnUrl("error", "Role title must be 50 characters or fewer."));
+    redirect(buildReturnUrl(pageWarehouseId, "error", "Role title must be 50 characters or fewer."));
   }
 
   // Validate warehouse assignment against organization if provided
   if (warehouseId !== null) {
     const validWarehouseIds = await getValidWarehouseIds(actor.organizationId, [warehouseId]);
     if (!validWarehouseIds.has(warehouseId)) {
-      redirect(buildReturnUrl("error", "Selected warehouse is invalid for your organization."));
+      redirect(buildReturnUrl(pageWarehouseId, "error", "Selected warehouse is invalid for your organization."));
     }
   }
 
@@ -180,18 +191,18 @@ export async function createRole(formData: FormData) {
       ...permissions,
     });
 
-    revalidatePath("/dashboard/people-roles");
-    redirect(buildReturnUrl("success", `Role "${title}" created.`));
+    revalidatePath(`/warehouses/${pageWarehouseId}/people-roles`);
+    redirect(buildReturnUrl(pageWarehouseId, "success", `Role "${title}" created.`));
   } catch (error) {
     if (isUniqueViolation(error)) {
-      redirect(buildReturnUrl("error", "A role with this title already exists."));
+      redirect(buildReturnUrl(pageWarehouseId, "error", "A role with this title already exists."));
     }
 
     throw error;
   }
 }
 
-export async function updateRole(formData: FormData) {
+export async function updateRole(pageWarehouseId: number, formData: FormData) {
   const actor = await requireManageUsersAccess();
 
   const positionId = parseOptionalNumber(formData.get("positionId"));
@@ -201,20 +212,20 @@ export async function updateRole(formData: FormData) {
   const permissions = parsePermissionValues(formData);
 
   if (!positionId) {
-    redirect(buildReturnUrl("error", "Invalid role selected."));
+    redirect(buildReturnUrl(pageWarehouseId, "error", "Invalid role selected."));
   }
   if (!title) {
-    redirect(buildReturnUrl("error", "Role title is required."));
+    redirect(buildReturnUrl(pageWarehouseId, "error", "Role title is required."));
   }
   if (title.length > 50) {
-    redirect(buildReturnUrl("error", "Role title must be 50 characters or fewer."));
+    redirect(buildReturnUrl(pageWarehouseId, "error", "Role title must be 50 characters or fewer."));
   }
 
   // Validate warehouse assignment against organization if provided
   if (warehouseId !== null) {
     const validWarehouseIds = await getValidWarehouseIds(actor.organizationId, [warehouseId]);
     if (!validWarehouseIds.has(warehouseId)) {
-      redirect(buildReturnUrl("error", "Selected warehouse is invalid for your organization."));
+      redirect(buildReturnUrl(pageWarehouseId, "error", "Selected warehouse is invalid for your organization."));
     }
   }
 
@@ -231,21 +242,21 @@ export async function updateRole(formData: FormData) {
       .returning({ positionId: positionTypes.positionId });
 
     if (updated.length === 0) {
-      redirect(buildReturnUrl("error", "Role not found."));
+      redirect(buildReturnUrl(pageWarehouseId, "error", "Role not found."));
     }
 
-    revalidatePath("/dashboard/people-roles");
-    redirect(buildReturnUrl("success", `Role "${title}" updated.`));
+    revalidatePath(`/warehouses/${pageWarehouseId}/people-roles`);
+    redirect(buildReturnUrl(pageWarehouseId, "success", `Role "${title}" updated.`));
   } catch (error) {
     if (isUniqueViolation(error)) {
-      redirect(buildReturnUrl("error", "A role with this title already exists."));
+      redirect(buildReturnUrl(pageWarehouseId, "error", "A role with this title already exists."));
     }
 
     throw error;
   }
 }
 
-export async function createEmployee(formData: FormData) {
+export async function createEmployee(pageWarehouseId: number, formData: FormData) {
   const actor = await requireManageUsersAccess();
 
   const workEmail = String(formData.get("workEmail") ?? "").trim().toLowerCase();
@@ -263,24 +274,24 @@ export async function createEmployee(formData: FormData) {
   const mheTypeIds = parseNumberList(formData, "mheTypeIds");
 
   if (!workEmail) {
-    redirect(buildReturnUrl("error", "Work email is required."));
+    redirect(buildReturnUrl(pageWarehouseId, "error", "Work email is required."));
   }
   if (workEmail.length > 150) {
-    redirect(buildReturnUrl("error", "Work email must be 150 characters or fewer."));
+    redirect(buildReturnUrl(pageWarehouseId, "error", "Work email must be 150 characters or fewer."));
   }
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(workEmail)) {
-    redirect(buildReturnUrl("error", "Enter a valid work email address."));
+    redirect(buildReturnUrl(pageWarehouseId, "error", "Enter a valid work email address."));
   }
   if (firstName.length > 50 || middleName.length > 50 || lastName.length > 50) {
-    redirect(buildReturnUrl("error", "Name fields must be 50 characters or fewer."));
+    redirect(buildReturnUrl(pageWarehouseId, "error", "Name fields must be 50 characters or fewer."));
   }
   if (!positionId) {
-    redirect(buildReturnUrl("error", "A role must be assigned."));
+    redirect(buildReturnUrl(pageWarehouseId, "error", "A role must be assigned."));
   }
 
   const validRoleIds = await getValidRoleIds([positionId]);
   if (!validRoleIds.has(positionId)) {
-    redirect(buildReturnUrl("error", "Selected role is invalid."));
+    redirect(buildReturnUrl(pageWarehouseId, "error", "Selected role is invalid."));
   }
 
   const warehouseIds = [primaryWarehouseId, currentWarehouseId].filter(
@@ -288,20 +299,20 @@ export async function createEmployee(formData: FormData) {
   );
   const validWarehouseIds = await getValidWarehouseIds(actor.organizationId, warehouseIds);
   if (warehouseIds.some((warehouseId) => !validWarehouseIds.has(warehouseId))) {
-    redirect(buildReturnUrl("error", "One of the selected warehouses is invalid for your organization."));
+    redirect(buildReturnUrl(pageWarehouseId, "error", "One of the selected warehouses is invalid for your organization."));
   }
 
   const validDepartmentIds = await getValidDepartmentIds(actor.organizationId, departmentIds);
   if (departmentIds.some((departmentId) => !validDepartmentIds.has(departmentId))) {
-    redirect(buildReturnUrl("error", "One or more selected departments are invalid."));
+    redirect(buildReturnUrl(pageWarehouseId, "error", "One or more selected departments are invalid."));
   }
   if (primaryDepartmentId !== null && !validDepartmentIds.has(primaryDepartmentId)) {
-    redirect(buildReturnUrl("error", "Primary department must be one of the selected departments."));
+    redirect(buildReturnUrl(pageWarehouseId, "error", "Primary department must be one of the selected departments."));
   }
 
   const validMheTypeIds = await getValidMheTypeIds(mheTypeIds);
   if (mheTypeIds.some((mheTypeId) => !validMheTypeIds.has(mheTypeId))) {
-    redirect(buildReturnUrl("error", "One or more selected licenses are invalid."));
+    redirect(buildReturnUrl(pageWarehouseId, "error", "One or more selected licenses are invalid."));
   }
 
   try {
@@ -348,18 +359,18 @@ export async function createEmployee(formData: FormData) {
       }
     });
 
-    revalidatePath("/dashboard/people-roles");
-    redirect(buildReturnUrl("success", `Employee "${workEmail}" created.`));
+    revalidatePath(`/warehouses/${pageWarehouseId}/people-roles`);
+    redirect(buildReturnUrl(pageWarehouseId, "success", `Employee "${workEmail}" created.`));
   } catch (error) {
     if (isUniqueViolation(error)) {
-      redirect(buildReturnUrl("error", "An employee with that work email already exists."));
+      redirect(buildReturnUrl(pageWarehouseId, "error", "An employee with that work email already exists."));
     }
 
     throw error;
   }
 }
 
-export async function updateEmployee(formData: FormData) {
+export async function updateEmployee(pageWarehouseId: number, formData: FormData) {
   const actor = await requireManageUsersAccess();
 
   const employeeId = parseOptionalNumber(formData.get("employeeId"));
@@ -371,21 +382,21 @@ export async function updateEmployee(formData: FormData) {
   const terminationDate = parseOptionalDate(formData.get("terminationDate"));
 
   if (!employeeId) {
-    redirect(buildReturnUrl("error", "Invalid employee selected."));
+    redirect(buildReturnUrl(pageWarehouseId, "error", "Invalid employee selected."));
   }
 
   const existingEmployee = await ensureEmployeeBelongsToOrg(employeeId, actor.organizationId);
   if (!existingEmployee) {
-    redirect(buildReturnUrl("error", "Employee not found for your organization."));
+    redirect(buildReturnUrl(pageWarehouseId, "error", "Employee not found for your organization."));
   }
 
   if (!positionId) {
-    redirect(buildReturnUrl("error", "A role must be assigned."));
+    redirect(buildReturnUrl(pageWarehouseId, "error", "A role must be assigned."));
   }
 
   const validRoleIds = await getValidRoleIds([positionId]);
   if (!validRoleIds.has(positionId)) {
-    redirect(buildReturnUrl("error", "Selected role is invalid."));
+    redirect(buildReturnUrl(pageWarehouseId, "error", "Selected role is invalid."));
   }
 
   const warehouseIds = [primaryWarehouseId, currentWarehouseId].filter(
@@ -393,7 +404,7 @@ export async function updateEmployee(formData: FormData) {
   );
   const validWarehouseIds = await getValidWarehouseIds(actor.organizationId, warehouseIds);
   if (warehouseIds.some((warehouseId) => !validWarehouseIds.has(warehouseId))) {
-    redirect(buildReturnUrl("error", "One of the selected warehouses is invalid for your organization."));
+    redirect(buildReturnUrl(pageWarehouseId, "error", "One of the selected warehouses is invalid for your organization."));
   }
 
   await db
@@ -408,11 +419,11 @@ export async function updateEmployee(formData: FormData) {
     })
     .where(and(eq(employees.employeeId, employeeId), eq(employees.organizationId, actor.organizationId)));
 
-  revalidatePath("/dashboard/people-roles");
-  redirect(buildReturnUrl("success", "Employee details updated."));
+  revalidatePath(`/warehouses/${pageWarehouseId}/people-roles`);
+  redirect(buildReturnUrl(pageWarehouseId, "success", "Employee details updated."));
 }
 
-export async function syncEmployeeDepartments(formData: FormData) {
+export async function syncEmployeeDepartments(pageWarehouseId: number, formData: FormData) {
   const actor = await requireManageUsersAccess();
 
   const employeeId = parseOptionalNumber(formData.get("employeeId"));
@@ -420,20 +431,20 @@ export async function syncEmployeeDepartments(formData: FormData) {
   const primaryDepartmentId = parseOptionalNumber(formData.get("primaryDepartmentId"));
 
   if (!employeeId) {
-    redirect(buildReturnUrl("error", "Invalid employee selected."));
+    redirect(buildReturnUrl(pageWarehouseId, "error", "Invalid employee selected."));
   }
 
   const existingEmployee = await ensureEmployeeBelongsToOrg(employeeId, actor.organizationId);
   if (!existingEmployee) {
-    redirect(buildReturnUrl("error", "Employee not found for your organization."));
+    redirect(buildReturnUrl(pageWarehouseId, "error", "Employee not found for your organization."));
   }
 
   const validDepartmentIds = await getValidDepartmentIds(actor.organizationId, departmentIds);
   if (departmentIds.some((departmentId) => !validDepartmentIds.has(departmentId))) {
-    redirect(buildReturnUrl("error", "One or more selected departments are invalid."));
+    redirect(buildReturnUrl(pageWarehouseId, "error", "One or more selected departments are invalid."));
   }
   if (primaryDepartmentId !== null && !validDepartmentIds.has(primaryDepartmentId)) {
-    redirect(buildReturnUrl("error", "Primary department must be one of the selected departments."));
+    redirect(buildReturnUrl(pageWarehouseId, "error", "Primary department must be one of the selected departments."));
   }
 
   await db.transaction(async (tx) => {
@@ -452,28 +463,28 @@ export async function syncEmployeeDepartments(formData: FormData) {
     }
   });
 
-  revalidatePath("/dashboard/people-roles");
-  redirect(buildReturnUrl("success", "Employee departments updated."));
+  revalidatePath(`/warehouses/${pageWarehouseId}/people-roles`);
+  redirect(buildReturnUrl(pageWarehouseId, "success", "Employee departments updated."));
 }
 
-export async function syncEmployeeLicenses(formData: FormData) {
+export async function syncEmployeeLicenses(pageWarehouseId: number, formData: FormData) {
   const actor = await requireManageUsersAccess();
 
   const employeeId = parseOptionalNumber(formData.get("employeeId"));
   const mheTypeIds = parseNumberList(formData, "mheTypeIds");
 
   if (!employeeId) {
-    redirect(buildReturnUrl("error", "Invalid employee selected."));
+    redirect(buildReturnUrl(pageWarehouseId, "error", "Invalid employee selected."));
   }
 
   const existingEmployee = await ensureEmployeeBelongsToOrg(employeeId, actor.organizationId);
   if (!existingEmployee) {
-    redirect(buildReturnUrl("error", "Employee not found for your organization."));
+    redirect(buildReturnUrl(pageWarehouseId, "error", "Employee not found for your organization."));
   }
 
   const validMheTypeIds = await getValidMheTypeIds(mheTypeIds);
   if (mheTypeIds.some((mheTypeId) => !validMheTypeIds.has(mheTypeId))) {
-    redirect(buildReturnUrl("error", "One or more selected licenses are invalid."));
+    redirect(buildReturnUrl(pageWarehouseId, "error", "One or more selected licenses are invalid."));
   }
 
   await db.transaction(async (tx) => {
@@ -489,6 +500,6 @@ export async function syncEmployeeLicenses(formData: FormData) {
     }
   });
 
-  revalidatePath("/dashboard/people-roles");
-  redirect(buildReturnUrl("success", "Employee licenses updated."));
+  revalidatePath(`/warehouses/${pageWarehouseId}/people-roles`);
+  redirect(buildReturnUrl(pageWarehouseId, "success", "Employee licenses updated."));
 }
