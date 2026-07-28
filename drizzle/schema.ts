@@ -13,6 +13,7 @@ import {
   index,
   text,
   numeric,
+  jsonb,
   check,
   primaryKey,
 } from "drizzle-orm/pg-core";
@@ -1150,9 +1151,12 @@ export const locations = pgTable(
     heightMm: integer("height_mm"),
     maxWeightKg: integer("max_weight_kg"),
     isBlocked: boolean("is_blocked").default(false),
-    isRacking: boolean("is_racking").notNull(),
-    isShelf: boolean("is_shelf").notNull(),
-    isFloorStorage: boolean("is_floor_storage").notNull(),
+    // Replaces the former is_racking/is_shelf/is_floor_storage triple: those
+    // encoded one mutually-exclusive choice as three independent booleans,
+    // with nothing preventing a row from being both racking and shelf.
+    locationType: varchar("location_type", { length: 20 })
+      .default("NONE")
+      .notNull(),
     updatedAt: timestamp("updated_at", { mode: "string" }).default(
       sql`CURRENT_TIMESTAMP`,
     ),
@@ -1196,10 +1200,16 @@ export const locations = pgTable(
       foreignColumns: [zoneTypes.zoneId],
       name: "locations_zone_id_fkey",
     }).onDelete("restrict"),
-    unique("locations_location_code_key").on(table.locationCode),
+    // Location codes are unique per warehouse, not globally -- two tenants
+    // (or two warehouses in one org) can legitimately both use "A01-01-1".
+    unique("uq_locations_wh_code").on(table.warehouseId, table.locationCode),
     check(
       "chk_rotation_range",
       sql`(rotation_degrees >= 0) AND (rotation_degrees < 360)`,
+    ),
+    check(
+      "chk_location_type",
+      sql`(location_type)::text = ANY ((ARRAY['RACKING'::character varying, 'SHELF'::character varying, 'FLOOR'::character varying, 'NONE'::character varying])::text[])`,
     ),
   ],
 );
@@ -1338,5 +1348,199 @@ export const employeeLicenses = pgTable(
       columns: [table.employeeId, table.mheTypeId],
       name: "employee_licenses_pkey",
     }),
+  ],
+);
+
+// ---------------------------------------------------------------------------
+// Layout designer: physical map features
+//
+// `locations` means "inventory can be here". Everything else with a footprint
+// -- walls, columns, dock doors, pack stations, charging bays, travel lanes --
+// lives in `layout_features`. Keeping them apart matters because locations are
+// referenced forever by stock_movements and are enumerated by putaway/picking
+// strategies, while features are edited freely in the designer.
+// ---------------------------------------------------------------------------
+
+// Global lookup (like mhe_types / task_types): what kinds of feature exist,
+// how they default, and how the designer palette groups and draws them.
+export const featureKinds = pgTable(
+  "feature_kinds",
+  {
+    kind: varchar({ length: 40 }).primaryKey().notNull(),
+    category: varchar({ length: 20 }).notNull(),
+    label: varchar({ length: 60 }).notNull(),
+    defaultGeometryKind: varchar("default_geometry_kind", {
+      length: 10,
+    }).notNull(),
+    defaultWidthMm: integer("default_width_mm"),
+    defaultLengthMm: integer("default_length_mm"),
+    defaultHeightMm: integer("default_height_mm"),
+    isObstacleDefault: boolean("is_obstacle_default").default(true).notNull(),
+    defaultColor: varchar("default_color", { length: 7 }).notNull(),
+    sortOrder: integer("sort_order").default(100).notNull(),
+    isActive: boolean("is_active").default(true).notNull(),
+  },
+  () => [
+    check(
+      "chk_feature_kind_category",
+      sql`(category)::text = ANY ((ARRAY['STRUCTURE'::character varying, 'LOGISTICS'::character varying, 'WORKSTATION'::character varying, 'FACILITY'::character varying, 'HAZARD'::character varying, 'NAVIGATION'::character varying, 'ANNOTATION'::character varying])::text[])`,
+    ),
+    check(
+      "chk_feature_kind_geometry",
+      sql`(default_geometry_kind)::text = ANY ((ARRAY['RECT'::character varying, 'POLYGON'::character varying, 'POLYLINE'::character varying, 'POINT'::character varying, 'CIRCLE'::character varying])::text[])`,
+    ),
+  ],
+);
+
+export const layoutFeatures = pgTable(
+  "layout_features",
+  {
+    featureId: serial("feature_id").primaryKey().notNull(),
+    organizationId: integer("organization_id").notNull(),
+    warehouseId: integer("warehouse_id").notNull(),
+    hallId: integer("hall_id").notNull(),
+    floorLevel: integer("floor_level").default(1).notNull(),
+    kind: varchar({ length: 40 }).notNull(),
+    geometryKind: varchar("geometry_kind", { length: 10 }).notNull(),
+
+    // Anchor + extent, mirroring locations.physical_* so the canvas can treat
+    // a RECT feature and a location with the same transform code.
+    originXMm: integer("origin_x_mm").default(0).notNull(),
+    originYMm: integer("origin_y_mm").default(0).notNull(),
+    widthMm: integer("width_mm").default(0).notNull(),
+    lengthMm: integer("length_mm").default(0).notNull(),
+    rotationDegrees: integer("rotation_degrees").default(0).notNull(),
+    // [[x,y], ...] in feature-local mm, for POLYGON/POLYLINE only.
+    points: jsonb(),
+
+    // Rotated bounding box, maintained on write. Indexing origin+width would
+    // be wrong for any rotated feature, so the envelope is what gets indexed
+    // and used as the broad phase before exact OBB/polygon intersection.
+    envelopeMinXMm: integer("envelope_min_x_mm").default(0).notNull(),
+    envelopeMinYMm: integer("envelope_min_y_mm").default(0).notNull(),
+    envelopeMaxXMm: integer("envelope_max_x_mm").default(0).notNull(),
+    envelopeMaxYMm: integer("envelope_max_y_mm").default(0).notNull(),
+
+    // Vertical extent: z spans [elevation_mm, elevation_mm + height_mm]. This
+    // is what lets a conveyor at 2400mm not block a pedestrian underneath it.
+    elevationMm: integer("elevation_mm").default(0).notNull(),
+    heightMm: integer("height_mm"),
+
+    layerIndex: integer("layer_index").default(0).notNull(),
+    isObstacle: boolean("is_obstacle").default(true).notNull(),
+    isVisualOnly: boolean("is_visual_only").default(false).notNull(),
+    impedanceMultiplier: numeric("impedance_multiplier", {
+      precision: 5,
+      scale: 2,
+    })
+      .default("1.00")
+      .notNull(),
+
+    zoneId: integer("zone_id"),
+    label: varchar({ length: 100 }),
+    color: varchar({ length: 7 }),
+
+    // Kind-specific attributes, validated in app code against the spec in
+    // layout-designer/feature-kinds.ts before every write.
+    attrs: jsonb().default({}).notNull(),
+    attrsVersion: integer("attrs_version").default(1).notNull(),
+
+    // Soft lifecycle -- features referenced by nav edges or historical routes
+    // are deactivated, not deleted.
+    isActive: boolean("is_active").default(true).notNull(),
+    createdAt: timestamp("created_at", {
+      withTimezone: true,
+      mode: "string",
+    }).default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: timestamp("updated_at", {
+      withTimezone: true,
+      mode: "string",
+    }).default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    index("idx_layout_features_canvas_render")
+      .using(
+        "btree",
+        table.warehouseId.asc().nullsLast().op("int4_ops"),
+        table.hallId.asc().nullsLast().op("int4_ops"),
+        table.floorLevel.asc().nullsLast().op("int4_ops"),
+        table.envelopeMinXMm.asc().nullsLast().op("int4_ops"),
+        table.envelopeMinYMm.asc().nullsLast().op("int4_ops"),
+      )
+      .where(sql`(is_active = true)`),
+    index("idx_layout_features_kind").using(
+      "btree",
+      table.warehouseId.asc().nullsLast().op("int4_ops"),
+      table.kind.asc().nullsLast().op("text_ops"),
+    ),
+    foreignKey({
+      columns: [table.hallId],
+      foreignColumns: [halls.hallId],
+      name: "layout_features_hall_id_fkey",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.warehouseId],
+      foreignColumns: [warehouses.warehouseId],
+      name: "layout_features_warehouse_id_fkey",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.kind],
+      foreignColumns: [featureKinds.kind],
+      name: "layout_features_kind_fkey",
+    }).onDelete("restrict"),
+    foreignKey({
+      columns: [table.zoneId],
+      foreignColumns: [zoneTypes.zoneId],
+      name: "layout_features_zone_id_fkey",
+    }).onDelete("set null"),
+    check(
+      "chk_feature_rotation_range",
+      sql`(rotation_degrees >= 0) AND (rotation_degrees < 360)`,
+    ),
+    check(
+      "chk_feature_geometry_kind",
+      sql`(geometry_kind)::text = ANY ((ARRAY['RECT'::character varying, 'POLYGON'::character varying, 'POLYLINE'::character varying, 'POINT'::character varying, 'CIRCLE'::character varying])::text[])`,
+    ),
+    check(
+      "chk_feature_envelope",
+      sql`(envelope_max_x_mm >= envelope_min_x_mm) AND (envelope_max_y_mm >= envelope_min_y_mm)`,
+    ),
+  ],
+);
+
+// Zones were attributes-only (zone_types), which meant nothing could answer
+// "which zone is this worker standing in". A zone can be several disjoint
+// polygons, so geometry lives here rather than on zone_types itself.
+export const zoneAreas = pgTable(
+  "zone_areas",
+  {
+    zoneAreaId: serial("zone_area_id").primaryKey().notNull(),
+    zoneId: integer("zone_id").notNull(),
+    hallId: integer("hall_id").notNull(),
+    floorLevel: integer("floor_level").default(1).notNull(),
+    points: jsonb().notNull(),
+    envelopeMinXMm: integer("envelope_min_x_mm").default(0).notNull(),
+    envelopeMinYMm: integer("envelope_min_y_mm").default(0).notNull(),
+    envelopeMaxXMm: integer("envelope_max_x_mm").default(0).notNull(),
+    envelopeMaxYMm: integer("envelope_max_y_mm").default(0).notNull(),
+    // Higher priority wins where two zone areas overlap.
+    priority: integer().default(0).notNull(),
+  },
+  (table) => [
+    index("idx_zone_areas_hall").using(
+      "btree",
+      table.hallId.asc().nullsLast().op("int4_ops"),
+      table.floorLevel.asc().nullsLast().op("int4_ops"),
+    ),
+    foreignKey({
+      columns: [table.zoneId],
+      foreignColumns: [zoneTypes.zoneId],
+      name: "zone_areas_zone_id_fkey",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.hallId],
+      foreignColumns: [halls.hallId],
+      name: "zone_areas_hall_id_fkey",
+    }).onDelete("cascade"),
   ],
 );
