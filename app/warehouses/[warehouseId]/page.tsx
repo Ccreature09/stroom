@@ -136,7 +136,7 @@ export default async function WarehouseDashboardPage({
             </Link>
           ) : null}
 
-          {/* 1. Master Data & Partners */}
+          {/* Master Data & Partners */}
           <Link href={`/warehouses/${warehouse.warehouseId}/master-data`}>
             <Card className="rounded-2xl border border-slate-200 bg-white shadow-sm transition hover:-translate-y-0.5 hover:border-teal-300 hover:shadow-md h-full">
               <CardContent className="p-6">
@@ -153,7 +153,7 @@ export default async function WarehouseDashboardPage({
             </Card>
           </Link>
 
-          {/* 2. Inventory Control */}
+          {/* Inventory Control */}
           <Link href={`/warehouses/${warehouse.warehouseId}/inventory`}>
             <Card className="rounded-2xl border border-slate-200 bg-white shadow-sm transition hover:-translate-y-0.5 hover:border-teal-300 hover:shadow-md h-full">
               <CardContent className="p-6">
@@ -161,7 +161,8 @@ export default async function WarehouseDashboardPage({
                   Inventory Control
                 </h2>
                 <p className="mt-2 text-sm text-slate-600">
-                  Track live stock balances, LPN pallets, and movement logs.
+                  Track stock on hand, pallets, and every movement in the
+                  warehouse.
                 </p>
                 <span className="mt-4 inline-flex text-sm font-semibold text-teal-700">
                   Open module →
@@ -170,75 +171,10 @@ export default async function WarehouseDashboardPage({
             </Card>
           </Link>
 
-          {/* 3. Inbound Logistics */}
-          <Link href={`/warehouses/${warehouse.warehouseId}/inbound`}>
-            <Card className="rounded-2xl border border-slate-200 bg-white shadow-sm transition hover:-translate-y-0.5 hover:border-teal-300 hover:shadow-md h-full">
-              <CardContent className="p-6">
-                <h2 className="text-lg font-bold text-slate-950">
-                  Inbound Logistics
-                </h2>
-                <p className="mt-2 text-sm text-slate-600">
-                  Handle purchase orders, receiving, dock booking, and putaway.
-                </p>
-                <span className="mt-4 inline-flex text-sm font-semibold text-teal-700">
-                  Open module →
-                </span>
-              </CardContent>
-            </Card>
-          </Link>
-
-          {/* 4. Outbound Logistics */}
-          <Link href={`/warehouses/${warehouse.warehouseId}/outbound`}>
-            <Card className="rounded-2xl border border-slate-200 bg-white shadow-sm transition hover:-translate-y-0.5 hover:border-teal-300 hover:shadow-md h-full">
-              <CardContent className="p-6">
-                <h2 className="text-lg font-bold text-slate-950">
-                  Outbound Logistics
-                </h2>
-                <p className="mt-2 text-sm text-slate-600">
-                  Process sales orders, picking tasks, staging, and shipments.
-                </p>
-                <span className="mt-4 inline-flex text-sm font-semibold text-teal-700">
-                  Open module →
-                </span>
-              </CardContent>
-            </Card>
-          </Link>
-
-          {/* 5. Internal Operations & Audits */}
-          <Link href={`/warehouses/${warehouse.warehouseId}/internal-ops`}>
-            <Card className="rounded-2xl border border-slate-200 bg-white shadow-sm transition hover:-translate-y-0.5 hover:border-teal-300 hover:shadow-md h-full">
-              <CardContent className="p-6">
-                <h2 className="text-lg font-bold text-slate-950">
-                  Internal Operations
-                </h2>
-                <p className="mt-2 text-sm text-slate-600">
-                  Execute stock replenishments, cycle counting, and inventory
-                  audits.
-                </p>
-                <span className="mt-4 inline-flex text-sm font-semibold text-teal-700">
-                  Open module →
-                </span>
-              </CardContent>
-            </Card>
-          </Link>
-
-          {/* 6. Task Control Engine */}
-          <Link href={`/warehouses/${warehouse.warehouseId}/task-control`}>
-            <Card className="rounded-2xl border border-slate-200 bg-white shadow-sm transition hover:-translate-y-0.5 hover:border-teal-300 hover:shadow-md h-full">
-              <CardContent className="p-6">
-                <h2 className="text-lg font-bold text-slate-950">
-                  Task Control Engine
-                </h2>
-                <p className="mt-2 text-sm text-slate-600">
-                  Central queue to monitor, prioritize, and dispatch operational
-                  tasks.
-                </p>
-                <span className="mt-4 inline-flex text-sm font-semibold text-teal-700">
-                  Open module →
-                </span>
-              </CardContent>
-            </Card>
-          </Link>
+          {/* Inbound/Outbound Logistics, Internal Operations, and Task Control
+              Engine are not built yet -- their cards previously linked to
+              routes that don't exist and 404'd. Re-add once each has real
+              pages behind it. */}
         </section>
       </div>
     </main>
