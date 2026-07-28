@@ -8,6 +8,20 @@
       "when": 1785190147506,
       "tag": "0000_slim_marten_broadcloak",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1785264077854,
+      "tag": "0001_layout_features",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1785264089636,
+      "tag": "0002_drop_location_type_booleans",
+      "breakpoints": true
     }
   ]
 }
