@@ -3,25 +3,9 @@ import { redirect } from "next/navigation";
 import { db } from "@/lib/db";
 import { suppliers, employees } from "@/drizzle/schema";
 import { createClient } from "@/lib/server";
-import {
-  MoreHorizontal,
-  Search,
-  Mail,
-  Phone,
-  Clock,
-  MapPin,
-} from "lucide-react";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuGroup,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { deleteSupplier } from "./actions";
+import { Search, Mail, Phone, Clock, MapPin } from "lucide-react";
 import { AddSupplierDialog } from "./add-supplier-dialog";
+import { SupplierRowActions } from "./supplier-row-actions";
 
 type SearchParams = Promise<{ q?: string }>;
 
@@ -37,7 +21,7 @@ export default async function WarehouseSupplierCatalogMasterDataPage({
   const parsedWarehouseId = Number(warehouseId);
 
   if (!Number.isInteger(parsedWarehouseId) || parsedWarehouseId <= 0) {
-    redirect("/dashboard/warehouses");
+    redirect("/warehouses");
   }
 
   const supabase = await createClient();
@@ -169,37 +153,10 @@ export default async function WarehouseSupplierCatalogMasterDataPage({
                   )}
                 </td>
                 <td className="px-6 py-4 text-right">
-                  <DropdownMenu>
-                    <DropdownMenuTrigger className="h-8 w-8 p-0 inline-flex items-center justify-center rounded-md text-sm font-medium hover:bg-slate-100 focus:outline-none">
-                      <MoreHorizontal className="h-4 w-4" />
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end">
-                      <DropdownMenuGroup>
-                        <DropdownMenuLabel>Actions</DropdownMenuLabel>
-                        <DropdownMenuItem>Edit Supplier</DropdownMenuItem>
-                      </DropdownMenuGroup>
-
-                      <DropdownMenuSeparator />
-
-                      <form action={deleteSupplier}>
-                        <input
-                          type="hidden"
-                          name="supplierId"
-                          value={supplier.supplierId}
-                        />
-                        <input
-                          type="hidden"
-                          name="warehouseId"
-                          value={parsedWarehouseId}
-                        />
-                        <button type="submit" className="w-full text-left">
-                          <DropdownMenuItem className="text-red-600">
-                            Delete Supplier
-                          </DropdownMenuItem>
-                        </button>
-                      </form>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
+                  <SupplierRowActions
+                    supplier={supplier}
+                    warehouseId={parsedWarehouseId}
+                  />
                 </td>
               </tr>
             ))}
