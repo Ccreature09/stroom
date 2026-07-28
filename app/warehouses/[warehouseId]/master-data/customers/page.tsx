@@ -3,18 +3,9 @@ import { redirect } from "next/navigation";
 import { db } from "@/lib/db";
 import { customers, employees } from "@/drizzle/schema";
 import { createClient } from "@/lib/server";
-import { MoreHorizontal, Search } from "lucide-react";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuGroup,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { toggleCustomerStatus } from "./actions";
+import { Search } from "lucide-react";
 import { AddCustomerDialog } from "./add-customer-dialog";
+import { CustomerRowActions } from "./customer-row-actions";
 
 type SearchParams = Promise<{ q?: string }>;
 
@@ -30,7 +21,7 @@ export default async function WarehouseCustomersMasterDataPage({
   const parsedWarehouseId = Number(warehouseId);
 
   if (!Number.isInteger(parsedWarehouseId) || parsedWarehouseId <= 0) {
-    redirect("/dashboard/warehouses");
+    redirect("/warehouses");
   }
 
   const supabase = await createClient();
@@ -131,50 +122,10 @@ export default async function WarehouseCustomersMasterDataPage({
                   </span>
                 </td>
                 <td className="px-6 py-4 text-right">
-                  <DropdownMenu>
-                    <DropdownMenuTrigger className="h-8 w-8 p-0 inline-flex items-center justify-center rounded-md text-sm font-medium hover:bg-slate-100 focus:outline-none">
-                      <MoreHorizontal className="h-4 w-4" />
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end">
-                      <DropdownMenuGroup>
-                        <DropdownMenuLabel>Actions</DropdownMenuLabel>
-                        <DropdownMenuItem>Edit Customer</DropdownMenuItem>
-                      </DropdownMenuGroup>
-
-                      <DropdownMenuSeparator />
-
-                      <form action={toggleCustomerStatus}>
-                        <input
-                          type="hidden"
-                          name="customerId"
-                          value={customer.customerId}
-                        />
-                        <input
-                          type="hidden"
-                          name="warehouseId"
-                          value={parsedWarehouseId}
-                        />
-                        <input
-                          type="hidden"
-                          name="isActive"
-                          value={String(customer.isActive)}
-                        />
-                        <button type="submit" className="w-full text-left">
-                          <DropdownMenuItem
-                            className={
-                              customer.isActive
-                                ? "text-red-600"
-                                : "text-emerald-700"
-                            }
-                          >
-                            {customer.isActive
-                              ? "Deactivate Customer"
-                              : "Activate Customer"}
-                          </DropdownMenuItem>
-                        </button>
-                      </form>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
+                  <CustomerRowActions
+                    customer={customer}
+                    warehouseId={parsedWarehouseId}
+                  />
                 </td>
               </tr>
             ))}
