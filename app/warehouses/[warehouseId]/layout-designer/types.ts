@@ -1,3 +1,8 @@
+import type { GeometryKind, Point } from "./geometry";
+import { computeEnvelope } from "./geometry";
+import type { FeatureAttrs, FeatureCategory } from "./feature-kinds";
+import type { LocationType } from "./naming";
+
 export type ZoneTypeDTO = {
   zoneId: number;
   name: string;
@@ -17,9 +22,7 @@ export type LocationDTO = {
   bay: number | null;
   level: number | null;
   row: number | null;
-  isRacking: boolean;
-  isShelf: boolean;
-  isFloorStorage: boolean;
+  locationType: LocationType;
   heightMm: number | null;
   maxWeightKg: number | null;
   isBlocked: boolean | null;
@@ -59,9 +62,7 @@ export type LocationPatch = Partial<{
   bay: number | null;
   level: number | null;
   row: number | null;
-  isRacking: boolean;
-  isShelf: boolean;
-  isFloorStorage: boolean;
+  locationType: LocationType;
   heightMm: number | null;
   maxWeightKg: number | null;
   isBlocked: boolean;
@@ -72,6 +73,76 @@ export type LocationPatch = Partial<{
   rotationDegrees: number;
   floorLevel: number;
 }>;
+
+// ---------------------------------------------------------------------------
+// Layout features -- everything on the floor that is not a storage bin.
+// ---------------------------------------------------------------------------
+
+// Row from the `feature_kinds` lookup: how the designer draws and defaults a
+// kind. The kind's *attribute schema* lives in feature-kinds.ts instead,
+// because that is code rather than data.
+export type FeatureKindDTO = {
+  kind: string;
+  category: FeatureCategory;
+  label: string;
+  defaultGeometryKind: GeometryKind;
+  defaultWidthMm: number | null;
+  defaultLengthMm: number | null;
+  defaultHeightMm: number | null;
+  isObstacleDefault: boolean;
+  defaultColor: string;
+  sortOrder: number;
+};
+
+export type FeatureDTO = {
+  featureId: number;
+  floorLevel: number;
+  kind: string;
+  geometryKind: GeometryKind;
+  originXMm: number;
+  originYMm: number;
+  widthMm: number;
+  lengthMm: number;
+  rotationDegrees: number;
+  points: Point[] | null;
+  elevationMm: number;
+  heightMm: number | null;
+  layerIndex: number;
+  isObstacle: boolean;
+  isVisualOnly: boolean;
+  zoneId: number | null;
+  label: string | null;
+  color: string | null;
+  attrs: FeatureAttrs;
+};
+
+// `kind` and `geometryKind` are deliberately absent: kind determines the
+// attribute schema, so changing it on an existing feature would leave attrs
+// belonging to a different shape behind. Changing kind is a delete + create.
+export type FeaturePatch = Partial<{
+  floorLevel: number;
+  originXMm: number;
+  originYMm: number;
+  widthMm: number;
+  lengthMm: number;
+  rotationDegrees: number;
+  points: Point[] | null;
+  elevationMm: number;
+  heightMm: number | null;
+  layerIndex: number;
+  isObstacle: boolean;
+  isVisualOnly: boolean;
+  zoneId: number | null;
+  label: string | null;
+  color: string | null;
+  attrs: FeatureAttrs;
+}>;
+
+export type NewFeatureDraft = FeaturePatch & {
+  tempId: number;
+  kind: string;
+  geometryKind: GeometryKind;
+};
 
 export type ZonePatch = Partial<{
   name: string;
@@ -100,6 +171,9 @@ export type HallState = {
   zonePatches: Record<number, ZonePatch>;
   deletedZoneIds: number[];
   newZones: NewZoneDraft[];
+  featurePatches: Record<number, FeaturePatch>;
+  deletedFeatureIds: number[];
+  newFeatures: NewFeatureDraft[];
 };
 
 export const EMPTY_HALL_STATE: HallState = {
@@ -110,6 +184,9 @@ export const EMPTY_HALL_STATE: HallState = {
   zonePatches: {},
   deletedZoneIds: [],
   newZones: [],
+  featurePatches: {},
+  deletedFeatureIds: [],
+  newFeatures: [],
 };
 
 function newLocationDraftToDTO(draft: NewLocationDraft): LocationDTO {
@@ -121,9 +198,7 @@ function newLocationDraftToDTO(draft: NewLocationDraft): LocationDTO {
     bay: draft.bay ?? null,
     level: draft.level ?? null,
     row: draft.row ?? null,
-    isRacking: draft.isRacking ?? false,
-    isShelf: draft.isShelf ?? false,
-    isFloorStorage: draft.isFloorStorage ?? false,
+    locationType: draft.locationType ?? "NONE",
     heightMm: draft.heightMm ?? null,
     maxWeightKg: draft.maxWeightKg ?? null,
     isBlocked: draft.isBlocked ?? false,
@@ -184,6 +259,71 @@ export function applyHallStateToZones(
   return [...patched, ...created];
 }
 
+function newFeatureDraftToDTO(draft: NewFeatureDraft): FeatureDTO {
+  const widthMm = draft.widthMm ?? 1000;
+  const lengthMm = draft.lengthMm ?? 1000;
+  return {
+    featureId: draft.tempId,
+    floorLevel: draft.floorLevel ?? 1,
+    kind: draft.kind,
+    geometryKind: draft.geometryKind,
+    originXMm: draft.originXMm ?? 0,
+    originYMm: draft.originYMm ?? 0,
+    widthMm,
+    lengthMm,
+    rotationDegrees: draft.rotationDegrees ?? 0,
+    points: draft.points ?? null,
+    elevationMm: draft.elevationMm ?? 0,
+    heightMm: draft.heightMm ?? null,
+    layerIndex: draft.layerIndex ?? 0,
+    isObstacle: draft.isObstacle ?? true,
+    isVisualOnly: draft.isVisualOnly ?? false,
+    zoneId: draft.zoneId ?? null,
+    label: draft.label ?? null,
+    color: draft.color ?? null,
+    attrs: draft.attrs ?? {},
+  };
+}
+
+export function applyHallStateToFeatures(
+  base: FeatureDTO[],
+  state: HallState | undefined,
+): FeatureDTO[] {
+  if (!state) return base;
+  const deleted = new Set(state.deletedFeatureIds);
+  const patched = base
+    .filter((f) => !deleted.has(f.featureId))
+    .map((f) => {
+      const patch = state.featurePatches[f.featureId];
+      return patch ? { ...f, ...patch } : f;
+    });
+  const created = state.newFeatures.map(newFeatureDraftToDTO);
+  return [...patched, ...created];
+}
+
+/**
+ * Features are drawn under locations and in ascending layer order, so a
+ * mezzanine deck or staging polygon never hides the racking sitting on it.
+ */
+export function sortFeaturesForRender(features: FeatureDTO[]): FeatureDTO[] {
+  return [...features].sort(
+    (a, b) => a.layerIndex - b.layerIndex || a.featureId - b.featureId,
+  );
+}
+
+/** Envelope of a feature as currently drafted -- recomputed, never trusted. */
+export function envelopeForFeature(feature: FeatureDTO) {
+  return computeEnvelope({
+    geometryKind: feature.geometryKind,
+    originXMm: feature.originXMm,
+    originYMm: feature.originYMm,
+    widthMm: feature.widthMm,
+    lengthMm: feature.lengthMm,
+    rotationDegrees: feature.rotationDegrees,
+    points: feature.points,
+  });
+}
+
 export function hallStateChangeCount(state: HallState): number {
   return (
     (Object.keys(state.hallPatch).length > 0 ? 1 : 0) +
@@ -192,7 +332,10 @@ export function hallStateChangeCount(state: HallState): number {
     state.newLocations.length +
     Object.keys(state.zonePatches).length +
     state.deletedZoneIds.length +
-    state.newZones.length
+    state.newZones.length +
+    Object.keys(state.featurePatches).length +
+    state.deletedFeatureIds.length +
+    state.newFeatures.length
   );
 }
 
@@ -257,26 +400,15 @@ export function cssColorForZone(
 // Grouping
 // ---------------------------------------------------------------------------
 
-export type LocationTypeKey = "racking" | "shelf" | "floor" | "none";
-
-export function locationTypeKeyFor(
-  loc: Pick<LocationDTO, "isRacking" | "isShelf" | "isFloorStorage">,
-): LocationTypeKey {
-  if (loc.isRacking) return "racking";
-  if (loc.isShelf) return "shelf";
-  if (loc.isFloorStorage) return "floor";
-  return "none";
-}
-
 /**
  * Locations sharing a group key move and delete together as a single unit.
  * A group is Zone + Location Type (e.g. "Zone A + Racking"), computed
  * on the fly rather than persisted as its own column.
  */
 export function groupKeyFor(
-  loc: Pick<LocationDTO, "zoneId" | "isRacking" | "isShelf" | "isFloorStorage">,
+  loc: Pick<LocationDTO, "zoneId" | "locationType">,
 ): string {
-  return `${loc.zoneId ?? "none"}:${locationTypeKeyFor(loc)}`;
+  return `${loc.zoneId ?? "none"}:${loc.locationType}`;
 }
 
 export function locationIdsInGroup(
@@ -299,7 +431,7 @@ export function locationIdsInAisle(
   aisle: number,
 ): number[] {
   return locations
-    .filter((loc) => loc.isRacking && loc.aisle === aisle)
+    .filter((loc) => loc.locationType === "RACKING" && loc.aisle === aisle)
     .map((loc) => loc.locationId);
 }
 
@@ -320,7 +452,8 @@ export function groupByBayFootprint(
 ): Map<string, LocationDTO[]> {
   const groups = new Map<string, LocationDTO[]>();
   for (const loc of locations) {
-    if (!loc.isRacking && !loc.isShelf) continue;
+    if (loc.locationType !== "RACKING" && loc.locationType !== "SHELF")
+      continue;
     const key = bayFootprintKey(loc);
     const existing = groups.get(key) ?? [];
     existing.push(loc);

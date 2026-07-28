@@ -75,26 +75,30 @@ export function validateTemplate(template: string): string | null {
 }
 
 // ---------------------------------------------------------------------------
-// Location type flags
+// Location type
+//
+// One mutually-exclusive choice stored as one column. This replaced a
+// boolean triple (is_racking / is_shelf / is_floor_storage) that let a row be
+// both racking and shelf at once, with nothing in the schema to prevent it.
 // ---------------------------------------------------------------------------
 
-export type LocationTypeFlag = "racking" | "shelf" | "floor" | "none";
+export const LOCATION_TYPES = ["RACKING", "SHELF", "FLOOR", "NONE"] as const;
+export type LocationType = (typeof LOCATION_TYPES)[number];
 
-export function locationTypeFlagsFor(type: LocationTypeFlag) {
-  return {
-    isRacking: type === "racking",
-    isShelf: type === "shelf",
-    isFloorStorage: type === "floor",
-  };
+export const LOCATION_TYPE_LABELS: Record<LocationType, string> = {
+  RACKING: "Racking",
+  SHELF: "Shelf",
+  FLOOR: "Floor storage",
+  NONE: "None",
+};
+
+export function isLocationType(value: unknown): value is LocationType {
+  return (
+    typeof value === "string" &&
+    (LOCATION_TYPES as readonly string[]).includes(value)
+  );
 }
 
-export function flagsToLocationType(flags: {
-  isRacking?: boolean | null;
-  isShelf?: boolean | null;
-  isFloorStorage?: boolean | null;
-}): LocationTypeFlag {
-  if (flags.isRacking) return "racking";
-  if (flags.isShelf) return "shelf";
-  if (flags.isFloorStorage) return "floor";
-  return "none";
+export function parseLocationType(value: unknown): LocationType {
+  return isLocationType(value) ? value : "NONE";
 }

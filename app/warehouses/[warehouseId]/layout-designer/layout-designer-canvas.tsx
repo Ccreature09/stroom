@@ -10,14 +10,27 @@ import {
   type FederatedPointerEvent,
 } from "pixi.js";
 import { Viewport } from "pixi-viewport";
-import type { HallDTO, LocationDTO, ZoneTypeDTO } from "./types";
+import type {
+  FeatureDTO,
+  FeatureKindDTO,
+  HallDTO,
+  LocationDTO,
+  ZoneTypeDTO,
+} from "./types";
 import {
   groupByBayFootprint,
   groupKeyFor,
   locationIdsInAisle,
   locationIdsInGroup,
   resolveZoneColor,
+  sortFeaturesForRender,
 } from "./types";
+import {
+  footprintVertices,
+  hitTestFeature,
+  scaleGeometry,
+  type Point,
+} from "./geometry";
 
 import { Button } from "@/components/ui/button";
 import { ZoomIn, ZoomOut } from "lucide-react";
@@ -25,8 +38,21 @@ import { ZoomIn, ZoomOut } from "lucide-react";
 const MIN_LOCATION_MM = 200;
 const HANDLE_SCREEN_SIZE = 9;
 const LABEL_ZOOM_THRESHOLD = 0.55;
+// World-mm radius of the marker drawn for POINT features, and the extra grab
+// slack given to thin geometry (walls, conveyors) so they stay clickable.
+const POINT_MARKER_MM = 350;
+const FEATURE_HIT_TOLERANCE_MM = 250;
 
-export type Tool = "select" | "pan" | "transform" | "draw";
+export type Tool = "select" | "pan" | "transform" | "draw" | "feature";
+
+export type FeatureGeometryUpdate = {
+  originXMm: number;
+  originYMm: number;
+  widthMm: number;
+  lengthMm: number;
+  rotationDegrees: number;
+  points: Point[] | null;
+};
 export type Geometry = {
   physicalX: number;
   physicalY: number;
@@ -40,6 +66,20 @@ type Props = {
   hall: HallDTO;
   locations: LocationDTO[];
   zoneTypes: ZoneTypeDTO[];
+  features: FeatureDTO[];
+  featureKinds: FeatureKindDTO[];
+  selectedFeatureId: number | null;
+  onSelectFeature: (featureId: number | null) => void;
+  onFeatureDrawn: (geometry: {
+    originXMm: number;
+    originYMm: number;
+    widthMm: number;
+    lengthMm: number;
+  }) => void;
+  onFeatureGeometryChange: (
+    featureId: number,
+    geometry: FeatureGeometryUpdate,
+  ) => void;
   selectedLocationId: number | null;
   selectedLocationIds: number[];
   activeLevel: number | null;
@@ -66,6 +106,19 @@ type LocationNode = {
   loc: LocationDTO;
   memberCount: number; // how many levels this node aggregates (bay aggregation)
 };
+
+type FeatureNode = {
+  container: Container;
+  shape: Graphics;
+  label: Text;
+  feature: FeatureDTO;
+};
+
+function parseHexToInt(hex: string | null | undefined, fallback: number) {
+  if (!hex) return fallback;
+  const match = /^#?([0-9a-fA-F]{6})$/.exec(hex.trim());
+  return match ? parseInt(match[1], 16) : fallback;
+}
 
 const HANDLE_CORNERS = ["nw", "ne", "se", "sw"] as const;
 type Corner = (typeof HANDLE_CORNERS)[number];
@@ -154,6 +207,12 @@ export default function LayoutDesignerCanvas({
   hall,
   locations,
   zoneTypes,
+  features,
+  featureKinds,
+  selectedFeatureId,
+  onSelectFeature,
+  onFeatureDrawn,
+  onFeatureGeometryChange,
   selectedLocationId,
   selectedLocationIds,
   activeLevel,
@@ -172,7 +231,10 @@ export default function LayoutDesignerCanvas({
   const appRef = useRef<Application | null>(null);
   const viewportRef = useRef<Viewport | null>(null);
   const locationLayerRef = useRef<Container | null>(null);
+  const featureLayerRef = useRef<Container | null>(null);
   const handleLayerRef = useRef<Container | null>(null);
+  const featureHandlesRef = useRef<Graphics[]>([]);
+  const featureNodesRef = useRef<Map<number, FeatureNode>>(new Map());
   const nodesRef = useRef<Map<number, LocationNode>>(new Map());
   const handlesRef = useRef<Graphics[]>([]);
   const handleCornerGraphicsRef = useRef<Partial<Record<Corner, Graphics>>>({});
@@ -227,6 +289,10 @@ export default function LayoutDesignerCanvas({
     onGroupMove,
     onGroupResize,
     hall,
+    selectedFeatureId,
+    onSelectFeature,
+    onFeatureDrawn,
+    onFeatureGeometryChange,
   });
   stateRef.current = {
     tool,
@@ -239,6 +305,10 @@ export default function LayoutDesignerCanvas({
     onGroupMove,
     onGroupResize,
     hall,
+    selectedFeatureId,
+    onSelectFeature,
+    onFeatureDrawn,
+    onFeatureGeometryChange,
   };
 
   const locationsRef = useRef(locations);
@@ -246,6 +316,23 @@ export default function LayoutDesignerCanvas({
 
   const zoneTypesRef = useRef(zoneTypes);
   zoneTypesRef.current = zoneTypes;
+
+  const featuresRef = useRef(features);
+  featuresRef.current = features;
+
+  const featureKindsRef = useRef(featureKinds);
+  featureKindsRef.current = featureKinds;
+
+  function kindMetaFor(kind: string): FeatureKindDTO | undefined {
+    return featureKindsRef.current.find((k) => k.kind === kind);
+  }
+
+  function colorForFeature(feature: FeatureDTO): number {
+    return parseHexToInt(
+      feature.color ?? kindMetaFor(feature.kind)?.defaultColor,
+      0x64748b,
+    );
+  }
 
   function colorForLocation(zoneId: number | null): number {
     if (zoneId == null) return resolveZoneColor(null);
@@ -275,6 +362,26 @@ export default function LayoutDesignerCanvas({
     originY: number;
     originW: number;
     originH: number;
+  }>(null);
+
+  const featureDragRef = useRef<null | {
+    featureId: number;
+    startWorldX: number;
+    startWorldY: number;
+    originX: number;
+    originY: number;
+  }>(null);
+  const featureResizeRef = useRef<null | {
+    featureId: number;
+    corner: Corner;
+    originX: number;
+    originY: number;
+    originW: number;
+    originH: number;
+    // Snapshotted at grab time: every move event rescales from *these*, not
+    // from the live points, otherwise each event would scale the already
+    // scaled result and the shape would run away from the cursor.
+    originPoints: Point[] | null;
   }>(null);
 
   const boxSelectRef = useRef<null | {
@@ -373,10 +480,10 @@ export default function LayoutDesignerCanvas({
   function resolveGroupIds(locationId: number): number[] {
     const loc = locationsRef.current.find((l) => l.locationId === locationId);
     if (!loc) return [locationId];
-    if (loc.isRacking && loc.aisle != null) {
+    if (loc.locationType === "RACKING" && loc.aisle != null) {
       return locationIdsInAisle(locationsRef.current, loc.aisle);
     }
-    if (loc.isShelf || loc.isFloorStorage) {
+    if (loc.locationType === "SHELF" || loc.locationType === "FLOOR") {
       return locationIdsInGroup(locationsRef.current, groupKeyFor(loc));
     }
     return [locationId];
@@ -414,7 +521,7 @@ export default function LayoutDesignerCanvas({
 
     const updates: GeometryUpdate[] = [];
     for (const loc of locationsRef.current) {
-      if (!loc.isRacking || loc.aisle !== resize.aisle) continue;
+      if (loc.locationType !== "RACKING" || loc.aisle !== resize.aisle) continue;
       const bayKey = `${loc.aisle ?? "x"}:${loc.bay ?? "x"}`;
       const geom = geomByBay.get(bayKey);
       if (!geom) continue;
@@ -428,6 +535,343 @@ export default function LayoutDesignerCanvas({
     }
 
     if (updates.length > 0) stateRef.current.onGroupResize(updates);
+  }
+
+  // ---------------------------------------------------------------------
+  // Layout features
+  //
+  // Drawn on their own layer beneath locations, so a staging polygon or a
+  // mezzanine deck never covers the racking standing on it. Each node is a
+  // container positioned at the feature origin with the same
+  // position/pivot/angle convention locations use, which is what lets
+  // geometry.ts's rotate-about-origin math agree with what Pixi renders.
+  // ---------------------------------------------------------------------
+
+  function drawFeatureShape(node: FeatureNode, isSelected: boolean) {
+    const feature = node.feature;
+    const color = colorForFeature(feature);
+    const meta = kindMetaFor(feature.kind);
+    const strokeWidth = isSelected ? 45 : 20;
+    const strokeColor = isSelected ? 0x0f172a : color;
+    const pending = feature.featureId < 0;
+    const outline = {
+      width: strokeWidth,
+      color: pending ? PENDING_CREATE_COLOR : strokeColor,
+    };
+    // Visual-only annotations and non-obstacles read as lighter washes so the
+    // eye can separate "this blocks travel" from "this is just labelled area".
+    const fillAlpha = feature.isVisualOnly
+      ? 0.08
+      : feature.isObstacle
+        ? 0.45
+        : 0.18;
+
+    const g = node.shape.clear();
+
+    switch (feature.geometryKind) {
+      case "RECT":
+        g.rect(0, 0, feature.widthMm, feature.lengthMm)
+          .fill({ color, alpha: fillAlpha })
+          .stroke(outline);
+        break;
+      case "CIRCLE": {
+        const r = feature.widthMm / 2;
+        g.circle(r, r, r).fill({ color, alpha: fillAlpha }).stroke(outline);
+        break;
+      }
+      case "POLYGON": {
+        const pts = feature.points ?? [];
+        if (pts.length >= 3) {
+          g.poly(pts.map((p) => ({ x: p.x, y: p.y })))
+            .fill({ color, alpha: fillAlpha })
+            .stroke(outline);
+        }
+        break;
+      }
+      case "POLYLINE": {
+        const pts = feature.points ?? [];
+        if (pts.length >= 2) {
+          g.moveTo(pts[0].x, pts[0].y);
+          for (let i = 1; i < pts.length; i++) g.lineTo(pts[i].x, pts[i].y);
+          // Walls and conveyors have a real thickness; fall back to a visible
+          // hairline so a freshly drawn one is never invisible.
+          const thickness = Number(feature.attrs.thicknessMm);
+          g.stroke({
+            width: Number.isFinite(thickness) && thickness > 0 ? thickness : 200,
+            color: pending ? PENDING_CREATE_COLOR : color,
+            alpha: 0.95,
+          });
+          if (isSelected) {
+            g.moveTo(pts[0].x, pts[0].y);
+            for (let i = 1; i < pts.length; i++) g.lineTo(pts[i].x, pts[i].y);
+            g.stroke({ width: 60, color: 0x0f172a, alpha: 0.9 });
+          }
+        }
+        break;
+      }
+      case "POINT":
+        g.circle(0, 0, POINT_MARKER_MM)
+          .fill({ color, alpha: 0.9 })
+          .stroke({
+            width: isSelected ? 90 : 40,
+            color: pending ? PENDING_CREATE_COLOR : 0x0f172a,
+          });
+        break;
+    }
+
+    node.label.text = feature.label ?? meta?.label ?? feature.kind;
+  }
+
+  function syncFeatureNodes(allFeatures: FeatureDTO[]) {
+    const layer = featureLayerRef.current;
+    if (!layer) return;
+
+    const nodes = featureNodesRef.current;
+    const seen = new Set<number>();
+    const ordered = sortFeaturesForRender(allFeatures);
+
+    for (const feature of ordered) {
+      seen.add(feature.featureId);
+      let node = nodes.get(feature.featureId);
+
+      if (!node) {
+        const container = new Container();
+        const shape = new Graphics();
+        const label = new Text({
+          text: "",
+          style: new TextStyle({
+            fontSize: 200,
+            fill: 0x1e293b,
+            fontWeight: "600",
+          }),
+        });
+        label.anchor.set(0.5);
+        container.addChild(shape, label);
+        layer.addChild(container);
+
+        // Features never intercept pointer events. Pixi hit-tests a Graphics
+        // against its fill path, which would make a stroke-only polyline
+        // (wall, conveyor) unclickable while simultaneously letting a large
+        // filled polygon swallow clicks meant for the racking drawn on top of
+        // it. Picking goes through pickFeatureAt() instead, which uses the
+        // exact geometry and a zoom-compensated tolerance.
+        container.eventMode = "none";
+
+        node = { container, shape, label, feature };
+        nodes.set(feature.featureId, node);
+      }
+
+      node.feature = feature;
+      node.container.position.set(feature.originXMm, feature.originYMm);
+      node.container.pivot.set(0, 0);
+      node.container.angle = feature.rotationDegrees;
+      node.container.zIndex = feature.layerIndex;
+
+      drawFeatureShape(node, feature.featureId === selectedFeatureId);
+
+      // Labels sit at the footprint centroid rather than the origin, which is
+      // the only sensible anchor for polygons and polylines.
+      const local = footprintVertices({
+        geometryKind: feature.geometryKind,
+        originXMm: 0,
+        originYMm: 0,
+        widthMm: feature.widthMm,
+        lengthMm: feature.lengthMm,
+        rotationDegrees: 0,
+        points: feature.points,
+      });
+      if (local.length > 0) {
+        const cx = local.reduce((sum, p) => sum + p.x, 0) / local.length;
+        const cy = local.reduce((sum, p) => sum + p.y, 0) / local.length;
+        node.label.position.set(cx, cy);
+      }
+      node.label.style.fontSize = fittedFontSize(
+        Math.max(feature.widthMm, POINT_MARKER_MM * 4),
+        Math.max(feature.lengthMm, POINT_MARKER_MM * 4),
+      );
+      node.container.sortableChildren = false;
+    }
+
+    for (const [id, node] of nodes) {
+      if (!seen.has(id)) {
+        node.container.destroy({ children: true });
+        nodes.delete(id);
+      }
+    }
+
+    layer.sortableChildren = true;
+    updateFeatureLabelVisibility();
+    rebuildFeatureHandles();
+  }
+
+  function updateFeatureLabelVisibility() {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    const visible = viewport.scale.x >= LABEL_ZOOM_THRESHOLD;
+    for (const node of featureNodesRef.current.values()) {
+      node.label.visible = visible;
+    }
+  }
+
+  /**
+   * Topmost feature under a world point, or null. Iterates in reverse render
+   * order so the feature drawn last (highest layer) wins, matching what the
+   * user sees. Tolerance is converted from screen pixels to mm at the current
+   * zoom so thin geometry keeps a constant-size grab area.
+   */
+  function pickFeatureAt(world: Point): number | null {
+    const viewport = viewportRef.current;
+    const scale = viewport?.scale.x ?? 1;
+    const toleranceMm = Math.max(
+      FEATURE_HIT_TOLERANCE_MM,
+      HANDLE_SCREEN_SIZE / scale,
+    );
+
+    const ordered = sortFeaturesForRender(featuresRef.current);
+    for (let i = ordered.length - 1; i >= 0; i--) {
+      const feature = ordered[i];
+      const hit = hitTestFeature(
+        {
+          geometryKind: feature.geometryKind,
+          originXMm: feature.originXMm,
+          originYMm: feature.originYMm,
+          widthMm: feature.widthMm,
+          lengthMm: feature.lengthMm,
+          rotationDegrees: feature.rotationDegrees,
+          points: feature.points,
+        },
+        world,
+        feature.geometryKind === "POINT"
+          ? Math.max(POINT_MARKER_MM, toleranceMm)
+          : toleranceMm,
+      );
+      if (hit) return feature.featureId;
+    }
+    return null;
+  }
+
+  function commitFeatureDrag() {
+    const drag = featureDragRef.current;
+    if (!drag) return;
+    featureDragRef.current = null;
+    hideCoordOverlay();
+    const node = featureNodesRef.current.get(drag.featureId);
+    if (!node) return;
+    if (
+      node.feature.originXMm === drag.originX &&
+      node.feature.originYMm === drag.originY
+    )
+      return;
+    stateRef.current.onFeatureGeometryChange(drag.featureId, {
+      originXMm: node.feature.originXMm,
+      originYMm: node.feature.originYMm,
+      widthMm: node.feature.widthMm,
+      lengthMm: node.feature.lengthMm,
+      rotationDegrees: node.feature.rotationDegrees,
+      points: node.feature.points,
+    });
+  }
+
+  function commitFeatureResize() {
+    const resize = featureResizeRef.current;
+    if (!resize) return;
+    featureResizeRef.current = null;
+    hideCoordOverlay();
+    const node = featureNodesRef.current.get(resize.featureId);
+    if (!node) return;
+    stateRef.current.onFeatureGeometryChange(resize.featureId, {
+      originXMm: node.feature.originXMm,
+      originYMm: node.feature.originYMm,
+      widthMm: node.feature.widthMm,
+      lengthMm: node.feature.lengthMm,
+      rotationDegrees: node.feature.rotationDegrees,
+      points: node.feature.points,
+    });
+  }
+
+  /**
+   * Resize handles for the selected feature. They sit on the shared handle
+   * layer in world coordinates (not as children of the rotated feature
+   * container) so the grab points stay axis-aligned and predictable even for
+   * a rotated wall.
+   */
+  function rebuildFeatureHandles() {
+    const handleLayer = handleLayerRef.current;
+    const viewport = viewportRef.current;
+    if (!handleLayer || !viewport) return;
+
+    for (const h of featureHandlesRef.current) h.destroy();
+    featureHandlesRef.current = [];
+
+    if (tool !== "transform" || selectedFeatureId == null) return;
+    const node = featureNodesRef.current.get(selectedFeatureId);
+    if (!node) return;
+    // A point has no extent to drag; it is repositioned by dragging the
+    // marker itself.
+    if (node.feature.geometryKind === "POINT") return;
+
+    const worldSize = HANDLE_SCREEN_SIZE / viewport.scale.x;
+    const { originXMm: x, originYMm: y, widthMm: w, lengthMm: h } = node.feature;
+    const corners: Record<Corner, [number, number]> = {
+      nw: [x, y],
+      ne: [x + w, y],
+      se: [x + w, y + h],
+      sw: [x, y + h],
+    };
+
+    for (const corner of HANDLE_CORNERS) {
+      const [cx, cy] = corners[corner];
+      const handle = new Graphics()
+        .rect(-worldSize, -worldSize, worldSize * 2, worldSize * 2)
+        .fill({ color: 0xffffff })
+        .stroke({ width: worldSize * 0.3, color: 0x7c3aed });
+      handle.position.set(cx, cy);
+      handle.eventMode = "static";
+      handle.cursor =
+        corner === "nw" || corner === "se" ? "nwse-resize" : "nesw-resize";
+
+      handle.on("pointerdown", (e: FederatedPointerEvent) => {
+        e.stopPropagation();
+        featureResizeRef.current = {
+          featureId: node.feature.featureId,
+          corner,
+          originX: node.feature.originXMm,
+          originY: node.feature.originYMm,
+          originW: node.feature.widthMm,
+          originH: node.feature.lengthMm,
+          originPoints: node.feature.points,
+        };
+      });
+
+      const up = (e: FederatedPointerEvent) => {
+        e.stopPropagation();
+        commitFeatureResize();
+      };
+      handle.on("pointerup", up);
+      handle.on("pointerupoutside", up);
+
+      handleLayer.addChild(handle);
+      featureHandlesRef.current.push(handle);
+    }
+  }
+
+  function repositionFeatureHandles(
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+  ) {
+    const order: Corner[] = [...HANDLE_CORNERS];
+    const corners: Record<Corner, [number, number]> = {
+      nw: [x, y],
+      ne: [x + w, y],
+      se: [x + w, y + h],
+      sw: [x, y + h],
+    };
+    featureHandlesRef.current.forEach((handle, index) => {
+      const corner = order[index];
+      if (corner) handle.position.set(...corners[corner]);
+    });
   }
 
   function syncLocationNodes(
@@ -716,6 +1160,13 @@ export default function LayoutDesignerCanvas({
       viewport.on("zoomed", updateScale);
       viewport.on("moved", updateScale);
 
+      // Beneath the location layer: structures, docks and staging polygons
+      // are context for the racking, never on top of it.
+      const featureLayer = new Container();
+      featureLayer.sortableChildren = true;
+      viewport.addChild(featureLayer);
+      featureLayerRef.current = featureLayer;
+
       const locationLayer = new Container();
       viewport.addChild(locationLayer);
       locationLayerRef.current = locationLayer;
@@ -741,7 +1192,10 @@ export default function LayoutDesignerCanvas({
         if (e.button !== 0) return;
         const world = viewport.toWorld(e.global);
 
-        if (stateRef.current.tool === "draw") {
+        if (
+          stateRef.current.tool === "draw" ||
+          stateRef.current.tool === "feature"
+        ) {
           const rect = new Graphics();
           viewport.addChild(rect);
           drawRef.current = {
@@ -750,6 +1204,28 @@ export default function LayoutDesignerCanvas({
             rect,
           };
           return;
+        }
+
+        // Reaching here in Transform means no location swallowed the event
+        // (location containers stopPropagation on hit), so a feature under
+        // the cursor is the next candidate -- grabbing it starts a drag
+        // instead of a marquee.
+        if (stateRef.current.tool === "transform") {
+          const featureId = pickFeatureAt(world);
+          if (featureId != null) {
+            const node = featureNodesRef.current.get(featureId);
+            if (node) {
+              stateRef.current.onSelectFeature(featureId);
+              featureDragRef.current = {
+                featureId,
+                startWorldX: world.x,
+                startWorldY: world.y,
+                originX: node.feature.originXMm,
+                originY: node.feature.originYMm,
+              };
+              return;
+            }
+          }
         }
 
         if (
@@ -828,6 +1304,7 @@ export default function LayoutDesignerCanvas({
           const y = Math.min(draw.startWorldY, world.y);
           const w = Math.abs(world.x - draw.startWorldX);
           const h = Math.abs(world.y - draw.startWorldY);
+          const wasFeatureDraw = stateRef.current.tool === "feature";
           draw.rect.destroy();
           drawRef.current = null;
           hideCoordOverlay();
@@ -842,12 +1319,21 @@ export default function LayoutDesignerCanvas({
               hall.physicalLengthMm,
             );
 
-            stateRef.current.onDraftDrawn({
-              physicalX: clamped.x,
-              physicalY: clamped.y,
-              physicalWidthMm: clamped.width,
-              physicalLengthMm: clamped.height,
-            });
+            if (wasFeatureDraw) {
+              stateRef.current.onFeatureDrawn({
+                originXMm: clamped.x,
+                originYMm: clamped.y,
+                widthMm: clamped.width,
+                lengthMm: clamped.height,
+              });
+            } else {
+              stateRef.current.onDraftDrawn({
+                physicalX: clamped.x,
+                physicalY: clamped.y,
+                physicalWidthMm: clamped.width,
+                physicalLengthMm: clamped.height,
+              });
+            }
           }
           return;
         }
@@ -880,9 +1366,15 @@ export default function LayoutDesignerCanvas({
               }
             }
             if (hitId == null) {
-              // Clicking empty canvas clears the current selection and any
-              // open transform handles/property drawer.
+              // No location under the click -- a feature is the next
+              // candidate, and only genuinely empty canvas clears everything.
+              const featureId = pickFeatureAt({ x: x0, y: y0 });
+              if (featureId != null) {
+                stateRef.current.onSelectFeature(featureId);
+                return;
+              }
               stateRef.current.onSelect(null);
+              stateRef.current.onSelectFeature(null);
               return;
             }
             const group = resolveSelectionForHits([hitId]);
@@ -940,6 +1432,8 @@ export default function LayoutDesignerCanvas({
         resizeRef.current = null;
         groupDragRef.current = null;
         groupResizeRef.current = null;
+        featureDragRef.current = null;
+        featureResizeRef.current = null;
         hideCoordOverlay();
       };
       window.addEventListener("pointerup", forceCancelInteractions);
@@ -947,6 +1441,7 @@ export default function LayoutDesignerCanvas({
 
       setIsReady(true);
 
+      syncFeatureNodes(featuresRef.current);
       syncLocationNodes(
         locationsRef.current,
         stateRef.current.selectedLocationId,
@@ -958,12 +1453,15 @@ export default function LayoutDesignerCanvas({
       setIsReady(false);
       setInitError(null);
       nodesRef.current.clear();
+      featureNodesRef.current.clear();
       handlesRef.current = [];
+      featureHandlesRef.current = [];
       const app = appRef.current;
       const viewport = viewportRef.current;
       appRef.current = null;
       viewportRef.current = null;
       locationLayerRef.current = null;
+      featureLayerRef.current = null;
       handleLayerRef.current = null;
       if (forceCancelInteractions) {
         window.removeEventListener("pointerup", forceCancelInteractions);
@@ -1003,6 +1501,24 @@ export default function LayoutDesignerCanvas({
     syncLocationNodes(locations, selectedLocationId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [locations, isReady, activeLevel]);
+
+  useEffect(() => {
+    if (!isReady) return;
+    syncFeatureNodes(features);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [features, isReady]);
+
+  // Selection styling for features is a redraw of the existing Graphics only,
+  // never a node rebuild -- rebuilding on every click would drop the drag
+  // gesture that the click just started.
+  useEffect(() => {
+    if (!isReady) return;
+    for (const [id, node] of featureNodesRef.current) {
+      drawFeatureShape(node, id === selectedFeatureId);
+    }
+    rebuildFeatureHandles();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedFeatureId, tool, isReady]);
 
   useEffect(() => {
     rebuildHandles();
@@ -1310,6 +1826,118 @@ export default function LayoutDesignerCanvas({
         return;
       }
 
+      const featureDrag = featureDragRef.current;
+      if (featureDrag) {
+        const node = featureNodesRef.current.get(featureDrag.featureId);
+        if (node) {
+          const dx = world.x - featureDrag.startWorldX;
+          const dy = world.y - featureDrag.startWorldY;
+          const nextX = Math.round(featureDrag.originX + dx);
+          const nextY = Math.round(featureDrag.originY + dy);
+          node.feature = {
+            ...node.feature,
+            originXMm: nextX,
+            originYMm: nextY,
+          };
+          node.container.position.set(nextX, nextY);
+          repositionFeatureHandles(
+            nextX,
+            nextY,
+            node.feature.widthMm,
+            node.feature.lengthMm,
+          );
+          showCoordOverlay(
+            e.global.x,
+            e.global.y,
+            formatFootprint(
+              node.feature.widthMm,
+              node.feature.lengthMm,
+              nextX,
+              nextY,
+              node.feature.rotationDegrees,
+            ),
+          );
+        }
+        return;
+      }
+
+      const featureResize = featureResizeRef.current;
+      if (featureResize) {
+        const node = featureNodesRef.current.get(featureResize.featureId);
+        if (node) {
+          let {
+            originX: x,
+            originY: y,
+            originW: w,
+            originH: h,
+          } = featureResize;
+          const farX = featureResize.originX + featureResize.originW;
+          const farY = featureResize.originY + featureResize.originH;
+          if (featureResize.corner === "nw") {
+            w = Math.max(MIN_LOCATION_MM, farX - world.x);
+            h = Math.max(MIN_LOCATION_MM, farY - world.y);
+            x = farX - w;
+            y = farY - h;
+          } else if (featureResize.corner === "ne") {
+            w = Math.max(MIN_LOCATION_MM, world.x - featureResize.originX);
+            h = Math.max(MIN_LOCATION_MM, farY - world.y);
+            y = farY - h;
+          } else if (featureResize.corner === "se") {
+            w = Math.max(MIN_LOCATION_MM, world.x - featureResize.originX);
+            h = Math.max(MIN_LOCATION_MM, world.y - featureResize.originY);
+          } else if (featureResize.corner === "sw") {
+            w = Math.max(MIN_LOCATION_MM, farX - world.x);
+            h = Math.max(MIN_LOCATION_MM, world.y - featureResize.originY);
+            x = farX - w;
+          }
+
+          // Polygon/polyline vertices scale with the box; rect-like geometry
+          // just takes the new extent. scaleGeometry keeps both consistent.
+          const scaled = scaleGeometry(
+            {
+              geometryKind: node.feature.geometryKind,
+              originXMm: node.feature.originXMm,
+              originYMm: node.feature.originYMm,
+              widthMm: featureResize.originW,
+              lengthMm: featureResize.originH,
+              rotationDegrees: node.feature.rotationDegrees,
+              points: featureResize.originPoints,
+            },
+            w,
+            h,
+          );
+
+          node.feature = {
+            ...node.feature,
+            originXMm: Math.round(x),
+            originYMm: Math.round(y),
+            widthMm: scaled.widthMm,
+            lengthMm: scaled.lengthMm,
+            points: scaled.points,
+          };
+          node.container.position.set(node.feature.originXMm, node.feature.originYMm);
+          drawFeatureShape(node, true);
+          repositionFeatureHandles(
+            node.feature.originXMm,
+            node.feature.originYMm,
+            scaled.widthMm,
+            scaled.lengthMm,
+          );
+          showCoordOverlay(
+            e.global.x,
+            e.global.y,
+            formatFootprint(
+              scaled.widthMm,
+              scaled.lengthMm,
+              node.feature.originXMm,
+              node.feature.originYMm,
+              node.feature.rotationDegrees,
+            ),
+          );
+        }
+        return;
+      }
+
       const resize = resizeRef.current;
       if (resize) {
         const node = nodesRef.current.get(resize.locationId);
@@ -1485,6 +2113,8 @@ export default function LayoutDesignerCanvas({
       commitSingleResize();
       commitGroupDrag();
       commitGroupResize();
+      commitFeatureDrag();
+      commitFeatureResize();
     }
 
     app.stage.eventMode = "static";
@@ -1493,7 +2123,9 @@ export default function LayoutDesignerCanvas({
     app.stage.on("pointerup", handleUp);
     app.stage.on("pointerupoutside", handleUp);
     viewport.on("zoomed", updateLabelVisibility);
+    viewport.on("zoomed", updateFeatureLabelVisibility);
     viewport.on("zoomed", rebuildHandles);
+    viewport.on("zoomed", rebuildFeatureHandles);
 
     return () => {
       const currentApp = appRef.current;
@@ -1506,11 +2138,20 @@ export default function LayoutDesignerCanvas({
       }
       if (currentViewport) {
         currentViewport.off("zoomed", updateLabelVisibility);
+        currentViewport.off("zoomed", updateFeatureLabelVisibility);
         currentViewport.off("zoomed", rebuildHandles);
+        currentViewport.off("zoomed", rebuildFeatureHandles);
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [locations, selectedLocationId, selectedLocationIds, isReady]);
+  }, [
+    locations,
+    features,
+    selectedLocationId,
+    selectedLocationIds,
+    selectedFeatureId,
+    isReady,
+  ]);
 
   return (
     <div className="relative flex h-full w-full overflow-hidden rounded-xl border bg-background/60">

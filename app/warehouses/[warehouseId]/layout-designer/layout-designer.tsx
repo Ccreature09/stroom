@@ -19,8 +19,12 @@ import {
   EmptyLocationPanel,
   MultiSelectPanel,
 } from "./location-panel";
+import { CreateFeaturePanel, EditFeaturePanel } from "./feature-panel";
 import type {
   DraftGeometry,
+  FeatureDTO,
+  FeatureKindDTO,
+  FeaturePatch,
   HallDTO,
   HallPatch,
   HallState,
@@ -31,10 +35,12 @@ import type {
 } from "./types";
 import {
   EMPTY_HALL_STATE,
+  applyHallStateToFeatures,
   applyHallStateToLocations,
   applyHallStateToZones,
   hallStateChangeCount,
 } from "./types";
+import { defaultPointsForDrawnRect } from "./geometry";
 import { commitHallStates } from "./actions";
 
 type HallHistory = {
@@ -58,6 +64,21 @@ type DraftAction =
   | { type: "CREATE_ZONE"; hallId: number; tempId: number; data: ZonePatch }
   | { type: "PATCH_ZONE"; hallId: number; zoneId: number; patch: ZonePatch }
   | { type: "DELETE_ZONE"; hallId: number; zoneId: number }
+  | {
+      type: "CREATE_FEATURE";
+      hallId: number;
+      tempId: number;
+      kind: string;
+      geometryKind: FeatureDTO["geometryKind"];
+      data: FeaturePatch;
+    }
+  | {
+      type: "PATCH_FEATURE";
+      hallId: number;
+      featureId: number;
+      patch: FeaturePatch;
+    }
+  | { type: "DELETE_FEATURE"; hallId: number; featureId: number }
   | { type: "UNDO"; hallId: number }
   | { type: "REDO"; hallId: number }
   | { type: "RESET_ALL" }
@@ -207,6 +228,59 @@ function draftReducer(state: DraftState, action: DraftAction): DraftState {
         };
       });
 
+    case "CREATE_FEATURE":
+      return pushHistory(state, action.hallId, (present) => ({
+        ...present,
+        newFeatures: [
+          ...present.newFeatures,
+          {
+            ...action.data,
+            tempId: action.tempId,
+            kind: action.kind,
+            geometryKind: action.geometryKind,
+          },
+        ],
+      }));
+
+    case "PATCH_FEATURE":
+      return pushHistory(state, action.hallId, (present) => {
+        if (action.featureId < 0) {
+          return {
+            ...present,
+            newFeatures: present.newFeatures.map((nf) =>
+              nf.tempId === action.featureId ? { ...nf, ...action.patch } : nf,
+            ),
+          };
+        }
+        return {
+          ...present,
+          featurePatches: {
+            ...present.featurePatches,
+            [action.featureId]: {
+              ...present.featurePatches[action.featureId],
+              ...action.patch,
+            },
+          },
+        };
+      });
+
+    case "DELETE_FEATURE":
+      return pushHistory(state, action.hallId, (present) => {
+        if (action.featureId < 0) {
+          return {
+            ...present,
+            newFeatures: present.newFeatures.filter(
+              (nf) => nf.tempId !== action.featureId,
+            ),
+          };
+        }
+        return {
+          ...present,
+          featurePatches: withoutKey(present.featurePatches, action.featureId),
+          deletedFeatureIds: [...present.deletedFeatureIds, action.featureId],
+        };
+      });
+
     case "UNDO": {
       const existing = state[action.hallId];
       if (!existing || existing.past.length === 0) return state;
@@ -249,7 +323,10 @@ function draftReducer(state: DraftState, action: DraftAction): DraftState {
 // Recovering an in-progress draft after a refresh/crash, and warning before
 // a navigation that would otherwise silently discard one -- the draft store
 // is the only place unsaved layout edits exist until "Save Map" runs.
-const DRAFT_STORAGE_VERSION = 1;
+// Bumped to 2 when layout features joined HallState: a v1 draft has no
+// featurePatches/newFeatures/deletedFeatureIds keys, and the version check
+// below discards it rather than hydrating a shape the reducer would crash on.
+const DRAFT_STORAGE_VERSION = 2;
 
 function draftStorageKey(warehouseId: number) {
   return `stroom:layout-draft:${warehouseId}`;
@@ -261,18 +338,31 @@ export default function LayoutDesigner({
   selectedHallId,
   locations,
   zoneTypes,
+  features,
+  featureKinds,
 }: {
   warehouseId: number;
   halls: HallDTO[];
   selectedHallId: number;
   locations: LocationDTO[];
   zoneTypes: ZoneTypeDTO[];
+  features: FeatureDTO[];
+  featureKinds: FeatureKindDTO[];
 }) {
   const [tool, setTool] = useState<Tool>("select");
   const [selectedLocationId, setSelectedLocationId] = useState<number | null>(
     null,
   );
   const [selectedLocationIds, setSelectedLocationIds] = useState<number[]>([]);
+  const [selectedFeatureId, setSelectedFeatureId] = useState<number | null>(
+    null,
+  );
+  const [featureDraft, setFeatureDraft] = useState<{
+    originXMm: number;
+    originYMm: number;
+    widthMm: number;
+    lengthMm: number;
+  } | null>(null);
   const [draft, setDraft] = useState<DraftGeometry | null>(null);
   const [isSavingMap, startSaveMapTransition] = useTransition();
 
@@ -366,6 +456,15 @@ export default function LayoutDesigner({
     () => applyHallStateToZones(zoneTypes, hallState),
     [zoneTypes, hallState],
   );
+  const effectiveFeatures = useMemo(
+    () => applyHallStateToFeatures(features, hallState),
+    [features, hallState],
+  );
+  const selectedFeature = useMemo(
+    () =>
+      effectiveFeatures.find((f) => f.featureId === selectedFeatureId) ?? null,
+    [effectiveFeatures, selectedFeatureId],
+  );
 
   const selectedLocation = useMemo(
     () =>
@@ -386,7 +485,10 @@ export default function LayoutDesigner({
   const availableLevels = useMemo(() => {
     const levels = new Set<number>();
     for (const loc of effectiveLocations) {
-      if ((loc.isRacking || loc.isShelf) && loc.level != null)
+      if (
+        (loc.locationType === "RACKING" || loc.locationType === "SHELF") &&
+        loc.level != null
+      )
         levels.add(loc.level);
     }
     return Array.from(levels).sort((a, b) => a - b);
@@ -399,26 +501,102 @@ export default function LayoutDesigner({
     setTool(next);
     setSelectedLocationId(null);
     setSelectedLocationIds([]);
+    setSelectedFeatureId(null);
     setDraft(null);
+    setFeatureDraft(null);
   }
 
   function handleDraftDrawn(geometry: DraftGeometry) {
     setDraft(geometry);
   }
 
+  // Locations and features are separate selections, and the right-hand panel
+  // shows one at a time -- selecting either clears the other so the panel is
+  // never ambiguous about what an edit applies to.
   function handleSelect(locationId: number | null) {
     setSelectedLocationIds([]);
     setSelectedLocationId(locationId);
+    if (locationId !== null) setSelectedFeatureId(null);
   }
 
   function handleMultiSelect(locationIds: number[]) {
     setSelectedLocationId(null);
     setSelectedLocationIds(locationIds);
+    if (locationIds.length > 0) setSelectedFeatureId(null);
+  }
+
+  function handleSelectFeature(featureId: number | null) {
+    setSelectedFeatureId(featureId);
+    if (featureId !== null) {
+      setSelectedLocationId(null);
+      setSelectedLocationIds([]);
+    }
   }
 
   function handleClearSelection() {
     setSelectedLocationId(null);
     setSelectedLocationIds([]);
+    setSelectedFeatureId(null);
+  }
+
+  function handleFeatureDrawn(geometry: {
+    originXMm: number;
+    originYMm: number;
+    widthMm: number;
+    lengthMm: number;
+  }) {
+    setFeatureDraft(geometry);
+  }
+
+  // The picked kind supplies geometry kind, height and obstacle defaults, so
+  // the drawn rectangle becomes a polyline for a wall or a point for a fire
+  // exit without the user choosing a geometry at all.
+  function handleCreateFeature(kind: FeatureKindDTO) {
+    if (!featureDraft) return;
+    const tempId = nextTempId();
+    const geometryKind = kind.defaultGeometryKind;
+
+    const widthMm =
+      geometryKind === "POINT" ? 0 : (kind.defaultWidthMm ?? featureDraft.widthMm);
+    const lengthMm =
+      geometryKind === "POINT"
+        ? 0
+        : (kind.defaultLengthMm ?? featureDraft.lengthMm);
+
+    dispatch({
+      type: "CREATE_FEATURE",
+      hallId: hall.hallId,
+      tempId,
+      kind: kind.kind,
+      geometryKind,
+      data: {
+        originXMm: featureDraft.originXMm,
+        originYMm: featureDraft.originYMm,
+        widthMm,
+        lengthMm,
+        rotationDegrees: 0,
+        points: defaultPointsForDrawnRect(geometryKind, widthMm, lengthMm),
+        elevationMm: 0,
+        heightMm: kind.defaultHeightMm,
+        isObstacle: kind.isObstacleDefault,
+        isVisualOnly: false,
+        layerIndex: 0,
+        floorLevel: 1,
+        attrs: {},
+      },
+    });
+
+    setFeatureDraft(null);
+    handleSelectFeature(tempId);
+  }
+
+  function handlePatchFeature(featureId: number, patch: FeaturePatch) {
+    dispatch({ type: "PATCH_FEATURE", hallId: hall.hallId, featureId, patch });
+  }
+
+  function handleDeleteFeature(featureId: number) {
+    dispatch({ type: "DELETE_FEATURE", hallId: hall.hallId, featureId });
+    if (selectedFeatureId === featureId) setSelectedFeatureId(null);
   }
 
   function handleHallFieldChange(field: keyof HallPatch, value: unknown) {
@@ -522,6 +700,12 @@ export default function LayoutDesigner({
             hall={hall}
             locations={effectiveLocations}
             zoneTypes={effectiveZoneTypes}
+            features={effectiveFeatures}
+            featureKinds={featureKinds}
+            selectedFeatureId={selectedFeatureId}
+            onSelectFeature={handleSelectFeature}
+            onFeatureDrawn={handleFeatureDrawn}
+            onFeatureGeometryChange={handlePatchFeature}
             selectedLocationId={selectedLocationId}
             selectedLocationIds={selectedLocationIds}
             activeLevel={activeLevel}
@@ -570,8 +754,29 @@ export default function LayoutDesigner({
         </div>
       </div>
 
-      {/* 3. Right Sidebar: Location Panel */}
-      {draft ? (
+      {/* 3. Right Sidebar: property panel -- feature drafts and feature
+          selection take precedence, since both are only reachable from an
+          explicit feature gesture. */}
+      {featureDraft ? (
+        <CreateFeaturePanel
+          featureKinds={featureKinds}
+          onCreate={handleCreateFeature}
+          onClose={() => setFeatureDraft(null)}
+          locked={isSavingMap}
+        />
+      ) : selectedFeature ? (
+        <EditFeaturePanel
+          feature={selectedFeature}
+          featureKinds={featureKinds}
+          zoneTypes={effectiveZoneTypes}
+          onPatch={(patch) =>
+            handlePatchFeature(selectedFeature.featureId, patch)
+          }
+          onDelete={() => handleDeleteFeature(selectedFeature.featureId)}
+          onClose={() => setSelectedFeatureId(null)}
+          locked={isSavingMap}
+        />
+      ) : draft ? (
         <CreateLocationPanel
           draft={draft}
           zoneTypes={effectiveZoneTypes}

@@ -3,6 +3,8 @@ import { and, eq } from "drizzle-orm";
 import { db } from "@/lib/db";
 import {
   employees,
+  featureKinds as featureKindsTable,
+  layoutFeatures,
   locations,
   positionTypes,
   halls as hallsTable,
@@ -12,6 +14,10 @@ import {
 import { createClient } from "@/lib/server";
 import { createHall } from "./actions";
 import LayoutDesigner from "./layout-designer";
+import { sanitizePoints } from "./geometry";
+import type { GeometryKind } from "./geometry";
+import type { FeatureCategory, FeatureAttrs } from "./feature-kinds";
+import { parseLocationType } from "./naming";
 
 import {
   Card,
@@ -214,51 +220,117 @@ export default async function WarehouseLayoutDesignerPage({
   const selectedHall =
     halls.find((h) => h.hallId === requestedHallId) ?? halls[0];
 
-  const [hallLocations, hallZoneTypes] = await Promise.all([
-    db
-      .select({
-        locationId: locations.locationId,
-        locationCode: locations.locationCode,
-        zoneId: locations.zoneId,
-        aisle: locations.aisle,
-        bay: locations.bay,
-        level: locations.level,
-        heightMm: locations.heightMm,
-        maxWeightKg: locations.maxWeightKg,
-        isBlocked: locations.isBlocked,
-        physicalX: locations.physicalX,
-        physicalY: locations.physicalY,
-        physicalWidthMm: locations.physicalWidthMm,
-        physicalLengthMm: locations.physicalLengthMm,
-        rotationDegrees: locations.rotationDegrees,
-        floorLevel: locations.floorLevel,
-        isRacking: locations.isRacking, // Added
-        isShelf: locations.isShelf, // Added
-        isFloorStorage: locations.isFloorStorage, // Added
-        row: locations.row,
-      })
-      .from(locations)
-      .where(
-        and(
-          eq(locations.warehouseId, parsedWarehouseId),
-          eq(locations.hallId, selectedHall.hallId),
+  const [hallLocationRows, hallZoneTypes, hallFeatureRows, featureKindRows] =
+    await Promise.all([
+      db
+        .select({
+          locationId: locations.locationId,
+          locationCode: locations.locationCode,
+          zoneId: locations.zoneId,
+          aisle: locations.aisle,
+          bay: locations.bay,
+          level: locations.level,
+          heightMm: locations.heightMm,
+          maxWeightKg: locations.maxWeightKg,
+          isBlocked: locations.isBlocked,
+          physicalX: locations.physicalX,
+          physicalY: locations.physicalY,
+          physicalWidthMm: locations.physicalWidthMm,
+          physicalLengthMm: locations.physicalLengthMm,
+          rotationDegrees: locations.rotationDegrees,
+          floorLevel: locations.floorLevel,
+          locationType: locations.locationType,
+          row: locations.row,
+        })
+        .from(locations)
+        .where(
+          and(
+            eq(locations.warehouseId, parsedWarehouseId),
+            eq(locations.hallId, selectedHall.hallId),
+          ),
         ),
-      ),
-    db
-      .select({
-        zoneId: zoneTypes.zoneId,
-        name: zoneTypes.name,
-        isPickable: zoneTypes.isPickable,
-        isTemperatureControlled: zoneTypes.isTemperatureControlled,
-        requiresHazmatClearance: zoneTypes.requiresHazmatClearance,
-        requiresBarcodeScan: zoneTypes.requiresBarcodeScan,
-        storagePermanence: zoneTypes.storagePermanence,
-        color: zoneTypes.color,
-      })
-      .from(zoneTypes)
-      .where(eq(zoneTypes.warehouseId, parsedWarehouseId))
-      .orderBy(zoneTypes.name),
-  ]);
+      db
+        .select({
+          zoneId: zoneTypes.zoneId,
+          name: zoneTypes.name,
+          isPickable: zoneTypes.isPickable,
+          isTemperatureControlled: zoneTypes.isTemperatureControlled,
+          requiresHazmatClearance: zoneTypes.requiresHazmatClearance,
+          requiresBarcodeScan: zoneTypes.requiresBarcodeScan,
+          storagePermanence: zoneTypes.storagePermanence,
+          color: zoneTypes.color,
+        })
+        .from(zoneTypes)
+        .where(eq(zoneTypes.warehouseId, parsedWarehouseId))
+        .orderBy(zoneTypes.name),
+      db
+        .select({
+          featureId: layoutFeatures.featureId,
+          floorLevel: layoutFeatures.floorLevel,
+          kind: layoutFeatures.kind,
+          geometryKind: layoutFeatures.geometryKind,
+          originXMm: layoutFeatures.originXMm,
+          originYMm: layoutFeatures.originYMm,
+          widthMm: layoutFeatures.widthMm,
+          lengthMm: layoutFeatures.lengthMm,
+          rotationDegrees: layoutFeatures.rotationDegrees,
+          points: layoutFeatures.points,
+          elevationMm: layoutFeatures.elevationMm,
+          heightMm: layoutFeatures.heightMm,
+          layerIndex: layoutFeatures.layerIndex,
+          isObstacle: layoutFeatures.isObstacle,
+          isVisualOnly: layoutFeatures.isVisualOnly,
+          zoneId: layoutFeatures.zoneId,
+          label: layoutFeatures.label,
+          color: layoutFeatures.color,
+          attrs: layoutFeatures.attrs,
+        })
+        .from(layoutFeatures)
+        .where(
+          and(
+            eq(layoutFeatures.warehouseId, parsedWarehouseId),
+            eq(layoutFeatures.hallId, selectedHall.hallId),
+            eq(layoutFeatures.isActive, true),
+          ),
+        ),
+      db
+        .select({
+          kind: featureKindsTable.kind,
+          category: featureKindsTable.category,
+          label: featureKindsTable.label,
+          defaultGeometryKind: featureKindsTable.defaultGeometryKind,
+          defaultWidthMm: featureKindsTable.defaultWidthMm,
+          defaultLengthMm: featureKindsTable.defaultLengthMm,
+          defaultHeightMm: featureKindsTable.defaultHeightMm,
+          isObstacleDefault: featureKindsTable.isObstacleDefault,
+          defaultColor: featureKindsTable.defaultColor,
+          sortOrder: featureKindsTable.sortOrder,
+        })
+        .from(featureKindsTable)
+        .where(eq(featureKindsTable.isActive, true))
+        .orderBy(featureKindsTable.sortOrder),
+    ]);
+
+  // `location_type` and the feature geometry/category columns are varchar +
+  // check constraint rather than a Postgres enum, so Drizzle types them as
+  // plain strings. Narrow them once here so nothing downstream has to.
+  const hallLocations = hallLocationRows.map((row) => ({
+    ...row,
+    locationType: parseLocationType(row.locationType),
+  }));
+
+  const hallFeatures = hallFeatureRows.map((row) => ({
+    ...row,
+    geometryKind: row.geometryKind as GeometryKind,
+    points: sanitizePoints(row.points),
+    attrs: (row.attrs ?? {}) as FeatureAttrs,
+  }));
+
+  const featureKinds = featureKindRows.map((row) => ({
+    ...row,
+    category: row.category as FeatureCategory,
+    defaultGeometryKind: row.defaultGeometryKind as GeometryKind,
+  }));
 
   return (
     <main className="flex min-h-[calc(100vh-64px)] flex-1 flex-col gap-4 bg-[linear-gradient(180deg,#ebe7dc_0%,#f7f4ed_24%,#f4f1e8_100%)] p-4 sm:p-6">
@@ -285,6 +357,8 @@ export default async function WarehouseLayoutDesignerPage({
           selectedHallId={selectedHall.hallId}
           locations={hallLocations}
           zoneTypes={hallZoneTypes}
+          features={hallFeatures}
+          featureKinds={featureKinds}
         />
       </div>
     </main>

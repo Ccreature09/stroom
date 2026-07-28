@@ -8,10 +8,12 @@ import type {
   ZoneTypeDTO,
 } from "./types";
 import {
-  flagsToLocationType,
-  locationTypeFlagsFor,
-  type LocationTypeFlag,
+  LOCATION_TYPES,
+  LOCATION_TYPE_LABELS,
+  parseLocationType,
+  type LocationType,
 } from "./naming";
+import { DraftNumberField, DraftTextField } from "./draft-fields";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -27,115 +29,12 @@ import {
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { RotateCw, Trash2, X } from "lucide-react";
 
-type LocationTypeValue = LocationTypeFlag;
-
 function parseOptionalInt(value: FormDataEntryValue | null): number | null {
   if (value === null) return null;
   const raw = String(value).trim();
   if (!raw) return null;
   const parsed = Number(raw);
   return Number.isFinite(parsed) ? Math.round(parsed) : null;
-}
-
-// ---------------------------------------------------------------------------
-// Draft-committing field primitives -- local input state mirrors the current
-// (merged draft) value and resyncs whenever that value changes from outside
-// the field (a canvas drag, undo/redo, switching selection); edits commit
-// into the draft store on blur rather than firing a network request. This is
-// the "adjust state during render" pattern React recommends for resetting
-// controlled-input state from a prop, not a useEffect.
-// ---------------------------------------------------------------------------
-
-function DraftTextField({
-  id,
-  label,
-  value,
-  onCommit,
-  required = false,
-  placeholder,
-}: {
-  id: string;
-  label: string;
-  value: string;
-  onCommit: (value: string) => void;
-  required?: boolean;
-  placeholder?: string;
-}) {
-  const [input, setInput] = useState(value);
-  const [prevValue, setPrevValue] = useState(value);
-  if (value !== prevValue) {
-    setPrevValue(value);
-    setInput(value);
-  }
-
-  function commit() {
-    const trimmed = input.trim();
-    if (trimmed === value) return;
-    if (required && !trimmed) return;
-    onCommit(trimmed);
-  }
-
-  return (
-    <div className="space-y-1.5">
-      <Label htmlFor={id}>{label}</Label>
-      <Input
-        id={id}
-        value={input}
-        placeholder={placeholder}
-        onChange={(e) => setInput(e.target.value)}
-        onBlur={commit}
-      />
-    </div>
-  );
-}
-
-function DraftNumberField({
-  id,
-  label,
-  value,
-  onCommit,
-  nullable = false,
-  min,
-}: {
-  id: string;
-  label: string;
-  value: number | null;
-  onCommit: (value: number | null) => void;
-  nullable?: boolean;
-  min?: number;
-}) {
-  const [input, setInput] = useState(value === null ? "" : String(value));
-  const [prevValue, setPrevValue] = useState(value);
-  if (value !== prevValue) {
-    setPrevValue(value);
-    setInput(value === null ? "" : String(value));
-  }
-
-  function commit() {
-    if (input.trim() === "") {
-      if (nullable && value !== null) onCommit(null);
-      return;
-    }
-    const parsed = Number(input);
-    if (!Number.isFinite(parsed)) return;
-    const rounded = Math.round(parsed);
-    if (rounded === value) return;
-    onCommit(rounded);
-  }
-
-  return (
-    <div className="space-y-1.5">
-      <Label htmlFor={id}>{label}</Label>
-      <Input
-        id={id}
-        type="number"
-        min={min}
-        value={input}
-        onChange={(e) => setInput(e.target.value)}
-        onBlur={commit}
-      />
-    </div>
-  );
 }
 
 function ZoneSelect({
@@ -172,28 +71,26 @@ function ZoneSelect({
 }
 
 function LocationTypeSelect({
-  defaultValue = "none",
+  defaultValue = "NONE",
 }: {
-  defaultValue?: LocationTypeValue;
+  defaultValue?: LocationType;
 }) {
-  const [value, setValue] = useState<LocationTypeValue>(defaultValue);
+  const [value, setValue] = useState<LocationType>(defaultValue);
 
   return (
     <div className="space-y-1.5">
       <Label htmlFor="locationType">Location type</Label>
       <input type="hidden" name="locationType" value={value} />
-      <Select
-        value={value}
-        onValueChange={(v) => setValue(v as LocationTypeValue)}
-      >
+      <Select value={value} onValueChange={(v) => setValue(v as LocationType)}>
         <SelectTrigger id="locationType" className="w-full">
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
-          <SelectItem value="none">None</SelectItem>
-          <SelectItem value="racking">Racking</SelectItem>
-          <SelectItem value="shelf">Shelf</SelectItem>
-          <SelectItem value="floor">Floor storage</SelectItem>
+          {LOCATION_TYPES.map((type) => (
+            <SelectItem key={type} value={type}>
+              {LOCATION_TYPE_LABELS[type]}
+            </SelectItem>
+          ))}
         </SelectContent>
       </Select>
       <p className="text-[11px] text-muted-foreground">
@@ -250,10 +147,6 @@ export function CreateLocationPanel({
       ? ((Math.round(rotationRaw) % 360) + 360) % 360
       : 0;
 
-    const typeFlag = String(
-      formData.get("locationType") ?? "none",
-    ) as LocationTypeFlag;
-
     onCreate({
       locationCode,
       zoneId: parseOptionalInt(formData.get("zoneId")),
@@ -261,7 +154,7 @@ export function CreateLocationPanel({
       bay: parseOptionalInt(formData.get("bay")),
       level: parseOptionalInt(formData.get("level")),
       row: parseOptionalInt(formData.get("row")),
-      ...locationTypeFlagsFor(typeFlag),
+      locationType: parseLocationType(formData.get("locationType")),
       heightMm: parseOptionalInt(formData.get("heightMm")),
       maxWeightKg: parseOptionalInt(formData.get("maxWeightKg")),
       floorLevel: parseOptionalInt(formData.get("floorLevel")) ?? 1,
@@ -447,7 +340,6 @@ function LocationFields({
   onDelete: () => void;
   locked: boolean;
 }) {
-  const currentType = flagsToLocationType(location);
   const isPending = location.locationId < 0;
 
   function handleDelete() {
@@ -518,19 +410,20 @@ function LocationFields({
       <div className="space-y-1.5">
         <Label>Location type</Label>
         <Select
-          value={currentType}
+          value={location.locationType}
           onValueChange={(val) =>
-            onPatch(locationTypeFlagsFor(val as LocationTypeFlag))
+            onPatch({ locationType: parseLocationType(val) })
           }
         >
           <SelectTrigger className="w-full">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="none">None</SelectItem>
-            <SelectItem value="racking">Racking</SelectItem>
-            <SelectItem value="shelf">Shelf</SelectItem>
-            <SelectItem value="floor">Floor storage</SelectItem>
+            {LOCATION_TYPES.map((type) => (
+              <SelectItem key={type} value={type}>
+                {LOCATION_TYPE_LABELS[type]}
+              </SelectItem>
+            ))}
           </SelectContent>
         </Select>
         <p className="text-[11px] text-muted-foreground">
