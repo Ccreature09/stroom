@@ -17,7 +17,11 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { PermissionMatrix } from "./permission-matrix";
 import { ShieldPlus } from "lucide-react";
 
-export function CreateRoleDialog() {
+export function CreateRoleDialog({
+  pageWarehouseId,
+}: {
+  pageWarehouseId: number;
+}) {
   const [open, setOpen] = useState(false);
 
   return (
@@ -36,7 +40,7 @@ export function CreateRoleDialog() {
           </DialogDescription>
         </DialogHeader>
 
-        <form action={createRole} className="space-y-5 pt-2">
+        <form action={createRole.bind(null, pageWarehouseId)} className="space-y-5 pt-2">
           <div className="grid gap-4 sm:grid-cols-2">
             <div className="space-y-2">
               <Label htmlFor="create-role-title">Title</Label>

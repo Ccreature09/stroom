@@ -73,6 +73,7 @@ interface MheTypeOption {
 }
 
 interface EmployeeTableProps {
+  pageWarehouseId: number;
   employees: EmployeeRecord[];
   roles: RoleOption[];
   warehouses: WarehouseOption[];
@@ -85,6 +86,7 @@ interface EmployeeTableProps {
 }
 
 export function EmployeeTable({
+  pageWarehouseId,
   employees,
   roles,
   warehouses,
@@ -211,7 +213,7 @@ export function EmployeeTable({
                         </TabsList>
 
                         <TabsContent value="details" className="pt-4">
-                          <form action={updateEmployee} className="space-y-4">
+                          <form action={updateEmployee.bind(null, pageWarehouseId)} className="space-y-4">
                             <input
                               type="hidden"
                               name="employeeId"
@@ -388,7 +390,7 @@ export function EmployeeTable({
 
                         <TabsContent value="departments" className="pt-4">
                           <form
-                            action={syncEmployeeDepartments}
+                            action={syncEmployeeDepartments.bind(null, pageWarehouseId)}
                             className="space-y-4"
                           >
                             <input
@@ -463,7 +465,7 @@ export function EmployeeTable({
 
                         <TabsContent value="licenses" className="pt-4">
                           <form
-                            action={syncEmployeeLicenses}
+                            action={syncEmployeeLicenses.bind(null, pageWarehouseId)}
                             className="space-y-4"
                           >
                             <input
