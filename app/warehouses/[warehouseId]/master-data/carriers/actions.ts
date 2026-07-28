@@ -35,7 +35,50 @@ export async function createCarrier(formData: FormData) {
     isActive: true,
   });
 
-  revalidatePath(`/dashboard/warehouses/${warehouseId}/master-data/carriers`);
+  revalidatePath(`/warehouses/${warehouseId}/master-data/carriers`);
+  return { success: true };
+}
+
+export async function updateCarrier(formData: FormData) {
+  const carrierId = Number(formData.get("carrierId"));
+  const warehouseId = Number(formData.get("warehouseId"));
+  const name = formData.get("carrierName") as string;
+  const scacCode = formData.get("scac") as string;
+  const trackingUrlTemplate = formData.get("trackingUrlTemplate") as string;
+
+  if (!carrierId || !name || !warehouseId) {
+    return { error: "Carrier name is required." };
+  }
+
+  const supabase = await createClient();
+  const { data } = await supabase.auth.getClaims();
+  const userId = data?.claims?.sub;
+  if (!userId) return { error: "Unauthorized" };
+
+  const [currentEmployee] = await db
+    .select({ organizationId: employees.organizationId })
+    .from(employees)
+    .where(and(eq(employees.authUserId, userId), eq(employees.isActive, true)))
+    .limit(1);
+
+  if (!currentEmployee) return { error: "Employee profile not found." };
+
+  await db
+    .update(carriers)
+    .set({
+      name,
+      scacCode: scacCode || null,
+      trackingUrlTemplate: trackingUrlTemplate || null,
+      updatedAt: new Date().toISOString(),
+    })
+    .where(
+      and(
+        eq(carriers.carrierId, carrierId),
+        eq(carriers.organizationId, currentEmployee.organizationId),
+      ),
+    );
+
+  revalidatePath(`/warehouses/${warehouseId}/master-data/carriers`);
   return { success: true };
 }
 
@@ -69,5 +112,5 @@ export async function toggleCarrierStatus(formData: FormData) {
       ),
     );
 
-  revalidatePath(`/dashboard/warehouses/${warehouseId}/master-data/carriers`);
+  revalidatePath(`/warehouses/${warehouseId}/master-data/carriers`);
 }
