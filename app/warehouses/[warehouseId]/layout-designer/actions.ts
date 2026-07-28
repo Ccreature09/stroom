@@ -15,10 +15,10 @@ import {
 import { createClient } from "@/lib/server";
 import {
   locationTypeFlagsFor,
-  readLocationTypeFlag,
   renderLocationTemplate,
   validateTemplate,
 } from "./naming";
+import type { HallState } from "./types";
 
 type ActionResult = { error?: string; success?: true };
 
@@ -26,20 +26,6 @@ function parsePositiveInt(value: FormDataEntryValue | null) {
   if (value === null) return null;
   const parsed = Number(String(value));
   return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
-}
-
-function parseNonNegativeInt(value: FormDataEntryValue | null) {
-  if (value === null) return null;
-  const parsed = Number(String(value));
-  return Number.isInteger(parsed) && parsed >= 0 ? parsed : null;
-}
-
-function parseNullableInt(value: FormDataEntryValue | null) {
-  if (value === null) return null;
-  const raw = String(value).trim();
-  if (!raw) return null;
-  const parsed = Number(raw);
-  return Number.isInteger(parsed) ? parsed : Number.NaN;
 }
 
 // Every mutation below is scoped to the caller's organization and requires
@@ -82,13 +68,13 @@ async function requireLayoutContext(warehouseId: number) {
     )
     .limit(1);
 
-  if (!warehouse) redirect("/dashboard/warehouses");
+  if (!warehouse) redirect("/warehouses");
 
   return { organizationId: employee.organizationId };
 }
 
 function revalidateLayout(warehouseId: number) {
-  revalidatePath(`/dashboard/warehouses/${warehouseId}/layout-designer`);
+  revalidatePath(`/warehouses/${warehouseId}/layout-designer`);
 }
 
 // ---------------------------------------------------------------------------
@@ -97,7 +83,7 @@ function revalidateLayout(warehouseId: number) {
 
 export async function createHall(formData: FormData) {
   const warehouseId = parsePositiveInt(formData.get("warehouseId"));
-  if (!warehouseId) redirect("/dashboard/warehouses");
+  if (!warehouseId) redirect("/warehouses");
 
   const { organizationId } = await requireLayoutContext(warehouseId);
 
@@ -122,227 +108,21 @@ export async function createHall(formData: FormData) {
 
   revalidateLayout(warehouseId);
   redirect(
-    `/dashboard/warehouses/${warehouseId}/layout-designer?hall=${hall.hallId}`,
+    `/warehouses/${warehouseId}/layout-designer?hall=${hall.hallId}`,
   );
 }
 
 // ---------------------------------------------------------------------------
-// Zone types
+// Draft engine commit ("Save Map") -- the only place client-staged hall,
+// location, and zone drafts ever turn into database mutations. Everything
+// else in the layout designer (dragging, resizing, editing fields, creating
+// or deleting locations/zones) only touches the in-memory draft store in
+// layout-designer.tsx until this runs.
 // ---------------------------------------------------------------------------
 
-export async function createZoneType(
-  formData: FormData,
-): Promise<ActionResult> {
-  const warehouseId = parsePositiveInt(formData.get("warehouseId"));
-  if (!warehouseId) return { error: "Missing warehouse." };
-
-  try {
-    await requireLayoutContext(warehouseId);
-  } catch (err) {
-    return { error: (err as Error).message };
-  }
-
-  const name = String(formData.get("name") ?? "").trim();
-  if (!name) return { error: "Zone name is required." };
-
-  try {
-    await db.insert(zoneTypes).values({
-      warehouseId,
-      name,
-      isPickable: formData.get("isPickable") === "on",
-      isTemperatureControlled: formData.get("isTemperatureControlled") === "on",
-      requiresHazmatClearance: formData.get("requiresHazmatClearance") === "on",
-      requiresBarcodeScan: formData.get("requiresBarcodeScan") === "on",
-      storagePermanence: String(
-        formData.get("storagePermanence") ?? "PERMANENT",
-      ),
-    });
-  } catch {
-    return { error: "A zone with that name already exists in this warehouse." };
-  }
-
-  revalidateLayout(warehouseId);
-  return { success: true };
-}
-
-// ---------------------------------------------------------------------------
-// Locations (manual create/edit)
-// ---------------------------------------------------------------------------
-
-export async function createLocation(
-  formData: FormData,
-): Promise<ActionResult> {
-  const warehouseId = parsePositiveInt(formData.get("warehouseId"));
-  const hallId = parsePositiveInt(formData.get("hallId"));
-  if (!warehouseId || !hallId) return { error: "Missing warehouse or hall." };
-
-  try {
-    await requireLayoutContext(warehouseId);
-  } catch (err) {
-    return { error: (err as Error).message };
-  }
-
-  const locationCode = String(formData.get("locationCode") ?? "").trim();
-  if (!locationCode) return { error: "Location code is required." };
-
-  const zoneId = parsePositiveInt(formData.get("zoneId"));
-  const physicalX = parseNonNegativeInt(formData.get("physicalX"));
-  const physicalY = parseNonNegativeInt(formData.get("physicalY"));
-  const physicalWidthMm = parsePositiveInt(formData.get("physicalWidthMm"));
-  const physicalLengthMm = parsePositiveInt(formData.get("physicalLengthMm"));
-
-  if (
-    physicalX === null ||
-    physicalY === null ||
-    !physicalWidthMm ||
-    !physicalLengthMm
-  ) {
-    return {
-      error: "Location geometry is invalid -- redraw it on the canvas.",
-    };
-  }
-
-  const aisle = parseNullableInt(formData.get("aisle"));
-  const bay = parseNullableInt(formData.get("bay"));
-  const level = parseNullableInt(formData.get("level"));
-  const row = parseNullableInt(formData.get("row"));
-  const heightMm = parseNullableInt(formData.get("heightMm"));
-  const maxWeightKg = parseNullableInt(formData.get("maxWeightKg"));
-  const floorLevel = parsePositiveInt(formData.get("floorLevel")) ?? 1;
-
-  if (
-    [aisle, bay, level, row, heightMm, maxWeightKg].some((v) => Number.isNaN(v))
-  ) {
-    return {
-      error:
-        "Aisle, row, bay, level, height, and max weight must be whole numbers.",
-    };
-  }
-
-  // Manual creation: user picks which single type flag is true; defaults to
-  // all-false ("none") if nothing was selected.
-  const typeFlag = readLocationTypeFlag(formData);
-  const typeFlags = locationTypeFlagsFor(typeFlag);
-
-  if (!(await hallBelongsToWarehouse(hallId, warehouseId))) {
-    return { error: "Selected hall does not belong to this warehouse." };
-  }
-  if (zoneId !== null && !(await zoneBelongsToWarehouse(zoneId, warehouseId))) {
-    return { error: "Selected zone does not belong to this warehouse." };
-  }
-
-  try {
-    await db.insert(locations).values({
-      warehouseId,
-      hallId,
-      zoneId,
-      locationCode,
-      aisle,
-      bay,
-      level,
-      row,
-      ...typeFlags,
-      heightMm,
-      maxWeightKg,
-      floorLevel,
-      physicalX,
-      physicalY,
-      physicalWidthMm,
-      physicalLengthMm,
-      rotationDegrees: 0,
-    });
-  } catch {
-    return { error: `Location code "${locationCode}" is already in use.` };
-  }
-
-  revalidateLayout(warehouseId);
-  return { success: true };
-}
-
-export async function updateLocationDetails(
-  formData: FormData,
-): Promise<ActionResult> {
-  const warehouseId = parsePositiveInt(formData.get("warehouseId"));
-  const locationId = parsePositiveInt(formData.get("locationId"));
-  if (!warehouseId || !locationId)
-    return { error: "Missing warehouse or location." };
-
-  try {
-    await requireLayoutContext(warehouseId);
-  } catch (err) {
-    return { error: (err as Error).message };
-  }
-
-  const locationCode = String(formData.get("locationCode") ?? "").trim();
-  if (!locationCode) return { error: "Location code is required." };
-
-  const zoneId = parsePositiveInt(formData.get("zoneId"));
-  const aisle = parseNullableInt(formData.get("aisle"));
-  const bay = parseNullableInt(formData.get("bay"));
-  const level = parseNullableInt(formData.get("level"));
-  const row = parseNullableInt(formData.get("row"));
-  const heightMm = parseNullableInt(formData.get("heightMm"));
-  const maxWeightKg = parseNullableInt(formData.get("maxWeightKg"));
-  const isBlocked = formData.get("isBlocked") === "on";
-
-  if (
-    [aisle, bay, level, row, heightMm, maxWeightKg].some((v) => Number.isNaN(v))
-  ) {
-    return {
-      error:
-        "Aisle, row, bay, level, height, and max weight must be whole numbers.",
-    };
-  }
-
-  const typeFlag = readLocationTypeFlag(formData);
-  const typeFlags = locationTypeFlagsFor(typeFlag);
-
-  if (zoneId !== null && !(await zoneBelongsToWarehouse(zoneId, warehouseId))) {
-    return { error: "Selected zone does not belong to this warehouse." };
-  }
-
-  try {
-    await db
-      .update(locations)
-      .set({
-        locationCode,
-        zoneId,
-        aisle,
-        bay,
-        level,
-        row,
-        ...typeFlags,
-        heightMm,
-        maxWeightKg,
-        isBlocked,
-        updatedAt: new Date().toISOString(),
-      })
-      .where(
-        and(
-          eq(locations.locationId, locationId),
-          eq(locations.warehouseId, warehouseId),
-        ),
-      );
-  } catch {
-    return { error: `Location code "${locationCode}" is already in use.` };
-  }
-
-  revalidateLayout(warehouseId);
-  return { success: true };
-}
-
-// Called after a drag/resize/rotate ends on the canvas -- no form involved,
-// so it takes a plain typed argument instead of FormData.
-export async function updateLocationGeometry(
+export async function commitHallStates(
   warehouseId: number,
-  locationId: number,
-  geometry: {
-    physicalX: number;
-    physicalY: number;
-    physicalWidthMm: number;
-    physicalLengthMm: number;
-    rotationDegrees: number;
-  },
+  states: Record<number, HallState>,
 ): Promise<ActionResult> {
   try {
     await requireLayoutContext(warehouseId);
@@ -350,131 +130,261 @@ export async function updateLocationGeometry(
     return { error: (err as Error).message };
   }
 
-  const normalizedRotation =
-    ((Math.round(geometry.rotationDegrees) % 360) + 360) % 360;
+  const hallIds = Object.keys(states).map(Number);
+  if (hallIds.length === 0) return { success: true };
 
-  await db
-    .update(locations)
-    .set({
-      physicalX: Math.max(0, Math.round(geometry.physicalX)),
-      physicalY: Math.max(0, Math.round(geometry.physicalY)),
-      physicalWidthMm: Math.max(1, Math.round(geometry.physicalWidthMm)),
-      physicalLengthMm: Math.max(1, Math.round(geometry.physicalLengthMm)),
-      rotationDegrees: normalizedRotation,
-      updatedAt: new Date().toISOString(),
-    })
+  const owned = await db
+    .select({ hallId: halls.hallId })
+    .from(halls)
     .where(
-      and(
-        eq(locations.locationId, locationId),
-        eq(locations.warehouseId, warehouseId),
-      ),
+      and(inArray(halls.hallId, hallIds), eq(halls.warehouseId, warehouseId)),
     );
-
-  revalidateLayout(warehouseId);
-  return { success: true };
-}
-
-export async function deleteLocation(
-  formData: FormData,
-): Promise<ActionResult> {
-  const warehouseId = parsePositiveInt(formData.get("warehouseId"));
-  const locationId = parsePositiveInt(formData.get("locationId"));
-  if (!warehouseId || !locationId)
-    return { error: "Missing warehouse or location." };
-
-  try {
-    await requireLayoutContext(warehouseId);
-  } catch (err) {
-    return { error: (err as Error).message };
-  }
-
-  await db
-    .delete(locations)
-    .where(
-      and(
-        eq(locations.locationId, locationId),
-        eq(locations.warehouseId, warehouseId),
-      ),
-    );
-
-  revalidateLayout(warehouseId);
-  return { success: true };
-}
-
-// ---------------------------------------------------------------------------
-// Multi-select group actions (drag-select move/delete)
-// ---------------------------------------------------------------------------
-
-// Groups (Zone + Location Type) and drag-selected sets both resolve to a
-// plain list of location ids client-side (see groupKeyFor / locationIdsInGroup
-// in ./types.ts) -- these actions operate on whatever ids the caller passes,
-// whether that's a drag-selection or every member of a computed group.
-
-export async function moveLocations(
-  warehouseId: number,
-  locationIds: number[],
-  deltaX: number,
-  deltaY: number,
-): Promise<ActionResult> {
-  try {
-    await requireLayoutContext(warehouseId);
-  } catch (err) {
-    return { error: (err as Error).message };
-  }
-  if (locationIds.length === 0) return { error: "No locations selected." };
-
-  const rows = await db
-    .select({
-      locationId: locations.locationId,
-      physicalX: locations.physicalX,
-      physicalY: locations.physicalY,
-    })
-    .from(locations)
-    .where(
-      and(
-        inArray(locations.locationId, locationIds),
-        eq(locations.warehouseId, warehouseId),
-      ),
-    );
-
-  if (rows.length === 0) return { error: "Selected locations were not found." };
-
-  await db.transaction(async (tx) => {
-    for (const row of rows) {
-      await tx
-        .update(locations)
-        .set({
-          physicalX: Math.max(0, Math.round(row.physicalX + deltaX)),
-          physicalY: Math.max(0, Math.round(row.physicalY + deltaY)),
-          updatedAt: new Date().toISOString(),
-        })
-        .where(eq(locations.locationId, row.locationId));
+  const ownedHallIds = new Set(owned.map((h) => h.hallId));
+  for (const hallId of hallIds) {
+    if (!ownedHallIds.has(hallId)) {
+      return { error: "One of the halls being saved does not exist." };
     }
-  });
-
-  revalidateLayout(warehouseId);
-  return { success: true };
-}
-
-export async function deleteLocations(
-  warehouseId: number,
-  locationIds: number[],
-): Promise<ActionResult> {
-  try {
-    await requireLayoutContext(warehouseId);
-  } catch (err) {
-    return { error: (err as Error).message };
   }
-  if (locationIds.length === 0) return { error: "No locations selected." };
 
-  await db
-    .delete(locations)
-    .where(
-      and(
-        inArray(locations.locationId, locationIds),
-        eq(locations.warehouseId, warehouseId),
-      ),
-    );
+  try {
+    await db.transaction(async (tx) => {
+      for (const [hallIdStr, state] of Object.entries(states)) {
+        const hallId = Number(hallIdStr);
+
+        // 1. New zones first -- locations created/edited in this same batch
+        // may reference one of them by temp id.
+        const tempZoneIdToReal = new Map<number, number>();
+        for (const zoneDraft of state.newZones) {
+          const { tempId, ...patch } = zoneDraft;
+          const name = patch.name?.trim();
+          if (!name) throw new Error("A new zone is missing a name.");
+          const [inserted] = await tx
+            .insert(zoneTypes)
+            .values({
+              warehouseId,
+              name,
+              isPickable: patch.isPickable ?? true,
+              isTemperatureControlled: patch.isTemperatureControlled ?? false,
+              requiresHazmatClearance: patch.requiresHazmatClearance ?? false,
+              requiresBarcodeScan: patch.requiresBarcodeScan ?? true,
+              storagePermanence: patch.storagePermanence ?? "PERMANENT",
+              color: patch.color ?? null,
+            })
+            .returning({ zoneId: zoneTypes.zoneId });
+          tempZoneIdToReal.set(tempId, inserted.zoneId);
+        }
+
+        const remapZoneId = (
+          zoneId: number | null | undefined,
+        ): number | null => {
+          if (zoneId == null) return null;
+          if (zoneId < 0) return tempZoneIdToReal.get(zoneId) ?? null;
+          return zoneId;
+        };
+
+        // 2. Zone patches (existing rows).
+        for (const [zoneIdStr, patch] of Object.entries(state.zonePatches)) {
+          const zoneId = Number(zoneIdStr);
+          await tx
+            .update(zoneTypes)
+            .set({
+              ...(patch.name !== undefined && { name: patch.name }),
+              ...(patch.isPickable !== undefined && {
+                isPickable: patch.isPickable,
+              }),
+              ...(patch.isTemperatureControlled !== undefined && {
+                isTemperatureControlled: patch.isTemperatureControlled,
+              }),
+              ...(patch.requiresHazmatClearance !== undefined && {
+                requiresHazmatClearance: patch.requiresHazmatClearance,
+              }),
+              ...(patch.requiresBarcodeScan !== undefined && {
+                requiresBarcodeScan: patch.requiresBarcodeScan,
+              }),
+              ...(patch.storagePermanence !== undefined && {
+                storagePermanence: patch.storagePermanence,
+              }),
+              ...(patch.color !== undefined && { color: patch.color }),
+            })
+            .where(
+              and(
+                eq(zoneTypes.zoneId, zoneId),
+                eq(zoneTypes.warehouseId, warehouseId),
+              ),
+            );
+        }
+
+        // 3. Zone deletes.
+        if (state.deletedZoneIds.length > 0) {
+          await tx
+            .delete(zoneTypes)
+            .where(
+              and(
+                inArray(zoneTypes.zoneId, state.deletedZoneIds),
+                eq(zoneTypes.warehouseId, warehouseId),
+              ),
+            );
+        }
+
+        // 4. New locations (zoneId remapped through the temp-zone map above).
+        for (const locDraft of state.newLocations) {
+          const locationCode = locDraft.locationCode?.trim();
+          if (!locationCode) {
+            throw new Error("A new location is missing a code.");
+          }
+          if (
+            locDraft.physicalWidthMm === undefined ||
+            locDraft.physicalLengthMm === undefined ||
+            locDraft.physicalX === undefined ||
+            locDraft.physicalY === undefined
+          ) {
+            throw new Error(
+              `Location "${locationCode}" is missing geometry.`,
+            );
+          }
+          await tx.insert(locations).values({
+            warehouseId,
+            hallId,
+            zoneId: remapZoneId(locDraft.zoneId),
+            locationCode,
+            aisle: locDraft.aisle ?? null,
+            bay: locDraft.bay ?? null,
+            level: locDraft.level ?? null,
+            row: locDraft.row ?? null,
+            isRacking: locDraft.isRacking ?? false,
+            isShelf: locDraft.isShelf ?? false,
+            isFloorStorage: locDraft.isFloorStorage ?? false,
+            heightMm: locDraft.heightMm ?? null,
+            maxWeightKg: locDraft.maxWeightKg ?? null,
+            isBlocked: locDraft.isBlocked ?? false,
+            floorLevel: locDraft.floorLevel ?? 1,
+            physicalX: Math.max(0, Math.round(locDraft.physicalX)),
+            physicalY: Math.max(0, Math.round(locDraft.physicalY)),
+            physicalWidthMm: Math.max(1, Math.round(locDraft.physicalWidthMm)),
+            physicalLengthMm: Math.max(
+              1,
+              Math.round(locDraft.physicalLengthMm),
+            ),
+            rotationDegrees:
+              ((Math.round(locDraft.rotationDegrees ?? 0) % 360) + 360) % 360,
+          });
+        }
+
+        // 5. Location patches (existing rows).
+        for (const [locationIdStr, patch] of Object.entries(
+          state.locationPatches,
+        )) {
+          const locationId = Number(locationIdStr);
+          const rotationUpdate =
+            patch.rotationDegrees !== undefined
+              ? ((Math.round(patch.rotationDegrees) % 360) + 360) % 360
+              : undefined;
+          await tx
+            .update(locations)
+            .set({
+              ...(patch.locationCode !== undefined && {
+                locationCode: patch.locationCode,
+              }),
+              ...(patch.zoneId !== undefined && {
+                zoneId: remapZoneId(patch.zoneId),
+              }),
+              ...(patch.aisle !== undefined && { aisle: patch.aisle }),
+              ...(patch.bay !== undefined && { bay: patch.bay }),
+              ...(patch.level !== undefined && { level: patch.level }),
+              ...(patch.row !== undefined && { row: patch.row }),
+              ...(patch.isRacking !== undefined && {
+                isRacking: patch.isRacking,
+              }),
+              ...(patch.isShelf !== undefined && { isShelf: patch.isShelf }),
+              ...(patch.isFloorStorage !== undefined && {
+                isFloorStorage: patch.isFloorStorage,
+              }),
+              ...(patch.heightMm !== undefined && { heightMm: patch.heightMm }),
+              ...(patch.maxWeightKg !== undefined && {
+                maxWeightKg: patch.maxWeightKg,
+              }),
+              ...(patch.isBlocked !== undefined && {
+                isBlocked: patch.isBlocked,
+              }),
+              ...(patch.floorLevel !== undefined && {
+                floorLevel: patch.floorLevel,
+              }),
+              ...(patch.physicalX !== undefined && {
+                physicalX: Math.max(0, Math.round(patch.physicalX)),
+              }),
+              ...(patch.physicalY !== undefined && {
+                physicalY: Math.max(0, Math.round(patch.physicalY)),
+              }),
+              ...(patch.physicalWidthMm !== undefined && {
+                physicalWidthMm: Math.max(
+                  1,
+                  Math.round(patch.physicalWidthMm),
+                ),
+              }),
+              ...(patch.physicalLengthMm !== undefined && {
+                physicalLengthMm: Math.max(
+                  1,
+                  Math.round(patch.physicalLengthMm),
+                ),
+              }),
+              ...(rotationUpdate !== undefined && {
+                rotationDegrees: rotationUpdate,
+              }),
+              updatedAt: new Date().toISOString(),
+            })
+            .where(
+              and(
+                eq(locations.locationId, locationId),
+                eq(locations.warehouseId, warehouseId),
+              ),
+            );
+        }
+
+        // 6. Location deletes.
+        if (state.deletedLocationIds.length > 0) {
+          await tx
+            .delete(locations)
+            .where(
+              and(
+                inArray(locations.locationId, state.deletedLocationIds),
+                eq(locations.warehouseId, warehouseId),
+              ),
+            );
+        }
+
+        // 7. Hall patch.
+        if (Object.keys(state.hallPatch).length > 0) {
+          const patch = state.hallPatch;
+          await tx
+            .update(halls)
+            .set({
+              ...(patch.physicalWidthMm !== undefined && {
+                physicalWidthMm: Math.max(1, Math.round(patch.physicalWidthMm)),
+              }),
+              ...(patch.physicalLengthMm !== undefined && {
+                physicalLengthMm: Math.max(
+                  1,
+                  Math.round(patch.physicalLengthMm),
+                ),
+              }),
+              ...(patch.clearHeightMm !== undefined && {
+                clearHeightMm:
+                  patch.clearHeightMm === null
+                    ? null
+                    : Math.max(1, Math.round(patch.clearHeightMm)),
+              }),
+              ...(patch.isActive !== undefined && {
+                isActive: patch.isActive,
+              }),
+              updatedAt: new Date().toISOString(),
+            })
+            .where(eq(halls.hallId, hallId));
+        }
+      }
+    });
+  } catch (err) {
+    return { error: (err as Error).message || "Failed to save changes." };
+  }
 
   revalidateLayout(warehouseId);
   return { success: true };
@@ -505,7 +415,11 @@ async function zoneBelongsToWarehouse(zoneId: number, warehouseId: number) {
 }
 
 // ---------------------------------------------------------------------------
-// Bulk location generation (rackings, floor lines, shelving)
+// Bulk location generation (rackings, floor lines, shelving) -- left as an
+// immediate, separately-confirmed action outside the draft engine (per
+// product decision): it's already a deliberate, reviewed, atomic operation,
+// and staging hundreds of generated rows as drafts would add a lot of
+// complexity for little benefit.
 // ---------------------------------------------------------------------------
 
 type BulkGeneratorType = "racking" | "floor_line" | "shelving";
@@ -550,10 +464,6 @@ type BulkLocationDraft = {
   physicalWidthMm: number;
   physicalLengthMm: number;
 };
-
-function padNumber(value: number, width: number) {
-  return String(value).padStart(width, "0");
-}
 
 function readRequiredPositiveInt(
   formData: FormData,
