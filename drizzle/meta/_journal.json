@@ -29,6 +29,13 @@
       "when": 1785268642288,
       "tag": "0003_layout_lifecycle",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1785272454369,
+      "tag": "0004_nav_graph",
+      "breakpoints": true
     }
   ]
 }

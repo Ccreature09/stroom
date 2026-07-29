@@ -14,6 +14,7 @@ import {
   text,
   numeric,
   jsonb,
+  bigint,
   check,
   primaryKey,
 } from "drizzle-orm/pg-core";
@@ -451,8 +452,33 @@ export const mheTypes = pgTable(
     requiresLicense: boolean("requires_license").default(true),
     maxWeightCapacityKg: integer("max_weight_capacity_kg"),
     maxReachHeightMm: integer("max_reach_height_mm"),
+
+    // Capability profile. `class_bit` is this type's position in the vehicle
+    // bitmask carried by every edge, which turns "can this vehicle use this
+    // lane" into a single mask test rather than a join. Bit 0 is reserved for
+    // pedestrians -- "on foot" is a vehicle class, and that is what makes
+    // "walkway, no forklifts" and "VNA aisle, no pedestrians" one mechanism.
+    classBit: integer("class_bit"),
+    isPedestrian: boolean("is_pedestrian").default(false).notNull(),
+    widthMm: integer("width_mm"),
+    lengthMm: integer("length_mm"),
+    heightMm: integer("height_mm"),
+    turningRadiusMm: integer("turning_radius_mm"),
+    // Right-angle stacking aisle width. Compared against each aisle edge at
+    // compile time to catch "we bought reach trucks for a VNA aisle" before
+    // it reaches the floor.
+    minAisleWidthMm: integer("min_aisle_width_mm"),
+    maxSpeedLadenMms: integer("max_speed_laden_mms"),
+    maxSpeedUnladenMms: integer("max_speed_unladen_mms"),
   },
-  (table) => [unique("mhe_types_name_key").on(table.name)],
+  (table) => [
+    unique("mhe_types_name_key").on(table.name),
+    unique("uq_mhe_types_class_bit").on(table.classBit),
+    check(
+      "chk_mhe_class_bit_range",
+      sql`class_bit IS NULL OR (class_bit >= 0 AND class_bit <= 52)`,
+    ),
+  ],
 );
 
 export const taskStatuses = pgTable(
@@ -1504,6 +1530,258 @@ export const layoutFeatures = pgTable(
     check(
       "chk_feature_envelope",
       sql`(envelope_max_x_mm >= envelope_min_x_mm) AND (envelope_max_y_mm >= envelope_min_y_mm)`,
+    ),
+  ],
+);
+
+// ---------------------------------------------------------------------------
+// Navigation graph
+//
+// An explicit node/edge graph, not a grid. A 50m x 30m hall is ~150,000 cells
+// at 100mm resolution but a few hundred nodes as a graph, and warehouses are
+// corridor networks rather than open terrain. The graph also gives stable ids
+// a task row can reference, and puts one-way/clearance/vehicle constraints
+// where they naturally belong -- on an edge.
+//
+// Rows are stamped with the layout_version they were compiled from, and rows
+// with is_generated = false survive recompilation so hand-placed corrections
+// are never lost.
+// ---------------------------------------------------------------------------
+
+export const navNodes = pgTable(
+  "nav_nodes",
+  {
+    nodeId: serial("node_id").primaryKey().notNull(),
+    organizationId: integer("organization_id").notNull(),
+    warehouseId: integer("warehouse_id").notNull(),
+    hallId: integer("hall_id").notNull(),
+    floorLevel: integer("floor_level").default(1).notNull(),
+    xMm: integer("x_mm").notNull(),
+    yMm: integer("y_mm").notNull(),
+    nodeKind: varchar("node_kind", { length: 20 })
+      .default("WAYPOINT")
+      .notNull(),
+    // Lifts and stairs share a group across floors so the compiler can join
+    // their per-floor endpoints into vertical PORTAL edges.
+    portalGroupId: integer("portal_group_id"),
+    // Concurrent occupants before the node counts as congested. A goods lift
+    // is capacity 1 and is often the real bottleneck of a mezzanine.
+    capacity: integer().default(1).notNull(),
+    isGenerated: boolean("is_generated").default(true).notNull(),
+    sourceFeatureId: integer("source_feature_id"),
+    layoutVersion: integer("layout_version").default(0).notNull(),
+  },
+  (table) => [
+    index("idx_nav_nodes_hall").using(
+      "btree",
+      table.warehouseId.asc().nullsLast().op("int4_ops"),
+      table.hallId.asc().nullsLast().op("int4_ops"),
+      table.floorLevel.asc().nullsLast().op("int4_ops"),
+    ),
+    foreignKey({
+      columns: [table.hallId],
+      foreignColumns: [halls.hallId],
+      name: "nav_nodes_hall_id_fkey",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.warehouseId],
+      foreignColumns: [warehouses.warehouseId],
+      name: "nav_nodes_warehouse_id_fkey",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.sourceFeatureId],
+      foreignColumns: [layoutFeatures.featureId],
+      name: "nav_nodes_source_feature_id_fkey",
+    }).onDelete("set null"),
+    check(
+      "chk_nav_node_kind",
+      sql`(node_kind)::text = ANY ((ARRAY['WAYPOINT'::character varying, 'INTERSECTION'::character varying, 'ACCESS'::character varying, 'DOCK'::character varying, 'PORTAL'::character varying, 'CHARGE'::character varying, 'PARK'::character varying, 'STAGE'::character varying])::text[])`,
+    ),
+  ],
+);
+
+export const navEdges = pgTable(
+  "nav_edges",
+  {
+    edgeId: serial("edge_id").primaryKey().notNull(),
+    organizationId: integer("organization_id").notNull(),
+    warehouseId: integer("warehouse_id").notNull(),
+    hallId: integer("hall_id").notNull(),
+    fromNodeId: integer("from_node_id").notNull(),
+    toNodeId: integer("to_node_id").notNull(),
+
+    // Stored once per physical connection and expanded into two directed arcs
+    // in memory. Storing both directions doubles what a designer has to keep
+    // consistent and makes one-way edits easy to get half-right.
+    traversal: varchar({ length: 20 }).default("BIDIRECTIONAL").notNull(),
+    edgeKind: varchar("edge_kind", { length: 20 }).default("LANE").notNull(),
+
+    // Authoritative path length. For a curved lane this is the polyline
+    // length, which is not the straight-line distance between endpoints.
+    lengthMm: integer("length_mm").notNull(),
+    points: jsonb(),
+    widthMm: integer("width_mm"),
+    maxSpeedMms: integer("max_speed_mms"),
+    minClearanceMm: integer("min_clearance_mm"),
+    maxWeightKg: integer("max_weight_kg"),
+    maxVehicleWidthMm: integer("max_vehicle_width_mm"),
+
+    // bit_or of the mhe_types.class_bit values permitted here.
+    allowedVehicleMask: bigint("allowed_vehicle_mask", { mode: "number" })
+      .default(0)
+      .notNull(),
+
+    impedance: numeric({ precision: 5, scale: 2 }).default("1.00").notNull(),
+    // Lift cycle, door open, stop sign -- cost that does not scale with length.
+    fixedDelayMs: integer("fixed_delay_ms").default(0).notNull(),
+
+    zoneId: integer("zone_id"),
+    sourceFeatureId: integer("source_feature_id"),
+    isGenerated: boolean("is_generated").default(true).notNull(),
+    layoutVersion: integer("layout_version").default(0).notNull(),
+  },
+  (table) => [
+    index("idx_nav_edges_hall").using(
+      "btree",
+      table.warehouseId.asc().nullsLast().op("int4_ops"),
+      table.hallId.asc().nullsLast().op("int4_ops"),
+    ),
+    index("idx_nav_edges_from").using(
+      "btree",
+      table.fromNodeId.asc().nullsLast().op("int4_ops"),
+    ),
+    index("idx_nav_edges_to").using(
+      "btree",
+      table.toNodeId.asc().nullsLast().op("int4_ops"),
+    ),
+    foreignKey({
+      columns: [table.fromNodeId],
+      foreignColumns: [navNodes.nodeId],
+      name: "nav_edges_from_node_id_fkey",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.toNodeId],
+      foreignColumns: [navNodes.nodeId],
+      name: "nav_edges_to_node_id_fkey",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.hallId],
+      foreignColumns: [halls.hallId],
+      name: "nav_edges_hall_id_fkey",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.warehouseId],
+      foreignColumns: [warehouses.warehouseId],
+      name: "nav_edges_warehouse_id_fkey",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.zoneId],
+      foreignColumns: [zoneTypes.zoneId],
+      name: "nav_edges_zone_id_fkey",
+    }).onDelete("set null"),
+    foreignKey({
+      columns: [table.sourceFeatureId],
+      foreignColumns: [layoutFeatures.featureId],
+      name: "nav_edges_source_feature_id_fkey",
+    }).onDelete("set null"),
+    check(
+      "chk_nav_edge_traversal",
+      sql`(traversal)::text = ANY ((ARRAY['BIDIRECTIONAL'::character varying, 'FORWARD_ONLY'::character varying, 'REVERSE_ONLY'::character varying])::text[])`,
+    ),
+    check(
+      "chk_nav_edge_kind",
+      sql`(edge_kind)::text = ANY ((ARRAY['LANE'::character varying, 'AISLE'::character varying, 'CROSS_AISLE'::character varying, 'WALKWAY'::character varying, 'PORTAL'::character varying, 'ACCESS'::character varying, 'YARD'::character varying])::text[])`,
+    ),
+    check("chk_nav_edge_length", sql`length_mm >= 0`),
+    check("chk_nav_edge_endpoints", sql`from_node_id <> to_node_id`),
+  ],
+);
+
+// Turn cost depends on the edge you arrived on, which is why the search runs
+// over directed arcs rather than nodes. Most turns are derived from the angle
+// between them; this table is only for hand-authored exceptions (no left turn
+// out of the dock lane, and so on).
+export const navTurnRestrictions = pgTable(
+  "nav_turn_restrictions",
+  {
+    restrictionId: serial("restriction_id").primaryKey().notNull(),
+    warehouseId: integer("warehouse_id").notNull(),
+    fromEdgeId: integer("from_edge_id").notNull(),
+    toEdgeId: integer("to_edge_id").notNull(),
+    penaltyMs: integer("penalty_ms").default(0).notNull(),
+    isForbidden: boolean("is_forbidden").default(false).notNull(),
+    allowedVehicleMask: bigint("allowed_vehicle_mask", { mode: "number" }),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.fromEdgeId],
+      foreignColumns: [navEdges.edgeId],
+      name: "nav_turn_restrictions_from_edge_id_fkey",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.toEdgeId],
+      foreignColumns: [navEdges.edgeId],
+      name: "nav_turn_restrictions_to_edge_id_fkey",
+    }).onDelete("cascade"),
+    unique("uq_nav_turn_restriction").on(table.fromEdgeId, table.toEdgeId),
+  ],
+);
+
+// Where an operator stands (or a truck parks) to service a bin, and what it
+// costs once they are there.
+//
+// Rack level deliberately does NOT affect travel: level 4 sits at the same
+// (x, y) as level 1, so the aisle travel is identical and only the lift time
+// differs. That is why handling_time_ms is here rather than encoded as extra
+// graph distance.
+export const locationAccessPoints = pgTable(
+  "location_access_points",
+  {
+    accessPointId: serial("access_point_id").primaryKey().notNull(),
+    organizationId: integer("organization_id").notNull(),
+    warehouseId: integer("warehouse_id").notNull(),
+    locationId: integer("location_id").notNull(),
+    nodeId: integer("node_id").notNull(),
+    approachHeadingDeg: integer("approach_heading_deg").default(0).notNull(),
+    face: varchar({ length: 10 }).default("FRONT").notNull(),
+    offsetMm: integer("offset_mm").default(0).notNull(),
+    handlingTimeMs: integer("handling_time_ms").default(0).notNull(),
+    allowedVehicleMask: bigint("allowed_vehicle_mask", {
+      mode: "number",
+    }).default(0),
+    // Double-deep and back-to-back racking is reachable from two aisles at
+    // different costs, so a location may legitimately have several.
+    isPrimary: boolean("is_primary").default(true).notNull(),
+    layoutVersion: integer("layout_version").default(0).notNull(),
+  },
+  (table) => [
+    index("idx_location_access_points_location").using(
+      "btree",
+      table.locationId.asc().nullsLast().op("int4_ops"),
+    ),
+    index("idx_location_access_points_node").using(
+      "btree",
+      table.nodeId.asc().nullsLast().op("int4_ops"),
+    ),
+    foreignKey({
+      columns: [table.locationId],
+      foreignColumns: [locations.locationId],
+      name: "location_access_points_location_id_fkey",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.nodeId],
+      foreignColumns: [navNodes.nodeId],
+      name: "location_access_points_node_id_fkey",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.warehouseId],
+      foreignColumns: [warehouses.warehouseId],
+      name: "location_access_points_warehouse_id_fkey",
+    }).onDelete("cascade"),
+    unique("uq_location_access_point").on(table.locationId, table.nodeId),
+    check(
+      "chk_access_point_face",
+      sql`(face)::text = ANY ((ARRAY['FRONT'::character varying, 'BACK'::character varying, 'LEFT'::character varying, 'RIGHT'::character varying])::text[])`,
     ),
   ],
 );
