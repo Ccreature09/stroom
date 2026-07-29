@@ -7,11 +7,13 @@ import type {
   HallDTO,
   HallPatch,
   LayoutVersionDTO,
+  NavGraphDTO,
   UnderlayDTO,
   ZonePatch,
   ZoneTypeDTO,
 } from "./types";
 import UnderlayPanel from "./underlay-panel";
+import NavGraphPanel from "./nav-graph-panel";
 import type { Tool } from "./layout-designer-canvas";
 import { createHall } from "./actions";
 
@@ -77,6 +79,9 @@ export default function HallToolbar({
   underlay,
   measuredMm,
   onClearMeasurement,
+  navGraph,
+  showNavGraph,
+  onToggleNavGraph,
 }: {
   warehouseId: number;
   halls: HallDTO[];
@@ -106,6 +111,9 @@ export default function HallToolbar({
   underlay: UnderlayDTO | null;
   measuredMm: number | null;
   onClearMeasurement: () => void;
+  navGraph: NavGraphDTO;
+  showNavGraph: boolean;
+  onToggleNavGraph: (next: boolean) => void;
 }) {
   const router = useRouter();
   const [showNewHall, setShowNewHall] = useState(false);
@@ -254,6 +262,15 @@ export default function HallToolbar({
           onToggleMeasure={() =>
             onToolChange(tool === "measure" ? "select" : "measure")
           }
+          locked={locked}
+        />
+
+        <NavGraphPanel
+          warehouseId={warehouseId}
+          hall={selectedHall}
+          navGraph={navGraph}
+          showNavGraph={showNavGraph}
+          onToggleShow={onToggleNavGraph}
           locked={locked}
         />
 
