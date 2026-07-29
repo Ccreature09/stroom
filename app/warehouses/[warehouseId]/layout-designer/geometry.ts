@@ -217,6 +217,99 @@ export function hitTestFeature(
   }
 }
 
+export type Segment = { a: Point; b: Point };
+
+/**
+ * Proper intersection of two segments, or null. Collinear overlap returns
+ * null: the graph compiler handles duplicate/overlapping lanes by node
+ * deduping, and splitting on a collinear overlap would produce zero-length
+ * edges instead of a useful junction.
+ */
+export function segmentIntersection(s1: Segment, s2: Segment): Point | null {
+  const d1x = s1.b.x - s1.a.x;
+  const d1y = s1.b.y - s1.a.y;
+  const d2x = s2.b.x - s2.a.x;
+  const d2y = s2.b.y - s2.a.y;
+
+  const denominator = d1x * d2y - d1y * d2x;
+  if (denominator === 0) return null; // parallel or collinear
+
+  const t = ((s2.a.x - s1.a.x) * d2y - (s2.a.y - s1.a.y) * d2x) / denominator;
+  const u = ((s2.a.x - s1.a.x) * d1y - (s2.a.y - s1.a.y) * d1x) / denominator;
+
+  if (t < 0 || t > 1 || u < 0 || u > 1) return null;
+  return { x: s1.a.x + t * d1x, y: s1.a.y + t * d1y };
+}
+
+/** Axis-aligned rectangle, used for rack runs and feature envelopes. */
+export type Rect = { minX: number; minY: number; maxX: number; maxY: number };
+
+export function rectFromEnvelope(envelope: Envelope): Rect {
+  return {
+    minX: envelope.minX,
+    minY: envelope.minY,
+    maxX: envelope.maxX,
+    maxY: envelope.maxY,
+  };
+}
+
+/**
+ * Whether a segment touches a rectangle's interior. `inset` shrinks the rect
+ * first, so a lane running exactly along a rack face is not treated as
+ * passing through it -- which is the normal case for an inferred corridor.
+ */
+export function segmentIntersectsRect(
+  segment: Segment,
+  rect: Rect,
+  inset = 0,
+): boolean {
+  const minX = rect.minX + inset;
+  const minY = rect.minY + inset;
+  const maxX = rect.maxX - inset;
+  const maxY = rect.maxY - inset;
+  if (minX >= maxX || minY >= maxY) return false;
+
+  // Either endpoint inside is an immediate hit.
+  const inside = (p: Point) =>
+    p.x > minX && p.x < maxX && p.y > minY && p.y < maxY;
+  if (inside(segment.a) || inside(segment.b)) return true;
+
+  const edges: Segment[] = [
+    { a: { x: minX, y: minY }, b: { x: maxX, y: minY } },
+    { a: { x: maxX, y: minY }, b: { x: maxX, y: maxY } },
+    { a: { x: maxX, y: maxY }, b: { x: minX, y: maxY } },
+    { a: { x: minX, y: maxY }, b: { x: minX, y: minY } },
+  ];
+  return edges.some((edge) => segmentIntersection(segment, edge) !== null);
+}
+
+/** Closest point on a segment to `point`, and how far along it that is. */
+export function projectOntoSegment(
+  point: Point,
+  segment: Segment,
+): { point: Point; t: number; distance: number } {
+  const dx = segment.b.x - segment.a.x;
+  const dy = segment.b.y - segment.a.y;
+  const lengthSquared = dx * dx + dy * dy;
+  if (lengthSquared === 0) {
+    return {
+      point: { ...segment.a },
+      t: 0,
+      distance: Math.hypot(point.x - segment.a.x, point.y - segment.a.y),
+    };
+  }
+  let t =
+    ((point.x - segment.a.x) * dx + (point.y - segment.a.y) * dy) /
+    lengthSquared;
+  t = Math.max(0, Math.min(1, t));
+  const projected = { x: segment.a.x + t * dx, y: segment.a.y + t * dy };
+  return {
+    point: projected,
+    t,
+    distance: Math.hypot(point.x - projected.x, point.y - projected.y),
+  };
+}
+
 export function envelopeCenter(envelope: Envelope): Point {
   return {
     x: (envelope.minX + envelope.maxX) / 2,
