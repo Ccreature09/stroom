@@ -7,13 +7,17 @@ import type {
   HallDTO,
   HallPatch,
   LayoutVersionDTO,
+  LocationDTO,
   NavGraphDTO,
+  RoutingVehicleDTO,
   UnderlayDTO,
   ZonePatch,
   ZoneTypeDTO,
 } from "./types";
 import UnderlayPanel from "./underlay-panel";
 import NavGraphPanel from "./nav-graph-panel";
+import RoutePanel from "./route-panel";
+import type { RoutePreview } from "./routing-actions";
 import type { Tool } from "./layout-designer-canvas";
 import { createHall } from "./actions";
 
@@ -82,6 +86,11 @@ export default function HallToolbar({
   navGraph,
   showNavGraph,
   onToggleNavGraph,
+  routingVehicles,
+  selectedLocations,
+  routePreview,
+  onRoutePreview,
+  onClearRoute,
 }: {
   warehouseId: number;
   halls: HallDTO[];
@@ -114,6 +123,11 @@ export default function HallToolbar({
   navGraph: NavGraphDTO;
   showNavGraph: boolean;
   onToggleNavGraph: (next: boolean) => void;
+  routingVehicles: RoutingVehicleDTO[];
+  selectedLocations: LocationDTO[];
+  routePreview: RoutePreview | null;
+  onRoutePreview: (result: RoutePreview | null) => void;
+  onClearRoute: () => void;
 }) {
   const router = useRouter();
   const [showNewHall, setShowNewHall] = useState(false);
@@ -271,6 +285,18 @@ export default function HallToolbar({
           navGraph={navGraph}
           showNavGraph={showNavGraph}
           onToggleShow={onToggleNavGraph}
+          locked={locked}
+        />
+
+        <RoutePanel
+          warehouseId={warehouseId}
+          hallId={selectedHall.hallId}
+          selectedLocations={selectedLocations}
+          vehicles={routingVehicles}
+          hasGraph={navGraph.nodes.length > 0}
+          preview={routePreview}
+          onPreview={onRoutePreview}
+          onClear={onClearRoute}
           locked={locked}
         />
 
