@@ -474,9 +474,14 @@ export const mheTypes = pgTable(
   (table) => [
     unique("mhe_types_name_key").on(table.name),
     unique("uq_mhe_types_class_bit").on(table.classBit),
+    // Capped at 30, not 52: the mask is manipulated with JS bitwise operators,
+    // which coerce to signed 32-bit. `1 << 31` is negative and `1 << 32` wraps
+    // to 1, so a bit above 30 would silently alias another vehicle class
+    // rather than fail. 31 equipment types is far beyond any real warehouse;
+    // going higher would mean BigInt masks in the A* inner loop.
     check(
       "chk_mhe_class_bit_range",
-      sql`class_bit IS NULL OR (class_bit >= 0 AND class_bit <= 52)`,
+      sql`class_bit IS NULL OR (class_bit >= 0 AND class_bit <= 30)`,
     ),
   ],
 );
@@ -1783,6 +1788,78 @@ export const locationAccessPoints = pgTable(
       "chk_access_point_face",
       sql`(face)::text = ANY ((ARRAY['FRONT'::character varying, 'BACK'::character varying, 'LEFT'::character varying, 'RIGHT'::character varying])::text[])`,
     ),
+  ],
+);
+
+// A computed route. Stamped with the (layout_version, graph_epoch) it was
+// planned against, because that pair is exactly what invalidates it: a
+// republish moves the version, and a temporary blockage moves the epoch
+// without one. A plan whose stamp is stale must be recomputed, never trusted.
+//
+// `task_id` is nullable so the designer can compute a preview route that
+// belongs to no task at all.
+export const routePlans = pgTable(
+  "route_plans",
+  {
+    routePlanId: serial("route_plan_id").primaryKey().notNull(),
+    organizationId: integer("organization_id").notNull(),
+    warehouseId: integer("warehouse_id").notNull(),
+    hallId: integer("hall_id").notNull(),
+    taskId: uuid("task_id"),
+    mheTypeId: integer("mhe_type_id"),
+
+    fromNodeId: integer("from_node_id").notNull(),
+    toNodeId: integer("to_node_id").notNull(),
+    // Ordered edges of the path. Storing edge ids rather than coordinates is
+    // what lets a blockage on edge X find every route that crosses it.
+    edgeIds: integer("edge_ids").array().notNull(),
+    // Ordered stops for a multi-drop pick, as [{ locationId, nodeId, ... }].
+    stops: jsonb(),
+
+    estDurationMs: integer("est_duration_ms").notNull(),
+    estDistanceMm: integer("est_distance_mm").notNull(),
+
+    layoutVersion: integer("layout_version").default(0).notNull(),
+    graphEpoch: integer("graph_epoch").default(0).notNull(),
+    computedAt: timestamp("computed_at", {
+      withTimezone: true,
+      mode: "string",
+    }).default(sql`CURRENT_TIMESTAMP`),
+    supersededBy: integer("superseded_by"),
+  },
+  (table) => [
+    index("idx_route_plans_task").using(
+      "btree",
+      table.taskId.asc().nullsLast().op("uuid_ops"),
+    ),
+    index("idx_route_plans_stamp").using(
+      "btree",
+      table.warehouseId.asc().nullsLast().op("int4_ops"),
+      table.layoutVersion.asc().nullsLast().op("int4_ops"),
+      table.graphEpoch.asc().nullsLast().op("int4_ops"),
+    ),
+    foreignKey({
+      columns: [table.warehouseId],
+      foreignColumns: [warehouses.warehouseId],
+      name: "route_plans_warehouse_id_fkey",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.hallId],
+      foreignColumns: [halls.hallId],
+      name: "route_plans_hall_id_fkey",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.taskId],
+      foreignColumns: [tasks.taskId],
+      name: "route_plans_task_id_fkey",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.mheTypeId],
+      foreignColumns: [mheTypes.mheTypeId],
+      name: "route_plans_mhe_type_id_fkey",
+    }).onDelete("set null"),
+    check("chk_route_plan_duration", sql`est_duration_ms >= 0`),
+    check("chk_route_plan_distance", sql`est_distance_mm >= 0`),
   ],
 );
 
