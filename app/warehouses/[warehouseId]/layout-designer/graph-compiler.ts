@@ -25,6 +25,18 @@ export { segmentIntersectsRect };
 /** Nodes closer than this collapse into one. Also the endpoint-alignment
  *  tolerance when looking for cross-aisle candidates. */
 export const SNAP_MM = 250;
+/**
+ * Radius within which two points become one node. Must be strictly greater
+ * than twice SNAP_MM, and that relationship is load-bearing.
+ *
+ * `applyCuts` drops a cut that lands within SNAP_MM of a segment end, because
+ * splitting there would emit a zero-length stub. When two segments cross near
+ * one of their endpoints, the cut is therefore dropped on both -- and each
+ * endpoint can be up to SNAP_MM from the true intersection, so they can end up
+ * 2 x SNAP_MM apart. If the merge radius were not wider than that, the two
+ * lanes would look joined on the canvas and be disconnected in the graph.
+ **/
+export const MERGE_RADIUS_MM = SNAP_MM * 2 + 50;
 /** A gap narrower than this is a rack-to-rack tolerance, not a corridor. */
 export const MIN_CORRIDOR_MM = 800;
 /** Wider than this is open floor, not an aisle; inferring a single centerline
@@ -866,16 +878,18 @@ export function compileNavigationGraph(input: CompilerInput): CompileResult {
   // exact-cell. Pure cell snapping has a boundary artifact: two points 200mm
   // apart can round into different cells and become two nodes, which is how
   // a pick face ends up as an isolated island next to the aisle it sits on.
+  // Cell size is the merge radius, so scanning the 3x3 neighbourhood is
+  // guaranteed to find any node within that radius.
   const nodesByCell = new Map<string, string[]>();
   function cellKey(cx: number, cy: number) {
     return `${cx}:${cy}`;
   }
 
   function findNearbyNode(point: Point): string | null {
-    const cx = Math.round(point.x / SNAP_MM);
-    const cy = Math.round(point.y / SNAP_MM);
+    const cx = Math.round(point.x / MERGE_RADIUS_MM);
+    const cy = Math.round(point.y / MERGE_RADIUS_MM);
     let best: string | null = null;
-    let bestDistance = SNAP_MM;
+    let bestDistance = MERGE_RADIUS_MM;
     for (let dx = -1; dx <= 1; dx++) {
       for (let dy = -1; dy <= 1; dy++) {
         for (const key of nodesByCell.get(cellKey(cx + dx, cy + dy)) ?? []) {
@@ -920,8 +934,8 @@ export function compileNavigationGraph(input: CompilerInput): CompileResult {
       sourceFeatureId,
       portalGroupId,
     });
-    const cx = Math.round(point.x / SNAP_MM);
-    const cy = Math.round(point.y / SNAP_MM);
+    const cx = Math.round(point.x / MERGE_RADIUS_MM);
+    const cy = Math.round(point.y / MERGE_RADIUS_MM);
     const cell = cellKey(cx, cy);
     nodesByCell.set(cell, [...(nodesByCell.get(cell) ?? []), key]);
     return key;
