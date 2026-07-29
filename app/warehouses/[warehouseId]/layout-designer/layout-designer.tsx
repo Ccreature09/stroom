@@ -34,6 +34,7 @@ import type {
   LayoutVersionDTO,
   LocationDTO,
   LocationPatch,
+  NavGraphDTO,
   RecoveredDraft,
   UnderlayDTO,
   ZonePatch,
@@ -358,6 +359,7 @@ export default function LayoutDesigner({
   versionHistory,
   recoveredDrafts,
   underlays,
+  navGraph,
 }: {
   warehouseId: number;
   halls: HallDTO[];
@@ -370,6 +372,7 @@ export default function LayoutDesigner({
   versionHistory: LayoutVersionDTO[];
   recoveredDrafts: RecoveredDraft[];
   underlays: UnderlayDTO[];
+  navGraph: NavGraphDTO;
 }) {
   const router = useRouter();
   const [tool, setTool] = useState<Tool>("select");
@@ -394,6 +397,9 @@ export default function LayoutDesigner({
   // Result of the last two-click measurement, waiting for the user to say
   // what that distance really is.
   const [measuredMm, setMeasuredMm] = useState<number | null>(null);
+  // Default on once a graph exists: the whole point of stage 3 is that you can
+  // see what the compiler inferred and judge whether it matches the building.
+  const [showNavGraph, setShowNavGraph] = useState(true);
 
   const [draftState, dispatch] = useReducer(draftReducer, {} as DraftState);
   const tempIdRef = useRef(0);
@@ -898,6 +904,9 @@ export default function LayoutDesigner({
         underlay={hallUnderlay}
         measuredMm={measuredMm}
         onClearMeasurement={() => setMeasuredMm(null)}
+        navGraph={navGraph}
+        showNavGraph={showNavGraph}
+        onToggleNavGraph={setShowNavGraph}
       />
 
       {/* 2. Middle Column: Canvas Container */}
@@ -910,6 +919,8 @@ export default function LayoutDesigner({
             features={effectiveFeatures}
             featureKinds={featureKinds}
             underlay={hallUnderlay}
+            navGraph={navGraph}
+            showNavGraph={showNavGraph}
             onMeasured={setMeasuredMm}
             selectedFeatureId={selectedFeatureId}
             onSelectFeature={handleSelectFeature}
