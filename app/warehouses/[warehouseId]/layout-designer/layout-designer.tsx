@@ -35,6 +35,7 @@ import type {
   LocationDTO,
   LocationPatch,
   NavGraphDTO,
+  RoutingVehicleDTO,
   RecoveredDraft,
   UnderlayDTO,
   ZonePatch,
@@ -50,6 +51,7 @@ import {
 } from "./types";
 import { defaultPointsForDrawnRect } from "./geometry";
 import { commitHallStates, type PublishConflict } from "./actions";
+import type { RoutePreview } from "./routing-actions";
 import { saveHallDraft } from "./lifecycle-actions";
 
 type HallHistory = {
@@ -360,6 +362,7 @@ export default function LayoutDesigner({
   recoveredDrafts,
   underlays,
   navGraph,
+  routingVehicles,
 }: {
   warehouseId: number;
   halls: HallDTO[];
@@ -373,6 +376,7 @@ export default function LayoutDesigner({
   recoveredDrafts: RecoveredDraft[];
   underlays: UnderlayDTO[];
   navGraph: NavGraphDTO;
+  routingVehicles: RoutingVehicleDTO[];
 }) {
   const router = useRouter();
   const [tool, setTool] = useState<Tool>("select");
@@ -400,6 +404,7 @@ export default function LayoutDesigner({
   // Default on once a graph exists: the whole point of stage 3 is that you can
   // see what the compiler inferred and judge whether it matches the building.
   const [showNavGraph, setShowNavGraph] = useState(true);
+  const [routePreview, setRoutePreview] = useState<RoutePreview | null>(null);
 
   const [draftState, dispatch] = useReducer(draftReducer, {} as DraftState);
   const tempIdRef = useRef(0);
@@ -635,6 +640,7 @@ export default function LayoutDesigner({
   function handleMultiSelect(locationIds: number[]) {
     setSelectedLocationId(null);
     setSelectedLocationIds(locationIds);
+    setRoutePreview(null);
     if (locationIds.length > 0) setSelectedFeatureId(null);
   }
 
@@ -907,6 +913,11 @@ export default function LayoutDesigner({
         navGraph={navGraph}
         showNavGraph={showNavGraph}
         onToggleNavGraph={setShowNavGraph}
+        routingVehicles={routingVehicles}
+        selectedLocations={selectedLocationsForMulti}
+        routePreview={routePreview}
+        onRoutePreview={setRoutePreview}
+        onClearRoute={() => setRoutePreview(null)}
       />
 
       {/* 2. Middle Column: Canvas Container */}
@@ -921,6 +932,7 @@ export default function LayoutDesigner({
             underlay={hallUnderlay}
             navGraph={navGraph}
             showNavGraph={showNavGraph}
+            routePoints={routePreview?.points ?? null}
             onMeasured={setMeasuredMm}
             selectedFeatureId={selectedFeatureId}
             onSelectFeature={handleSelectFeature}

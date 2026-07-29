@@ -81,6 +81,8 @@ type Props = {
   underlay: UnderlayDTO | null;
   navGraph: NavGraphDTO;
   showNavGraph: boolean;
+  /** Polyline of the previewed route, in world mm. */
+  routePoints: Point[] | null;
   /** Two clicks in Measure mode report the distance between them, in mm. */
   onMeasured: (distanceMm: number) => void;
   selectedFeatureId: number | null;
@@ -227,6 +229,7 @@ export default function LayoutDesignerCanvas({
   underlay,
   navGraph,
   showNavGraph,
+  routePoints,
   onMeasured,
   selectedFeatureId,
   onSelectFeature,
@@ -256,6 +259,7 @@ export default function LayoutDesignerCanvas({
   const underlayUrlRef = useRef<string | null>(null);
   const measureLayerRef = useRef<Graphics | null>(null);
   const navGraphLayerRef = useRef<Graphics | null>(null);
+  const routeLayerRef = useRef<Graphics | null>(null);
   const handleLayerRef = useRef<Container | null>(null);
   const featureHandlesRef = useRef<Graphics[]>([]);
   const featureNodesRef = useRef<Map<number, FeatureNode>>(new Map());
@@ -1218,6 +1222,12 @@ export default function LayoutDesignerCanvas({
       viewport.addChild(navGraphLayer);
       navGraphLayerRef.current = navGraphLayer;
 
+      // Above the graph overlay: a computed route is the thing being read.
+      const routeLayer = new Graphics();
+      routeLayer.eventMode = "none";
+      viewport.addChild(routeLayer);
+      routeLayerRef.current = routeLayer;
+
       const measureLayer = new Graphics();
       viewport.addChild(measureLayer);
       measureLayerRef.current = measureLayer;
@@ -1552,6 +1562,7 @@ export default function LayoutDesignerCanvas({
       measureLayerRef.current = null;
       measureAnchorRef.current = null;
       navGraphLayerRef.current = null;
+      routeLayerRef.current = null;
       handleLayerRef.current = null;
       if (forceCancelInteractions) {
         window.removeEventListener("pointerup", forceCancelInteractions);
@@ -1727,6 +1738,45 @@ export default function LayoutDesignerCanvas({
     drawNavGraph();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [navGraph, showNavGraph, isReady]);
+
+  // Previewed route: a heavy casing line with a bright core, so it stays
+  // readable over both the racking fill and the graph overlay underneath.
+  function drawRoute() {
+    const g = routeLayerRef.current;
+    const viewport = viewportRef.current;
+    if (!g || !viewport) return;
+    g.clear();
+    if (!routePoints || routePoints.length < 2) return;
+
+    const scale = viewport.scale.x;
+    const trace = () => {
+      g.moveTo(routePoints[0].x, routePoints[0].y);
+      for (let i = 1; i < routePoints.length; i++) {
+        g.lineTo(routePoints[i].x, routePoints[i].y);
+      }
+    };
+
+    trace();
+    g.stroke({ width: 9 / scale, color: 0x0f172a, alpha: 0.35 });
+    trace();
+    g.stroke({ width: 5 / scale, color: 0xf59e0b, alpha: 1 });
+
+    // Start and end markers -- which way round the route runs matters.
+    const first = routePoints[0];
+    const last = routePoints[routePoints.length - 1];
+    g.circle(first.x, first.y, 7 / scale)
+      .fill({ color: 0x16a34a })
+      .stroke({ width: 2 / scale, color: 0xffffff });
+    g.circle(last.x, last.y, 7 / scale)
+      .fill({ color: 0xdc2626 })
+      .stroke({ width: 2 / scale, color: 0xffffff });
+  }
+
+  useEffect(() => {
+    if (!isReady) return;
+    drawRoute();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [routePoints, isReady]);
 
   // Measure overlay: anchor marker plus the rubber-band line to the cursor.
   function drawMeasureOverlay(cursor: Point | null) {
@@ -2379,6 +2429,7 @@ export default function LayoutDesignerCanvas({
     // Line widths and node radii are divided by the zoom so the overlay keeps
     // a constant on-screen weight instead of turning into blobs when zoomed in.
     viewport.on("zoomed", drawNavGraph);
+    viewport.on("zoomed", drawRoute);
 
     return () => {
       const currentApp = appRef.current;
@@ -2395,6 +2446,7 @@ export default function LayoutDesignerCanvas({
         currentViewport.off("zoomed", rebuildHandles);
         currentViewport.off("zoomed", rebuildFeatureHandles);
         currentViewport.off("zoomed", drawNavGraph);
+        currentViewport.off("zoomed", drawRoute);
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

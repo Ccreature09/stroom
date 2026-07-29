@@ -141,6 +141,13 @@ export type NavEdgeDTO = {
   isGenerated: boolean;
 };
 
+export type RoutingVehicleDTO = {
+  mheTypeId: number;
+  name: string;
+  classBit: number | null;
+  isPedestrian: boolean;
+};
+
 export type NavGraphDTO = {
   nodes: NavNodeDTO[];
   edges: NavEdgeDTO[];

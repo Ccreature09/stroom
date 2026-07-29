@@ -10,6 +10,7 @@ import {
   layoutVersions,
   locationAccessPoints,
   locations,
+  mheTypes,
   navEdges,
   navNodes,
   positionTypes,
@@ -26,6 +27,7 @@ import {
   DRAFT_STATE_VERSION,
   type HallState,
   type NavGraphDTO,
+  type RoutingVehicleDTO,
   type RecoveredDraft,
   type UnderlayDTO,
 } from "./types";
@@ -408,7 +410,8 @@ export default async function WarehouseLayoutDesignerPage({
   ]);
 
   // Compiled navigation graph for this hall, if one has been built.
-  const [navNodeRows, navEdgeRows, accessPointCount] = await Promise.all([
+  const [navNodeRows, navEdgeRows, accessPointCount, vehicleRows] =
+    await Promise.all([
     db
       .select({
         nodeId: navNodes.nodeId,
@@ -439,7 +442,20 @@ export default async function WarehouseLayoutDesignerPage({
       .from(locationAccessPoints)
       .innerJoin(navNodes, eq(locationAccessPoints.nodeId, navNodes.nodeId))
       .where(eq(navNodes.hallId, selectedHall.hallId)),
+    db
+      .select({
+        mheTypeId: mheTypes.mheTypeId,
+        name: mheTypes.name,
+        classBit: mheTypes.classBit,
+        isPedestrian: mheTypes.isPedestrian,
+      })
+      .from(mheTypes)
+      .orderBy(mheTypes.name),
   ]);
+
+  const routingVehicles: RoutingVehicleDTO[] = vehicleRows.filter(
+    (row) => row.classBit !== null,
+  );
 
   const navGraph: NavGraphDTO = {
     nodes: navNodeRows.map((row) => ({
@@ -553,6 +569,7 @@ export default async function WarehouseLayoutDesignerPage({
           recoveredDrafts={recoveredDrafts}
           underlays={underlays}
           navGraph={navGraph}
+          routingVehicles={routingVehicles}
         />
       </div>
     </main>
