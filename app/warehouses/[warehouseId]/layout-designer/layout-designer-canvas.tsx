@@ -17,6 +17,7 @@ import type {
   FeatureKindDTO,
   HallDTO,
   LocationDTO,
+  NavGraphDTO,
   UnderlayDTO,
   ZoneTypeDTO,
 } from "./types";
@@ -78,6 +79,8 @@ type Props = {
   features: FeatureDTO[];
   featureKinds: FeatureKindDTO[];
   underlay: UnderlayDTO | null;
+  navGraph: NavGraphDTO;
+  showNavGraph: boolean;
   /** Two clicks in Measure mode report the distance between them, in mm. */
   onMeasured: (distanceMm: number) => void;
   selectedFeatureId: number | null;
@@ -222,6 +225,8 @@ export default function LayoutDesignerCanvas({
   features,
   featureKinds,
   underlay,
+  navGraph,
+  showNavGraph,
   onMeasured,
   selectedFeatureId,
   onSelectFeature,
@@ -250,6 +255,7 @@ export default function LayoutDesignerCanvas({
   const underlaySpriteRef = useRef<Sprite | null>(null);
   const underlayUrlRef = useRef<string | null>(null);
   const measureLayerRef = useRef<Graphics | null>(null);
+  const navGraphLayerRef = useRef<Graphics | null>(null);
   const handleLayerRef = useRef<Container | null>(null);
   const featureHandlesRef = useRef<Graphics[]>([]);
   const featureNodesRef = useRef<Map<number, FeatureNode>>(new Map());
@@ -1205,6 +1211,13 @@ export default function LayoutDesignerCanvas({
       viewport.addChild(handleLayer);
       handleLayerRef.current = handleLayer;
 
+      // Above locations so the network reads as an overlay on the layout
+      // rather than something buried under it.
+      const navGraphLayer = new Graphics();
+      navGraphLayer.eventMode = "none";
+      viewport.addChild(navGraphLayer);
+      navGraphLayerRef.current = navGraphLayer;
+
       const measureLayer = new Graphics();
       viewport.addChild(measureLayer);
       measureLayerRef.current = measureLayer;
@@ -1538,6 +1551,7 @@ export default function LayoutDesignerCanvas({
       underlayUrlRef.current = null;
       measureLayerRef.current = null;
       measureAnchorRef.current = null;
+      navGraphLayerRef.current = null;
       handleLayerRef.current = null;
       if (forceCancelInteractions) {
         window.removeEventListener("pointerup", forceCancelInteractions);
@@ -1637,6 +1651,82 @@ export default function LayoutDesignerCanvas({
       cancelled = true;
     };
   }, [underlay, isReady]);
+
+  // Navigation graph overlay. Drawn into a single Graphics rather than one
+  // object per node: a compiled hall is hundreds of nodes and edges, and this
+  // is a read-only overlay with no per-element interaction to preserve.
+  function drawNavGraph() {
+    const g = navGraphLayerRef.current;
+    const viewport = viewportRef.current;
+    if (!g || !viewport) return;
+    g.clear();
+    if (!showNavGraph) return;
+
+    const scale = viewport.scale.x;
+    const nodeById = new Map(navGraph.nodes.map((n) => [n.nodeId, n]));
+
+    // Edge colour carries the edge kind, which is the thing a supervisor
+    // actually needs to check: is this an inferred aisle, a cross-aisle, a
+    // walkway, or a link out to a door?
+    const EDGE_STYLE: Record<string, { color: number; width: number }> = {
+      AISLE: { color: 0x0d9488, width: 3 },
+      CROSS_AISLE: { color: 0x14b8a6, width: 2.5 },
+      LANE: { color: 0x0f766e, width: 3 },
+      WALKWAY: { color: 0x65a30d, width: 2.5 },
+      PORTAL: { color: 0x7c3aed, width: 3 },
+      ACCESS: { color: 0x94a3b8, width: 1.5 },
+    };
+
+    for (const edge of navGraph.edges) {
+      const from = nodeById.get(edge.fromNodeId);
+      const to = nodeById.get(edge.toNodeId);
+      if (!from || !to) continue;
+      const style = EDGE_STYLE[edge.edgeKind] ?? {
+        color: 0x64748b,
+        width: 2,
+      };
+      g.moveTo(from.xMm, from.yMm)
+        .lineTo(to.xMm, to.yMm)
+        .stroke({
+          width: style.width / scale,
+          color: style.color,
+          alpha: edge.isGenerated ? 0.85 : 1,
+        });
+    }
+
+    const NODE_STYLE: Record<string, { color: number; radius: number }> = {
+      ACCESS: { color: 0x94a3b8, radius: 2.5 },
+      INTERSECTION: { color: 0x0f172a, radius: 4 },
+      PORTAL: { color: 0x7c3aed, radius: 5 },
+      DOCK: { color: 0x2563eb, radius: 5 },
+      WAYPOINT: { color: 0x0d9488, radius: 3 },
+    };
+
+    for (const node of navGraph.nodes) {
+      const style = NODE_STYLE[node.nodeKind] ?? {
+        color: 0x0d9488,
+        radius: 3,
+      };
+      g.circle(node.xMm, node.yMm, style.radius / scale).fill({
+        color: style.color,
+        alpha: 0.95,
+      });
+      // Hand-placed nodes get a ring so a correction is visibly distinct from
+      // something the compiler guessed and may overwrite conceptually.
+      if (!node.isGenerated) {
+        g.circle(node.xMm, node.yMm, (style.radius + 2.5) / scale).stroke({
+          width: 1.5 / scale,
+          color: 0xf59e0b,
+        });
+      }
+    }
+  }
+
+  useEffect(() => {
+    if (!isReady) return;
+    drawNavGraph();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [navGraph, showNavGraph, isReady]);
 
   // Measure overlay: anchor marker plus the rubber-band line to the cursor.
   function drawMeasureOverlay(cursor: Point | null) {
@@ -2286,6 +2376,9 @@ export default function LayoutDesignerCanvas({
     viewport.on("zoomed", updateFeatureLabelVisibility);
     viewport.on("zoomed", rebuildHandles);
     viewport.on("zoomed", rebuildFeatureHandles);
+    // Line widths and node radii are divided by the zoom so the overlay keeps
+    // a constant on-screen weight instead of turning into blobs when zoomed in.
+    viewport.on("zoomed", drawNavGraph);
 
     return () => {
       const currentApp = appRef.current;
@@ -2301,6 +2394,7 @@ export default function LayoutDesignerCanvas({
         currentViewport.off("zoomed", updateFeatureLabelVisibility);
         currentViewport.off("zoomed", rebuildHandles);
         currentViewport.off("zoomed", rebuildFeatureHandles);
+        currentViewport.off("zoomed", drawNavGraph);
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
