@@ -8,7 +8,10 @@ import {
   layoutDrafts,
   layoutFeatures,
   layoutVersions,
+  locationAccessPoints,
   locations,
+  navEdges,
+  navNodes,
   positionTypes,
   halls as hallsTable,
   warehouses,
@@ -22,6 +25,7 @@ import {
 import {
   DRAFT_STATE_VERSION,
   type HallState,
+  type NavGraphDTO,
   type RecoveredDraft,
   type UnderlayDTO,
 } from "./types";
@@ -403,6 +407,54 @@ export default async function WarehouseLayoutDesignerPage({
       .where(eq(hallUnderlays.hallId, selectedHall.hallId)),
   ]);
 
+  // Compiled navigation graph for this hall, if one has been built.
+  const [navNodeRows, navEdgeRows, accessPointCount] = await Promise.all([
+    db
+      .select({
+        nodeId: navNodes.nodeId,
+        xMm: navNodes.xMm,
+        yMm: navNodes.yMm,
+        floorLevel: navNodes.floorLevel,
+        nodeKind: navNodes.nodeKind,
+        isGenerated: navNodes.isGenerated,
+        layoutVersion: navNodes.layoutVersion,
+      })
+      .from(navNodes)
+      .where(eq(navNodes.hallId, selectedHall.hallId)),
+    db
+      .select({
+        edgeId: navEdges.edgeId,
+        fromNodeId: navEdges.fromNodeId,
+        toNodeId: navEdges.toNodeId,
+        edgeKind: navEdges.edgeKind,
+        traversal: navEdges.traversal,
+        lengthMm: navEdges.lengthMm,
+        widthMm: navEdges.widthMm,
+        isGenerated: navEdges.isGenerated,
+      })
+      .from(navEdges)
+      .where(eq(navEdges.hallId, selectedHall.hallId)),
+    db
+      .select({ locationId: locationAccessPoints.locationId })
+      .from(locationAccessPoints)
+      .innerJoin(navNodes, eq(locationAccessPoints.nodeId, navNodes.nodeId))
+      .where(eq(navNodes.hallId, selectedHall.hallId)),
+  ]);
+
+  const navGraph: NavGraphDTO = {
+    nodes: navNodeRows.map((row) => ({
+      nodeId: row.nodeId,
+      xMm: row.xMm,
+      yMm: row.yMm,
+      floorLevel: row.floorLevel,
+      nodeKind: row.nodeKind,
+      isGenerated: row.isGenerated,
+    })),
+    edges: navEdgeRows,
+    accessPointCount: accessPointCount.length,
+    layoutVersion: navNodeRows[0]?.layoutVersion ?? null,
+  };
+
   const versionHistory = versionRows.map((row) => ({
     versionNumber: row.versionNumber,
     graphEpoch: row.graphEpoch,
@@ -500,6 +552,7 @@ export default async function WarehouseLayoutDesignerPage({
           versionHistory={versionHistory}
           recoveredDrafts={recoveredDrafts}
           underlays={underlays}
+          navGraph={navGraph}
         />
       </div>
     </main>
