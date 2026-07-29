@@ -118,6 +118,37 @@ export type UnderlayDTO = {
 };
 
 // ---------------------------------------------------------------------------
+// Navigation graph (read model for the designer overlay)
+// ---------------------------------------------------------------------------
+
+export type NavNodeDTO = {
+  nodeId: number;
+  xMm: number;
+  yMm: number;
+  floorLevel: number;
+  nodeKind: string;
+  isGenerated: boolean;
+};
+
+export type NavEdgeDTO = {
+  edgeId: number;
+  fromNodeId: number;
+  toNodeId: number;
+  edgeKind: string;
+  traversal: string;
+  lengthMm: number;
+  widthMm: number | null;
+  isGenerated: boolean;
+};
+
+export type NavGraphDTO = {
+  nodes: NavNodeDTO[];
+  edges: NavEdgeDTO[];
+  accessPointCount: number;
+  layoutVersion: number | null;
+};
+
+// ---------------------------------------------------------------------------
 // Layout features -- everything on the floor that is not a storage bin.
 // ---------------------------------------------------------------------------
 
