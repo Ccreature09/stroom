@@ -181,6 +181,36 @@ export function buildRoutingGraph(
   };
 }
 
+/**
+ * Returns a graph whose arc impedances are scaled by a per-edge multiplier.
+ *
+ * Only `arcImpedance` is copied; every other typed array is shared with the
+ * source graph (they are read-only from here on), so this is an O(arcCount)
+ * operation, not a deep clone. This is how live traffic conditions reach the
+ * router without `CompiledRoutingGraph` itself knowing anything about the
+ * database or about congestion -- the base graph stays a pure function of
+ * layout, and "what it currently costs to use" is layered on top of it by
+ * whoever is asking.
+ */
+export function withImpedanceOverrides(
+  graph: CompiledRoutingGraph,
+  multiplierByEdgeId: Map<number, number>,
+): CompiledRoutingGraph {
+  if (multiplierByEdgeId.size === 0) return graph;
+
+  const arcImpedance = Float64Array.from(graph.arcImpedance);
+  let touched = false;
+  for (let arc = 0; arc < graph.arcCount; arc++) {
+    const multiplier = multiplierByEdgeId.get(graph.arcEdgeId[arc]);
+    if (multiplier === undefined || multiplier === 1) continue;
+    arcImpedance[arc] *= multiplier;
+    touched = true;
+  }
+  if (!touched) return graph;
+
+  return { ...graph, arcImpedance };
+}
+
 // --- Traveller ------------------------------------------------------------
 
 export type Traveller = {
