@@ -50,6 +50,20 @@
       "when": 1785332157472,
       "tag": "0006_live_map",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1785441651941,
+      "tag": "0007_traffic_analytics",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1785442014185,
+      "tag": "0008_edge_congestion_state",
+      "breakpoints": true
     }
   ]
 }

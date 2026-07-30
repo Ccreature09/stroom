@@ -2055,6 +2055,162 @@ export const layoutBlockages = pgTable(
 );
 
 // ---------------------------------------------------------------------------
+// Traffic analytics
+//
+// edge_traversals is the map-matched fact table -- one row per asset per
+// continuous run on one edge, derived from asset_position_history by a
+// background rollup rather than written live. edge_traffic_stats is the
+// per-bucket aggregate that bottleneck detection and congestion-aware
+// routing actually read; nothing queries edge_traversals directly at
+// request time.
+// ---------------------------------------------------------------------------
+
+export const edgeTraversals = pgTable(
+  "edge_traversals",
+  {
+    traversalId: serial("traversal_id").primaryKey().notNull(),
+    organizationId: integer("organization_id").notNull(),
+    warehouseId: integer("warehouse_id").notNull(),
+    hallId: integer("hall_id").notNull(),
+    edgeId: integer("edge_id").notNull(),
+    assetKind: varchar("asset_kind", { length: 20 }).notNull(),
+    assetRefId: integer("asset_ref_id").notNull(),
+    enteredAt: timestamp("entered_at", {
+      withTimezone: true,
+      mode: "string",
+    }).notNull(),
+    exitedAt: timestamp("exited_at", {
+      withTimezone: true,
+      mode: "string",
+    }).notNull(),
+    durationMs: integer("duration_ms").notNull(),
+  },
+  (table) => [
+    index("idx_edge_traversals_edge_time").using(
+      "btree",
+      table.edgeId.asc().nullsLast().op("int4_ops"),
+      table.enteredAt.desc().nullsLast().op("timestamptz_ops"),
+    ),
+    index("idx_edge_traversals_warehouse_time").using(
+      "btree",
+      table.warehouseId.asc().nullsLast().op("int4_ops"),
+      table.enteredAt.desc().nullsLast().op("timestamptz_ops"),
+    ),
+    foreignKey({
+      columns: [table.edgeId],
+      foreignColumns: [navEdges.edgeId],
+      name: "edge_traversals_edge_id_fkey",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.warehouseId],
+      foreignColumns: [warehouses.warehouseId],
+      name: "edge_traversals_warehouse_id_fkey",
+    }).onDelete("cascade"),
+    check("chk_edge_traversal_duration", sql`duration_ms >= 0`),
+    check("chk_edge_traversal_order", sql`exited_at >= entered_at`),
+  ],
+);
+
+// One row per (edge, bucket). Upserted by the rollup, read by everything
+// else -- bottleneck detection, the heatmap, and the damped congestion
+// multiplier fed into routing impedance all read this table, never
+// edge_traversals or asset_position_history directly.
+export const edgeTrafficStats = pgTable(
+  "edge_traffic_stats",
+  {
+    statId: serial("stat_id").primaryKey().notNull(),
+    organizationId: integer("organization_id").notNull(),
+    warehouseId: integer("warehouse_id").notNull(),
+    hallId: integer("hall_id").notNull(),
+    edgeId: integer("edge_id").notNull(),
+    bucketStart: timestamp("bucket_start", {
+      withTimezone: true,
+      mode: "string",
+    }).notNull(),
+    bucketMinutes: integer("bucket_minutes").default(15).notNull(),
+    traversalCount: integer("traversal_count").default(0).notNull(),
+    p50DurationMs: integer("p50_duration_ms"),
+    p95DurationMs: integer("p95_duration_ms"),
+    meanOccupancy: numeric("mean_occupancy", { precision: 6, scale: 2 }),
+    // EWMA of observed traversal speed, in mm/s -- this is what lets travel
+    // time estimation "learn the building" instead of trusting only the
+    // designer's nominal max_speed_mms.
+    observedSpeedMms: integer("observed_speed_mms"),
+    updatedAt: timestamp("updated_at", {
+      withTimezone: true,
+      mode: "string",
+    }).default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    index("idx_edge_traffic_stats_edge").using(
+      "btree",
+      table.edgeId.asc().nullsLast().op("int4_ops"),
+      table.bucketStart.desc().nullsLast().op("timestamptz_ops"),
+    ),
+    index("idx_edge_traffic_stats_warehouse_bucket").using(
+      "btree",
+      table.warehouseId.asc().nullsLast().op("int4_ops"),
+      table.bucketStart.desc().nullsLast().op("timestamptz_ops"),
+    ),
+    foreignKey({
+      columns: [table.edgeId],
+      foreignColumns: [navEdges.edgeId],
+      name: "edge_traffic_stats_edge_id_fkey",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.warehouseId],
+      foreignColumns: [warehouses.warehouseId],
+      name: "edge_traffic_stats_warehouse_id_fkey",
+    }).onDelete("cascade"),
+    unique("uq_edge_traffic_stats_bucket").on(table.edgeId, table.bucketStart),
+    check("chk_edge_traffic_stats_count", sql`traversal_count >= 0`),
+  ],
+);
+
+// One row per edge: the damped congestion signal actually fed into routing
+// impedance. Separate from edge_traffic_stats (which is bucketed history)
+// because this is a single running EWMA that must persist *across* rollup
+// runs -- recomputing it fresh from a stats window each time would throw
+// away the hysteresis that stops congestion-aware routing from oscillating
+// (docs §4.5/§5.9).
+export const edgeCongestionState = pgTable(
+  "edge_congestion_state",
+  {
+    edgeId: integer("edge_id").primaryKey().notNull(),
+    warehouseId: integer("warehouse_id").notNull(),
+    hallId: integer("hall_id").notNull(),
+    smoothedRatio: numeric("smoothed_ratio", { precision: 6, scale: 3 })
+      .default("0")
+      .notNull(),
+    activeMultiplier: numeric("active_multiplier", {
+      precision: 4,
+      scale: 2,
+    })
+      .default("1.00")
+      .notNull(),
+    updatedAt: timestamp("updated_at", {
+      withTimezone: true,
+      mode: "string",
+    }).default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    index("idx_edge_congestion_state_warehouse").using(
+      "btree",
+      table.warehouseId.asc().nullsLast().op("int4_ops"),
+    ),
+    foreignKey({
+      columns: [table.edgeId],
+      foreignColumns: [navEdges.edgeId],
+      name: "edge_congestion_state_edge_id_fkey",
+    }).onDelete("cascade"),
+    check(
+      "chk_edge_congestion_multiplier",
+      sql`active_multiplier >= 1 AND active_multiplier <= 3`,
+    ),
+  ],
+);
+
+// ---------------------------------------------------------------------------
 // Layout lifecycle: versions, drafts, underlays
 // ---------------------------------------------------------------------------
 
