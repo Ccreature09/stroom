@@ -24,6 +24,7 @@ import type {
   NavGraphDTO,
 } from "@/lib/warehouse-map/types";
 import LiveMapView from "./live-map-view";
+import { getBottlenecks, getHeatmapCells } from "./traffic-actions";
 
 import {
   Card,
@@ -33,6 +34,8 @@ import {
 } from "@/components/ui/card";
 import { DynamicBreadcrumb } from "@/components/layout/dynamic-breadcrumb";
 import { Radio } from "lucide-react";
+
+const HEATMAP_CELL_SIZE_MM = 1000;
 
 /**
  * Operational live map.
@@ -305,6 +308,13 @@ export default async function LiveMapPage({
 
   const blockages: BlockageDTO[] = blockageRows;
 
+  const [bottlenecks, heatmapCells] = await Promise.all([
+    getBottlenecks(parsedWarehouseId, hall.hallId),
+    getHeatmapCells(parsedWarehouseId, hall.hallId, {
+      cellSizeMm: HEATMAP_CELL_SIZE_MM,
+    }),
+  ]);
+
   const initialAssets: LiveAssetDTO[] = assetRows.map((row) => ({
     assetKind: row.assetKind as "EMPLOYEE" | "MHE",
     assetRefId: row.assetRefId,
@@ -354,6 +364,9 @@ export default async function LiveMapPage({
           blockages={blockages}
           initialAssets={initialAssets}
           canReportBlockages={canReportBlockages}
+          bottlenecks={bottlenecks}
+          heatmapCells={heatmapCells}
+          heatmapCellSizeMm={HEATMAP_CELL_SIZE_MM}
         />
       </div>
     </main>

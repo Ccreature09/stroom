@@ -24,6 +24,7 @@ import {
   renderAssetAt,
   type LiveAsset,
 } from "@/lib/warehouse-map/live-map";
+import type { HeatmapCell } from "@/lib/warehouse-map/traffic";
 
 import { Button } from "@/components/ui/button";
 import { ZoomIn, ZoomOut } from "lucide-react";
@@ -59,6 +60,18 @@ export type LiveMapCanvasProps = {
   navGraph: NavGraphDTO;
   showNavGraph: boolean;
   blockages: BlockageDTO[];
+  /** Density heatmap cells, redrawn only when this changes -- not per frame. */
+  heatmapCells: HeatmapCell[];
+  showHeatmap: boolean;
+  heatmapCellSizeMm: number;
+  /** Edges flagged by bottleneck detection, drawn as a highlighted overlay. */
+  bottleneckEdges: {
+    edgeId: number;
+    fromXMm: number;
+    fromYMm: number;
+    toXMm: number;
+    toYMm: number;
+  }[];
   /** Live assets, re-evaluated every frame. */
   assets: LiveAsset[];
   /** Route polylines to trace, keyed for stable colouring. */
@@ -77,6 +90,10 @@ export default function LiveMapCanvas({
   navGraph,
   showNavGraph,
   blockages,
+  heatmapCells,
+  showHeatmap,
+  heatmapCellSizeMm,
+  bottleneckEdges,
   assets,
   routes,
   pickingPoint,
@@ -86,6 +103,7 @@ export default function LiveMapCanvas({
   const appRef = useRef<Application | null>(null);
   const viewportRef = useRef<Viewport | null>(null);
   const staticLayerRef = useRef<Container | null>(null);
+  const heatmapLayerRef = useRef<Graphics | null>(null);
   const liveLayerRef = useRef<Graphics | null>(null);
   const [isReady, setIsReady] = useState(false);
   const [initError, setInitError] = useState<string | null>(null);
@@ -98,6 +116,7 @@ export default function LiveMapCanvas({
   const assetsRef = useRef(assets);
   const blockagesRef = useRef(blockages);
   const routesRef = useRef(routes);
+  const bottleneckEdgesRef = useRef(bottleneckEdges);
   const pickingRef = useRef(pickingPoint);
   const onPointPickedRef = useRef(onPointPicked);
 
@@ -105,9 +124,10 @@ export default function LiveMapCanvas({
     assetsRef.current = assets;
     blockagesRef.current = blockages;
     routesRef.current = routes;
+    bottleneckEdgesRef.current = bottleneckEdges;
     pickingRef.current = pickingPoint;
     onPointPickedRef.current = onPointPicked;
-  }, [assets, blockages, routes, pickingPoint, onPointPicked]);
+  }, [assets, blockages, routes, bottleneckEdges, pickingPoint, onPointPicked]);
 
   function handleZoomIn() {
     const vp = viewportRef.current;
@@ -221,6 +241,31 @@ export default function LiveMapCanvas({
     }
   }
 
+  // Density heatmap: redrawn only when the cell data changes, not per frame
+  // -- it is a periodic aggregate (docs §4.6), not a live signal, and
+  // redrawing it every tick would be wasted work for numbers that only
+  // change on the next rollup.
+  function drawHeatmap() {
+    const g = heatmapLayerRef.current;
+    if (!g) return;
+    g.clear();
+    if (!showHeatmap || heatmapCells.length === 0) return;
+
+    const maxCount = Math.max(...heatmapCells.map((c) => c.count));
+    for (const cell of heatmapCells) {
+      // Warmer and more opaque with more observations -- a supervisor should
+      // be able to tell "busy" from "very busy" at a glance, not just "used".
+      const intensity = maxCount > 0 ? cell.count / maxCount : 0;
+      const colour = intensity > 0.66 ? 0xdc2626 : intensity > 0.33 ? 0xf59e0b : 0x22c55e;
+      g.rect(
+        cell.cellX * heatmapCellSizeMm,
+        cell.cellY * heatmapCellSizeMm,
+        heatmapCellSizeMm,
+        heatmapCellSizeMm,
+      ).fill({ color: colour, alpha: 0.15 + intensity * 0.35 });
+    }
+  }
+
   // --- Init ---------------------------------------------------------------
 
   useEffect(() => {
@@ -275,6 +320,11 @@ export default function LiveMapCanvas({
       viewport.addChild(staticLayer);
       staticLayerRef.current = staticLayer;
 
+      const heatmapLayer = new Graphics();
+      heatmapLayer.eventMode = "none";
+      viewport.addChild(heatmapLayer);
+      heatmapLayerRef.current = heatmapLayer;
+
       const liveLayer = new Graphics();
       liveLayer.eventMode = "none";
       viewport.addChild(liveLayer);
@@ -309,6 +359,22 @@ export default function LiveMapCanvas({
           )
             .fill({ color: 0xdc2626, alpha: 0.18 })
             .stroke({ width: 3 / scale, color: 0xdc2626, alpha: 0.9 });
+        }
+
+        // Bottleneck edges pulse gently -- drawn in the ticker (not the
+        // static layer) purely for that pulse; the underlying data only
+        // changes on the next rollup, same cadence as the heatmap.
+        if (bottleneckEdgesRef.current.length > 0) {
+          const pulse = 0.5 + 0.5 * Math.sin(Date.now() / 400);
+          for (const edge of bottleneckEdgesRef.current) {
+            g.moveTo(edge.fromXMm, edge.fromYMm)
+              .lineTo(edge.toXMm, edge.toYMm)
+              .stroke({
+                width: (5 + pulse * 3) / scale,
+                color: 0x9333ea,
+                alpha: 0.55 + pulse * 0.35,
+              });
+          }
         }
 
         for (const route of routesRef.current) {
@@ -359,6 +425,7 @@ export default function LiveMapCanvas({
 
       setIsReady(true);
       drawStatic();
+      drawHeatmap();
     })();
 
     return () => {
@@ -369,6 +436,7 @@ export default function LiveMapCanvas({
       appRef.current = null;
       viewportRef.current = null;
       staticLayerRef.current = null;
+      heatmapLayerRef.current = null;
       liveLayerRef.current = null;
       if (currentViewport) {
         try {
@@ -395,6 +463,12 @@ export default function LiveMapCanvas({
     drawStatic();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [locations, features, zoneTypes, navGraph, showNavGraph, isReady]);
+
+  useEffect(() => {
+    if (!isReady) return;
+    drawHeatmap();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [heatmapCells, showHeatmap, heatmapCellSizeMm, isReady]);
 
   useEffect(() => {
     const viewport = viewportRef.current;

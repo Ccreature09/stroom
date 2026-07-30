@@ -17,7 +17,10 @@ import type { Point } from "@/lib/warehouse-map/geometry";
 import LiveMapCanvas from "./live-map-canvas";
 import BlockagePanel from "./blockage-panel";
 import AssetRoster from "./asset-roster";
+import AnalyticsPanel from "./analytics-panel";
 import { useLiveMap } from "./use-live-map";
+import type { BottleneckDTO } from "./traffic-actions";
+import type { HeatmapCell } from "@/lib/warehouse-map/traffic";
 
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
@@ -78,6 +81,9 @@ export default function LiveMapView({
   blockages,
   initialAssets,
   canReportBlockages,
+  bottlenecks,
+  heatmapCells,
+  heatmapCellSizeMm,
 }: {
   warehouseId: number;
   halls: HallDTO[];
@@ -91,11 +97,15 @@ export default function LiveMapView({
   blockages: BlockageDTO[];
   initialAssets: LiveAssetDTO[];
   canReportBlockages: boolean;
+  bottlenecks: BottleneckDTO[];
+  heatmapCells: HeatmapCell[];
+  heatmapCellSizeMm: number;
 }) {
   const router = useRouter();
   const [, startTransition] = useTransition();
   const [isPaused, setIsPaused] = useState(false);
   const [showNavGraph, setShowNavGraph] = useState(false);
+  const [showHeatmap, setShowHeatmap] = useState(false);
   const [pickedPoint, setPickedPoint] = useState<Point | null>(null);
   const [isPicking, setIsPicking] = useState(false);
 
@@ -225,6 +235,15 @@ export default function LiveMapView({
           }}
           canReport={canReportBlockages}
         />
+
+        <AnalyticsPanel
+          warehouseId={warehouseId}
+          hallId={hall.hallId}
+          bottlenecks={bottlenecks}
+          showHeatmap={showHeatmap}
+          onToggleHeatmap={setShowHeatmap}
+          onRefreshed={() => startTransition(() => router.refresh())}
+        />
       </div>
 
       <div className="relative flex min-w-0 flex-1 items-center justify-center bg-muted/30 p-4">
@@ -238,6 +257,10 @@ export default function LiveMapView({
             navGraph={navGraph}
             showNavGraph={showNavGraph}
             blockages={blockages}
+            heatmapCells={heatmapCells}
+            showHeatmap={showHeatmap}
+            heatmapCellSizeMm={heatmapCellSizeMm}
+            bottleneckEdges={bottlenecks}
             assets={assetList}
             routes={[]}
             pickingPoint={isPicking}
