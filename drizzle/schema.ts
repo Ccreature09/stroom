@@ -1864,6 +1864,197 @@ export const routePlans = pgTable(
 );
 
 // ---------------------------------------------------------------------------
+// Live map
+// ---------------------------------------------------------------------------
+
+// Where each asset is *now*. One row per asset, upserted -- not an append log.
+//
+// Live positions travel over a Realtime presence channel and never touch this
+// table at their true rate; 200 workers at 1 Hz would be 17M rows a day of
+// data whose value expires in seconds. This is the snapshot a page load reads
+// before the channel starts delivering, written on state change or every
+// ~15 s, whichever comes first.
+export const assetPositions = pgTable(
+  "asset_positions",
+  {
+    assetPositionId: serial("asset_position_id").primaryKey().notNull(),
+    organizationId: integer("organization_id").notNull(),
+    warehouseId: integer("warehouse_id").notNull(),
+    hallId: integer("hall_id"),
+    assetKind: varchar("asset_kind", { length: 20 }).notNull(),
+    /** employee_id or mhe unit id, depending on asset_kind. */
+    assetRefId: integer("asset_ref_id").notNull(),
+
+    xMm: integer("x_mm").notNull(),
+    yMm: integer("y_mm").notNull(),
+    floorLevel: integer("floor_level").default(1).notNull(),
+    headingDeg: integer("heading_deg"),
+    /** Nearest graph node, for congestion and map-matching. */
+    nodeId: integer("node_id"),
+    /** Edge the asset was map-matched onto, if any. */
+    edgeId: integer("edge_id"),
+
+    // Most warehouses have no RTLS. Modelling the source explicitly is what
+    // lets a scan-derived estimate and a UWB fix coexist honestly instead of
+    // pretending both are ground truth.
+    source: varchar({ length: 20 }).default("SCAN").notNull(),
+    confidence: numeric({ precision: 3, scale: 2 }).default("1.00").notNull(),
+
+    status: varchar({ length: 20 }).default("IDLE").notNull(),
+    routePlanId: integer("route_plan_id"),
+    observedAt: timestamp("observed_at", {
+      withTimezone: true,
+      mode: "string",
+    }).default(sql`CURRENT_TIMESTAMP`),
+    updatedAt: timestamp("updated_at", {
+      withTimezone: true,
+      mode: "string",
+    }).default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    index("idx_asset_positions_warehouse").using(
+      "btree",
+      table.warehouseId.asc().nullsLast().op("int4_ops"),
+      table.hallId.asc().nullsLast().op("int4_ops"),
+    ),
+    foreignKey({
+      columns: [table.warehouseId],
+      foreignColumns: [warehouses.warehouseId],
+      name: "asset_positions_warehouse_id_fkey",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.routePlanId],
+      foreignColumns: [routePlans.routePlanId],
+      name: "asset_positions_route_plan_id_fkey",
+    }).onDelete("set null"),
+    unique("uq_asset_positions_asset").on(table.assetKind, table.assetRefId),
+    check(
+      "chk_asset_kind",
+      sql`(asset_kind)::text = ANY ((ARRAY['EMPLOYEE'::character varying, 'MHE'::character varying])::text[])`,
+    ),
+    check(
+      "chk_asset_position_source",
+      sql`(source)::text = ANY ((ARRAY['SCAN'::character varying, 'TASK_INFERRED'::character varying, 'MHE_TELEMETRY'::character varying, 'RTLS_UWB'::character varying, 'WIFI_RSSI'::character varying, 'BLE'::character varying, 'MANUAL'::character varying])::text[])`,
+    ),
+    check(
+      "chk_asset_position_confidence",
+      sql`(confidence >= 0) AND (confidence <= 1)`,
+    ),
+  ],
+);
+
+// Downsampled trail, for heatmaps and travel analytics -- never for the live
+// view. Deliberately separate from asset_positions so retention can be short
+// on identified traces without losing the current snapshot (see §5.8: this is
+// regulated data in the EU).
+export const assetPositionHistory = pgTable(
+  "asset_position_history",
+  {
+    historyId: serial("history_id").primaryKey().notNull(),
+    organizationId: integer("organization_id").notNull(),
+    warehouseId: integer("warehouse_id").notNull(),
+    hallId: integer("hall_id"),
+    assetKind: varchar("asset_kind", { length: 20 }).notNull(),
+    assetRefId: integer("asset_ref_id").notNull(),
+    xMm: integer("x_mm").notNull(),
+    yMm: integer("y_mm").notNull(),
+    floorLevel: integer("floor_level").default(1).notNull(),
+    edgeId: integer("edge_id"),
+    source: varchar({ length: 20 }).default("SCAN").notNull(),
+    observedAt: timestamp("observed_at", {
+      withTimezone: true,
+      mode: "string",
+    }).notNull(),
+  },
+  (table) => [
+    index("idx_asset_position_history_scan").using(
+      "btree",
+      table.warehouseId.asc().nullsLast().op("int4_ops"),
+      table.observedAt.desc().nullsLast().op("timestamptz_ops"),
+    ),
+    index("idx_asset_position_history_asset").using(
+      "btree",
+      table.assetKind.asc().nullsLast().op("text_ops"),
+      table.assetRefId.asc().nullsLast().op("int4_ops"),
+      table.observedAt.desc().nullsLast().op("timestamptz_ops"),
+    ),
+    foreignKey({
+      columns: [table.warehouseId],
+      foreignColumns: [warehouses.warehouseId],
+      name: "asset_position_history_warehouse_id_fkey",
+    }).onDelete("cascade"),
+  ],
+);
+
+// A temporary obstruction: a spill, a dropped pallet, maintenance. Raising one
+// bumps graph_epoch, which is what invalidates every cached route crossing it
+// without needing a republish.
+export const layoutBlockages = pgTable(
+  "layout_blockages",
+  {
+    blockageId: serial("blockage_id").primaryKey().notNull(),
+    organizationId: integer("organization_id").notNull(),
+    warehouseId: integer("warehouse_id").notNull(),
+    hallId: integer("hall_id").notNull(),
+    floorLevel: integer("floor_level").default(1).notNull(),
+
+    // Explicit edge list. Resolved at report time rather than stored as
+    // geometry alone, so invalidation is an array intersection instead of a
+    // spatial query on every route.
+    edgeIds: integer("edge_ids").array().notNull(),
+    /** Optional footprint, for drawing it on the map. */
+    originXMm: integer("origin_x_mm"),
+    originYMm: integer("origin_y_mm"),
+    radiusMm: integer("radius_mm"),
+
+    reason: varchar({ length: 30 }).default("OTHER").notNull(),
+    notes: varchar({ length: 300 }),
+    reportedBy: integer("reported_by"),
+    isActive: boolean("is_active").default(true).notNull(),
+    startedAt: timestamp("started_at", {
+      withTimezone: true,
+      mode: "string",
+    }).default(sql`CURRENT_TIMESTAMP`),
+    expiresAt: timestamp("expires_at", {
+      withTimezone: true,
+      mode: "string",
+    }),
+    clearedAt: timestamp("cleared_at", {
+      withTimezone: true,
+      mode: "string",
+    }),
+  },
+  (table) => [
+    index("idx_layout_blockages_active")
+      .using(
+        "btree",
+        table.warehouseId.asc().nullsLast().op("int4_ops"),
+        table.hallId.asc().nullsLast().op("int4_ops"),
+      )
+      .where(sql`(is_active = true)`),
+    foreignKey({
+      columns: [table.warehouseId],
+      foreignColumns: [warehouses.warehouseId],
+      name: "layout_blockages_warehouse_id_fkey",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.hallId],
+      foreignColumns: [halls.hallId],
+      name: "layout_blockages_hall_id_fkey",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.reportedBy],
+      foreignColumns: [employees.employeeId],
+      name: "layout_blockages_reported_by_fkey",
+    }).onDelete("set null"),
+    check(
+      "chk_blockage_reason",
+      sql`(reason)::text = ANY ((ARRAY['SPILL'::character varying, 'DROPPED_LOAD'::character varying, 'MAINTENANCE'::character varying, 'EQUIPMENT_FAILURE'::character varying, 'CONGESTION'::character varying, 'SAFETY'::character varying, 'OTHER'::character varying])::text[])`,
+    ),
+  ],
+);
+
+// ---------------------------------------------------------------------------
 // Layout lifecycle: versions, drafts, underlays
 // ---------------------------------------------------------------------------
 
