@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useTransition } from "react";
-import type { LocationDTO, RoutingVehicleDTO } from "./types";
+import type { LocationDTO, RoutingVehicleDTO } from "@/lib/warehouse-map/types";
 import { previewRoute, type RoutePreview } from "./routing-actions";
 
 import { Button } from "@/components/ui/button";

@@ -101,6 +101,73 @@ export function revalidateLayout(warehouseId: number) {
   revalidatePath(`/warehouses/${warehouseId}/layout-designer`);
 }
 
+export function revalidateLiveMap(warehouseId: number) {
+  revalidatePath(`/warehouses/${warehouseId}/live-map`);
+}
+
+export type LiveMapContext = LayoutContext & {
+  /** Raising or clearing a blockage is directing floor work. */
+  canReportBlockages: boolean;
+};
+
+/**
+ * Access check for the live map.
+ *
+ * Deliberately NOT requireLayoutContext: watching the floor is a different
+ * job from editing the layout, and a shift supervisor who should see where
+ * everyone is has no business being able to move racking. Viewing needs
+ * `can_view_metrics`; reporting a blockage needs `can_assign_tasks`, because
+ * it redirects people.
+ *
+ * This gate is also the privacy boundary (docs §5.8). Individual worker
+ * location is regulated in the EU, so it must sit behind an explicit
+ * permission rather than being visible to anyone with a login.
+ */
+export async function requireLiveMapContext(
+  warehouseId: number,
+): Promise<LiveMapContext> {
+  const supabase = await createClient();
+  const { data } = await supabase.auth.getClaims();
+  const userId = data?.claims?.sub;
+  if (!userId) redirect("/sign-in");
+
+  const [employee] = await db
+    .select({
+      employeeId: employees.employeeId,
+      organizationId: employees.organizationId,
+      canViewMetrics: positionTypes.canViewMetrics,
+      canAssignTasks: positionTypes.canAssignTasks,
+    })
+    .from(employees)
+    .innerJoin(positionTypes, eq(employees.positionId, positionTypes.positionId))
+    .where(and(eq(employees.authUserId, userId), eq(employees.isActive, true)))
+    .limit(1);
+
+  if (!employee) redirect("/sign-in");
+  if (employee.canViewMetrics !== true) {
+    redirect(`/warehouses/${warehouseId}`);
+  }
+
+  const [warehouse] = await db
+    .select({ warehouseId: warehouses.warehouseId })
+    .from(warehouses)
+    .where(
+      and(
+        eq(warehouses.warehouseId, warehouseId),
+        eq(warehouses.organizationId, employee.organizationId),
+      ),
+    )
+    .limit(1);
+
+  if (!warehouse) redirect("/warehouses");
+
+  return {
+    organizationId: employee.organizationId,
+    employeeId: employee.employeeId,
+    canReportBlockages: employee.canAssignTasks === true,
+  };
+}
+
 export async function hallBelongsToWarehouse(
   hallId: number,
   warehouseId: number,

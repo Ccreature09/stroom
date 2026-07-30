@@ -6,13 +6,13 @@ import type {
   LocationDTO,
   LocationPatch,
   ZoneTypeDTO,
-} from "./types";
+} from "@/lib/warehouse-map/types";
 import {
   LOCATION_TYPES,
   LOCATION_TYPE_LABELS,
   parseLocationType,
   type LocationType,
-} from "./naming";
+} from "@/lib/warehouse-map/naming";
 import { DraftNumberField, DraftTextField } from "./draft-fields";
 
 import { Button } from "@/components/ui/button";

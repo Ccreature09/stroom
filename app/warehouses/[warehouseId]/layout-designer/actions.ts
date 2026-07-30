@@ -18,22 +18,22 @@ import {
   requireLayoutContext,
   revalidateLayout,
   zoneBelongsToWarehouse,
-} from "./layout-context";
+} from "@/lib/warehouse-map/context";
 import {
   parseLocationType,
   renderLocationTemplate,
   validateTemplate,
   type LocationType,
-} from "./naming";
-import { validateAttrs } from "./feature-kinds";
+} from "@/lib/warehouse-map/naming";
+import { validateAttrs } from "@/lib/warehouse-map/feature-kinds";
 import {
   computeEnvelope,
   normalizeRotation,
   sanitizePoints,
   type GeometryKind,
-} from "./geometry";
-import { hallStateChangeCount } from "./types";
-import type { FeaturePatch, HallState, NewFeatureDraft } from "./types";
+} from "@/lib/warehouse-map/geometry";
+import { hallStateChangeCount } from "@/lib/warehouse-map/types";
+import type { FeaturePatch, HallState, NewFeatureDraft } from "@/lib/warehouse-map/types";
 
 export type PublishConflict = {
   currentVersion: number;

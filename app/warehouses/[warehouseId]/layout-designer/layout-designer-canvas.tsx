@@ -20,7 +20,7 @@ import type {
   NavGraphDTO,
   UnderlayDTO,
   ZoneTypeDTO,
-} from "./types";
+} from "@/lib/warehouse-map/types";
 import {
   groupByBayFootprint,
   groupKeyFor,
@@ -28,13 +28,13 @@ import {
   locationIdsInGroup,
   resolveZoneColor,
   sortFeaturesForRender,
-} from "./types";
+} from "@/lib/warehouse-map/types";
 import {
   footprintVertices,
   hitTestFeature,
   scaleGeometry,
   type Point,
-} from "./geometry";
+} from "@/lib/warehouse-map/geometry";
 
 import { Button } from "@/components/ui/button";
 import { ZoomIn, ZoomOut } from "lucide-react";

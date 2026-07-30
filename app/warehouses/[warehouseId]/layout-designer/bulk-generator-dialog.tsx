@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState, useTransition } from "react";
-import type { ZoneTypeDTO, HallDTO } from "./types";
+import type { ZoneTypeDTO, HallDTO } from "@/lib/warehouse-map/types";
 import { bulkGenerateLocations, type BulkGenerateResult } from "./actions";
 
 import { Button } from "@/components/ui/button";

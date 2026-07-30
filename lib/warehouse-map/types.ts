@@ -141,6 +141,33 @@ export type NavEdgeDTO = {
   isGenerated: boolean;
 };
 
+export type BlockageDTO = {
+  blockageId: number;
+  edgeIds: number[];
+  originXMm: number | null;
+  originYMm: number | null;
+  radiusMm: number | null;
+  reason: string;
+  notes: string | null;
+  startedAt: string | null;
+  expiresAt: string | null;
+};
+
+export type LiveAssetDTO = {
+  assetKind: "EMPLOYEE" | "MHE";
+  assetRefId: number;
+  label: string;
+  xMm: number;
+  yMm: number;
+  floorLevel: number;
+  headingDeg: number | null;
+  source: string;
+  confidence: number;
+  status: string;
+  routePlanId: number | null;
+  observedAt: string | null;
+};
+
 export type RoutingVehicleDTO = {
   mheTypeId: number;
   name: string;

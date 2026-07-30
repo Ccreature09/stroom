@@ -11,7 +11,7 @@ import {
   navNodes,
   routePlans,
 } from "@/drizzle/schema";
-import { requireLayoutContext, revalidateLayout } from "./layout-context";
+import { requireLayoutContext, revalidateLayout } from "@/lib/warehouse-map/context";
 import {
   buildRoutingGraph,
   findRoute,
@@ -19,8 +19,8 @@ import {
   sequencePickPath,
   type CompiledRoutingGraph,
   type Traveller,
-} from "./routing";
-import type { Point } from "./geometry";
+} from "@/lib/warehouse-map/routing";
+import type { Point } from "@/lib/warehouse-map/geometry";
 
 export type RoutePreview = {
   error?: string;

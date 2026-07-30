@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { cssColorForZone } from "./types";
+import { cssColorForZone } from "@/lib/warehouse-map/types";
 import type {
   HallDTO,
   HallPatch,
@@ -13,7 +13,7 @@ import type {
   UnderlayDTO,
   ZonePatch,
   ZoneTypeDTO,
-} from "./types";
+} from "@/lib/warehouse-map/types";
 import UnderlayPanel from "./underlay-panel";
 import NavGraphPanel from "./nav-graph-panel";
 import RoutePanel from "./route-panel";

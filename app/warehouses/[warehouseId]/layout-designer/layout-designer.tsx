@@ -40,7 +40,7 @@ import type {
   UnderlayDTO,
   ZonePatch,
   ZoneTypeDTO,
-} from "./types";
+} from "@/lib/warehouse-map/types";
 import {
   DRAFT_STATE_VERSION,
   EMPTY_HALL_STATE,
@@ -48,8 +48,8 @@ import {
   applyHallStateToLocations,
   applyHallStateToZones,
   hallStateChangeCount,
-} from "./types";
-import { defaultPointsForDrawnRect } from "./geometry";
+} from "@/lib/warehouse-map/types";
+import { defaultPointsForDrawnRect } from "@/lib/warehouse-map/geometry";
 import { commitHallStates, type PublishConflict } from "./actions";
 import type { RoutePreview } from "./routing-actions";
 import { saveHallDraft } from "./lifecycle-actions";

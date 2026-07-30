@@ -2,7 +2,7 @@
 
 import { useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import type { HallDTO, UnderlayDTO } from "./types";
+import type { HallDTO, UnderlayDTO } from "@/lib/warehouse-map/types";
 import {
   calibrateHallUnderlay,
   deleteHallUnderlay,

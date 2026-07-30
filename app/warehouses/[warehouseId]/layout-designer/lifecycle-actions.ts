@@ -9,9 +9,9 @@ import {
   hallBelongsToWarehouse,
   requireLayoutContext,
   revalidateLayout,
-} from "./layout-context";
-import type { HallState } from "./types";
-import { DRAFT_STATE_VERSION, hallStateChangeCount } from "./types";
+} from "@/lib/warehouse-map/context";
+import type { HallState } from "@/lib/warehouse-map/types";
+import { DRAFT_STATE_VERSION, hallStateChangeCount } from "@/lib/warehouse-map/types";
 
 const MAX_UNDERLAY_BYTES = 25 * 1024 * 1024;
 const ALLOWED_UNDERLAY_TYPES = [

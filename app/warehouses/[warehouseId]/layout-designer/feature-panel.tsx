@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import type { FeatureDTO, FeatureKindDTO, FeaturePatch, ZoneTypeDTO } from "./types";
+import type { FeatureDTO, FeatureKindDTO, FeaturePatch, ZoneTypeDTO } from "@/lib/warehouse-map/types";
 import {
   CATEGORY_LABELS,
   CATEGORY_ORDER,
@@ -9,7 +9,7 @@ import {
   type AttrSpec,
   type FeatureAttrs,
   type FeatureCategory,
-} from "./feature-kinds";
+} from "@/lib/warehouse-map/feature-kinds";
 import { DraftNumberField, DraftTextField } from "./draft-fields";
 
 import { Button } from "@/components/ui/button";

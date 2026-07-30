@@ -22,7 +22,7 @@ import {
   UNDERLAY_BUCKET,
   UNDERLAY_SIGNED_URL_TTL_SECONDS,
   createStorageClient,
-} from "./layout-context";
+} from "@/lib/warehouse-map/context";
 import {
   DRAFT_STATE_VERSION,
   type HallState,
@@ -30,14 +30,14 @@ import {
   type RoutingVehicleDTO,
   type RecoveredDraft,
   type UnderlayDTO,
-} from "./types";
+} from "@/lib/warehouse-map/types";
 import { createClient } from "@/lib/server";
 import { createHall } from "./actions";
 import LayoutDesigner from "./layout-designer";
-import { sanitizePoints } from "./geometry";
-import type { GeometryKind } from "./geometry";
-import type { FeatureCategory, FeatureAttrs } from "./feature-kinds";
-import { parseLocationType } from "./naming";
+import { sanitizePoints } from "@/lib/warehouse-map/geometry";
+import type { GeometryKind } from "@/lib/warehouse-map/geometry";
+import type { FeatureCategory, FeatureAttrs } from "@/lib/warehouse-map/feature-kinds";
+import { parseLocationType } from "@/lib/warehouse-map/naming";
 
 import {
   Card,

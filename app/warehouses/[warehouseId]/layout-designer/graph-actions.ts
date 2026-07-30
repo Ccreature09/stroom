@@ -16,12 +16,12 @@ import {
   hallBelongsToWarehouse,
   requireLayoutContext,
   revalidateLayout,
-} from "./layout-context";
-import { sanitizePoints, type GeometryKind } from "./geometry";
-import type { FeatureAttrs } from "./feature-kinds";
-import { parseLocationType } from "./naming";
-import { compileNavigationGraph, type CompileWarning } from "./graph-compiler";
-import type { FeatureDTO, LocationDTO } from "./types";
+} from "@/lib/warehouse-map/context";
+import { sanitizePoints, type GeometryKind } from "@/lib/warehouse-map/geometry";
+import type { FeatureAttrs } from "@/lib/warehouse-map/feature-kinds";
+import { parseLocationType } from "@/lib/warehouse-map/naming";
+import { compileNavigationGraph, type CompileWarning } from "@/lib/warehouse-map/graph-compiler";
+import type { FeatureDTO, LocationDTO } from "@/lib/warehouse-map/types";
 
 export type CompileGraphResult = {
   error?: string;
