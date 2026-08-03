@@ -58,7 +58,7 @@ Each organization has these tables:
 ---
 
 ## Lookup Tables
-* [[Inventory Status Types]] * [[MHE Types]] * [[Position Types]] * [[Task Status Types]] * [[Task Types]] * [[Zone Types]]
+* [[Inventory Status Types]] * [[MHE Types]] * [[Position Types]] * [[Task Status Types]] * [[Task Types]]
 
 ---
 
@@ -98,7 +98,7 @@ This is a shared-database, shared-schema multi-tenant platform: every tenant's r
      ADD CONSTRAINT fk_shipments_carrier   FOREIGN KEY (organization_id, carrier_id)   REFERENCES carriers   (organization_id, carrier_id);
    ```
    For nullable columns (e.g. `carrier_id`), Postgres's default `MATCH SIMPLE` behavior skips the composite check whenever any column in the pair is `NULL`, so this doesn't force a carrier to be chosen early.
-3. **Tables scoped by `warehouse_id` alone don't need this pattern** — `locations`, `zones`, `departments`, `inventory`, `pallets`, and every Task table inherit their tenant automatically because a `warehouse_id` can only ever belong to one `organization_id`. The risk only exists where a row stores **two or more** tenant-adjacent references side by side (an org + a warehouse, or an org + a customer/supplier/carrier) that could, in theory, disagree.
+3. **Tables scoped by `warehouse_id` alone don't need this pattern** — `locations`, `departments`, `inventory`, `pallets`, and every Task table inherit their tenant automatically because a `warehouse_id` can only ever belong to one `organization_id`. The risk only exists where a row stores **two or more** tenant-adjacent references side by side (an org + a warehouse, or an org + a customer/supplier/carrier) that could, in theory, disagree.
 4. **`items`** was found with no `organization_id` at all and a globally-unique `sku` — fixed by adding `organization_id` and scoping `UNIQUE (organization_id, sku)`, since `item_id` is already the single global key referenced everywhere else (no composite FK propagation needed downstream).
 5. **`tasks`** gained a denormalized `warehouse_id` for the same reason `sales_orders` gained `organization_id` — without it, "list tasks for warehouse X" required joining through whichever child table happened to carry a `location_id`.
 

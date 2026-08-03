@@ -8,7 +8,6 @@ The `locations` table defines every physical coordinate in the warehouse where s
 | :------------------- | :---------------------------------------------------------- | :----------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `location_id`        | `SERIAL PRIMARY KEY`                                        | **NOT NULL** | Unique global identifier for this specific storage slot or door[cite: 1].                                                                                        |
 | `warehouse_id`       | `INT REFERENCES warehouses(warehouse_id) ON DELETE CASCADE` | **NOT NULL** | Which facility this physical location belongs to[cite: 1].                                                                                                       |
-| `zone_id`            | `INT REFERENCES zones(zone_id) ON DELETE RESTRICT`          | **NOT NULL** | Foreign key inheriting operational scanning behaviors, permanence, and clearances from the parent zone configuration.                                            |
 | `location_code`      | `VARCHAR(50) UNIQUE NOT NULL`                               | **NOT NULL** | Barcode text scanned by operators (e.g., `'WH1-BULK-04-12-3'`, `'DOCK-01'`)[cite: 1].                                                                            |
 | `aisle`              | `INT`                                                       | _NULL_       | Alleyway corridor number (Standard racking only)[cite: 1].                                                                                                       |
 | `bay`                | `INT`                                                       | _NULL_       | Vertical rack section (Standard racking only)[cite: 1].                                                                                                          |
@@ -19,6 +18,7 @@ The `locations` table defines every physical coordinate in the warehouse where s
 | `height_mm`          | `INT`                                                       | _NULL_       | The exact physical clearance height in millimeters[cite: 1]. Left `NULL` for open vertical space zones (floor drop, docks) to bypass height validation[cite: 1]. |
 | `max_weight_kg`      | `INT`                                                       | _NULL_       | Structural weight limit of this specific rack shelf[cite: 1]. Left `NULL` for solid concrete floors to bypass load validation[cite: 1].                          |
 | `is_blocked`         | `BOOLEAN DEFAULT FALSE`                                     | **NOT NULL** | Flag to manually stop system allocation and trigger red visual alerts (e.g., damaged rack upright)[cite: 1].                                                     |
+| `is_temporary`       | `BOOLEAN DEFAULT FALSE`                                     | **NOT NULL** | Marks a staging/buffer slot (pallets waiting to move or load) as distinct from permanent storage. Replaces the earlier per-zone `storage_permanence` scheme.     |
 | `physical_x`         | `INT`                                                       | **NOT NULL** | Global X-coordinate layout anchor relative to warehouse origin (in millimeters).                                                                                 |
 | `physical_y`         | `INT`                                                       | **NOT NULL** | Global Y-coordinate layout anchor relative to warehouse origin (in millimeters).                                                                                 |
 | `physical_width_mm`  | `INT`                                                       | **NOT NULL** | The exact width footprint boundary along the layout X-axis (in millimeters).                                                                                     |
@@ -30,7 +30,7 @@ The `locations` table defines every physical coordinate in the warehouse where s
 
 ### 1. Unified Entity Mapping
 
-Dock doors, staging areas, and receiving lanes are real rows in this table instead of text fields in task records[cite: 1]. For functional areas like `'DOCK-01'`, structural racking fields (`aisle`, `bay`, `level`) remain `NULL`[cite: 1]. The node inherits behavioral configurations (like skipping barcode scans) instantly by looking up its associated `zone_id`.
+Dock doors, staging areas, and receiving lanes are real rows in this table instead of text fields in task records[cite: 1]. For functional areas like `'DOCK-01'`, structural racking fields (`aisle`, `bay`, `level`) remain `NULL`[cite: 1]. `is_temporary` flags whether the slot is staging/buffer rather than permanent storage.
 
 ### 2. PixiJS Client-Side Rendering Math
 
@@ -50,8 +50,4 @@ CHECK (rotation_degrees >= 0 AND rotation_degrees < 360);
 CREATE INDEX idx_locations_canvas_render
 ON locations (warehouse_id, physical_x, physical_y)
 WHERE is_blocked = FALSE;
-
--- Speeds up validation lookups for directed putaway rules engine checks
-CREATE INDEX idx_locations_zone_lookup
-ON locations (warehouse_id, zone_id);
 ```

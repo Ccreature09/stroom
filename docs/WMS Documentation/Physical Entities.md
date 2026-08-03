@@ -16,8 +16,7 @@ A quick reference for the real-world objects this WMS models, and which table ea
 
 | Physical thing | Table | Notes |
 | :--- | :--- | :--- |
-| A storage slot, rack shelf, or dock door | [[Locations]] | Every scannable spot in the building, including dock doors and staging lanes. |
-| A functional area (bulk storage, chilled, hazmat, dock staging) | [[Zone Types]] | Groups locations by operational rules (pickable, temperature-controlled, hazmat clearance). |
+| A storage slot, rack shelf, or dock door | [[Locations]] | Every scannable spot in the building, including dock doors and staging lanes. `is_temporary` marks a staging/buffer slot as distinct from permanent storage (see [[Zone Types]] for the removed zone-based scheme this replaced). |
 | An operational division of workers (Picking, Receiving) | [[Departments]] | Routes tasks to groups of people, not physical space. |
 
 ## Goods & Containers
