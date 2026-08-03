@@ -23,6 +23,11 @@ const WARNING_TONE: Record<string, "error" | "warn"> = {
   LANE_CROSSES_OBSTACLE: "warn",
   PORTAL_UNLINKED: "warn",
   NO_RACKING: "warn",
+  // A free-roam area that compiled to nothing is as broken as a missing
+  // aisle; the other two are the compiler telling you it had to simplify.
+  ZONE_UNUSABLE: "error",
+  ZONE_COARSENED: "warn",
+  ZONE_MESH_FALLBACK: "warn",
 };
 
 export default function NavGraphPanel({
@@ -124,8 +129,12 @@ export default function NavGraphPanel({
               <span>
                 Compiled cleanly. {result.stats?.rackRuns} rack run(s),{" "}
                 {result.stats?.inferredCorridors} inferred aisle(s),{" "}
-                {result.stats?.connectors} cross-aisle(s). All{" "}
-                {result.stats?.reachableLocationCount} locations reachable.
+                {result.stats?.connectors} cross-aisle(s)
+                {result.stats?.navigableZones
+                  ? `, ${result.stats.navigableZones} free-roam area(s) on ${result.stats.zoneNodes} node(s)`
+                  : ""}
+                . All {result.stats?.reachableLocationCount} locations
+                reachable.
               </span>
             </div>
           ) : (

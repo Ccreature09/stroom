@@ -63,6 +63,7 @@ export function DraftNumberField({
   nullable = false,
   min,
   max,
+  disabled = false,
 }: {
   id: string;
   label: string;
@@ -71,6 +72,7 @@ export function DraftNumberField({
   nullable?: boolean;
   min?: number;
   max?: number;
+  disabled?: boolean;
 }) {
   const [input, setInput] = useState(value === null ? "" : String(value));
   const [prevValue, setPrevValue] = useState(value);
@@ -100,6 +102,7 @@ export function DraftNumberField({
         min={min}
         max={max}
         value={input}
+        disabled={disabled}
         onChange={(e) => setInput(e.target.value)}
         onBlur={commit}
       />

@@ -1,14 +1,11 @@
 "use client";
 
-import { useState } from "react";
-import type { FeatureDTO, FeatureKindDTO, FeaturePatch, ZoneTypeDTO } from "@/lib/warehouse-map/types";
+import type { FeatureDTO, FeatureKindDTO, FeaturePatch } from "@/lib/warehouse-map/types";
 import {
-  CATEGORY_LABELS,
-  CATEGORY_ORDER,
   attrSpecsFor,
+  lockedResizeAxisFor,
   type AttrSpec,
   type FeatureAttrs,
-  type FeatureCategory,
 } from "@/lib/warehouse-map/feature-kinds";
 import { DraftNumberField, DraftTextField } from "./draft-fields";
 
@@ -18,26 +15,11 @@ import { Checkbox } from "@/components/ui/checkbox";
 import {
   Select,
   SelectContent,
-  SelectGroup,
   SelectItem,
-  SelectLabel,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
 import { RotateCw, Trash2, X } from "lucide-react";
-
-function groupKindsByCategory(kinds: FeatureKindDTO[]) {
-  const groups = new Map<FeatureCategory, FeatureKindDTO[]>();
-  for (const kind of kinds) {
-    const existing = groups.get(kind.category) ?? [];
-    existing.push(kind);
-    groups.set(kind.category, existing);
-  }
-  return CATEGORY_ORDER.filter((c) => groups.has(c)).map((category) => ({
-    category,
-    kinds: groups.get(category)!,
-  }));
-}
 
 /**
  * Renders one attribute field from its spec. The spec is the same object the
@@ -143,118 +125,21 @@ function AttrField({
 }
 
 /**
- * Shown after a rectangle is dragged out with the Feature tool: pick what the
- * shape *is*. The chosen kind supplies the geometry kind, default height and
- * obstacle flag, so a wall becomes a polyline and a column a rectangle
- * without the user thinking about geometry at all.
+ * Shared field body for editing one feature -- used both by the
+ * single-selection panel and, per selection in the dropdown, by the mixed
+ * multi-object panel, mirroring how LocationFields serves locations.
  */
-export function CreateFeaturePanel({
-  featureKinds,
-  onCreate,
-  onClose,
-  locked,
-}: {
-  featureKinds: FeatureKindDTO[];
-  onCreate: (kind: FeatureKindDTO) => void;
-  onClose: () => void;
-  locked: boolean;
-}) {
-  const grouped = groupKindsByCategory(featureKinds);
-  const [selectedKind, setSelectedKind] = useState<string>(
-    featureKinds[0]?.kind ?? "",
-  );
-  const chosen = featureKinds.find((k) => k.kind === selectedKind);
-
-  return (
-    <div className="flex h-full w-80 shrink-0 flex-col overflow-y-auto border-l bg-background p-5">
-      <div className="flex items-center justify-between">
-        <h2 className="text-sm font-semibold text-foreground">New feature</h2>
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={onClose}
-          className="h-8 px-2 text-xs text-muted-foreground hover:text-foreground"
-        >
-          Cancel
-        </Button>
-      </div>
-      <p className="mt-1 text-xs text-muted-foreground">
-        Staged as a draft -- nothing is saved until you click Save Map.
-      </p>
-
-      <fieldset disabled={locked} className="mt-4 space-y-3 border-0 p-0">
-        <div className="space-y-1.5">
-          <Label htmlFor="featureKind">Feature type</Label>
-          <Select value={selectedKind} onValueChange={setSelectedKind}>
-            <SelectTrigger id="featureKind" className="w-full">
-              <SelectValue placeholder="Pick a type" />
-            </SelectTrigger>
-            <SelectContent>
-              {grouped.map(({ category, kinds }) => (
-                <SelectGroup key={category}>
-                  <SelectLabel>{CATEGORY_LABELS[category]}</SelectLabel>
-                  {kinds.map((kind) => (
-                    <SelectItem key={kind.kind} value={kind.kind}>
-                      {kind.label}
-                    </SelectItem>
-                  ))}
-                </SelectGroup>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-
-        {chosen && (
-          <div className="rounded-md border bg-muted/40 p-3 text-[11px] leading-relaxed text-muted-foreground">
-            <div className="flex items-center gap-2">
-              <span
-                className="inline-block h-3 w-3 shrink-0 rounded-sm"
-                style={{ backgroundColor: chosen.defaultColor }}
-              />
-              <span className="font-medium text-foreground">
-                {chosen.label}
-              </span>
-            </div>
-            <p className="mt-1.5">
-              Drawn as {chosen.defaultGeometryKind.toLowerCase()}
-              {chosen.defaultHeightMm != null &&
-                ` · ${chosen.defaultHeightMm}mm tall`}
-              {chosen.isObstacleDefault
-                ? " · blocks travel"
-                : " · does not block travel"}
-              .
-            </p>
-          </div>
-        )}
-
-        <Button
-          type="button"
-          className="w-full"
-          disabled={!chosen}
-          onClick={() => chosen && onCreate(chosen)}
-        >
-          Create feature
-        </Button>
-      </fieldset>
-    </div>
-  );
-}
-
-export function EditFeaturePanel({
+export function FeatureFields({
   feature,
   featureKinds,
-  zoneTypes,
   onPatch,
   onDelete,
-  onClose,
   locked,
 }: {
   feature: FeatureDTO;
   featureKinds: FeatureKindDTO[];
-  zoneTypes: ZoneTypeDTO[];
   onPatch: (patch: FeaturePatch) => void;
   onDelete: () => void;
-  onClose: () => void;
   locked: boolean;
 }) {
   const meta = featureKinds.find((k) => k.kind === feature.kind);
@@ -262,6 +147,7 @@ export function EditFeaturePanel({
   const isPending = feature.featureId < 0;
   const isRectLike =
     feature.geometryKind === "RECT" || feature.geometryKind === "CIRCLE";
+  const lockedAxis = lockedResizeAxisFor(feature.kind, feature.geometryKind);
 
   function handleDelete() {
     if (
@@ -275,34 +161,6 @@ export function EditFeaturePanel({
   }
 
   return (
-    <div className="flex h-full w-80 shrink-0 flex-col overflow-y-auto border-l bg-background p-5">
-      <div className="flex items-center justify-between">
-        <h2 className="flex items-center gap-2 text-sm font-semibold text-foreground">
-          <span
-            className="inline-block h-3 w-3 shrink-0 rounded-sm"
-            style={{
-              backgroundColor:
-                feature.color ?? meta?.defaultColor ?? "#64748b",
-            }}
-          />
-          {feature.label || meta?.label || feature.kind}
-          {isPending && (
-            <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700">
-              pending
-            </span>
-          )}
-        </h2>
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={onClose}
-          className="h-8 px-2 text-xs text-muted-foreground hover:text-foreground"
-        >
-          <X className="mr-1 h-3.5 w-3.5" />
-          Close
-        </Button>
-      </div>
-
       <fieldset
         disabled={locked}
         className="mt-4 min-w-0 space-y-3 border-0 p-0"
@@ -333,28 +191,6 @@ export function EditFeaturePanel({
           placeholder={meta?.label ?? feature.kind}
           onCommit={(v) => onPatch({ label: v || null })}
         />
-
-        <div className="space-y-1.5">
-          <Label>Zone</Label>
-          <Select
-            value={feature.zoneId != null ? String(feature.zoneId) : "none"}
-            onValueChange={(val) =>
-              onPatch({ zoneId: val === "none" ? null : Number(val) })
-            }
-          >
-            <SelectTrigger className="w-full">
-              <SelectValue placeholder="No zone" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="none">No zone</SelectItem>
-              {zoneTypes.map((z) => (
-                <SelectItem key={z.zoneId} value={String(z.zoneId)}>
-                  {z.name}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
 
         {specs.length > 0 && (
           <div className="space-y-3 border-t pt-3">
@@ -429,6 +265,7 @@ export function EditFeaturePanel({
                 label="Width (mm)"
                 value={feature.widthMm}
                 min={1}
+                disabled={lockedAxis === "width"}
                 onCommit={(v) => v !== null && onPatch({ widthMm: v })}
               />
               <DraftNumberField
@@ -436,9 +273,16 @@ export function EditFeaturePanel({
                 label="Length (mm)"
                 value={feature.lengthMm}
                 min={1}
+                disabled={lockedAxis === "length"}
                 onCommit={(v) => v !== null && onPatch({ lengthMm: v })}
               />
             </div>
+          )}
+          {isRectLike && lockedAxis === "width" && (
+            <p className="text-[11px] leading-snug text-muted-foreground">
+              Width is a fixed spec for this kind -- only length can be
+              resized, on the canvas or here.
+            </p>
           )}
           <DraftNumberField
             id={`feature-rot-${feature.featureId}`}
@@ -508,6 +352,63 @@ export function EditFeaturePanel({
           {isPending ? "Discard (unsaved)" : "Delete feature"}
         </Button>
       </fieldset>
+  );
+}
+
+export function EditFeaturePanel({
+  feature,
+  featureKinds,
+  onPatch,
+  onDelete,
+  onClose,
+  locked,
+}: {
+  feature: FeatureDTO;
+  featureKinds: FeatureKindDTO[];
+  onPatch: (patch: FeaturePatch) => void;
+  onDelete: () => void;
+  onClose: () => void;
+  locked: boolean;
+}) {
+  const meta = featureKinds.find((k) => k.kind === feature.kind);
+  const isPending = feature.featureId < 0;
+
+  return (
+    <div className="flex h-full w-80 shrink-0 flex-col overflow-y-auto border-l bg-background p-5">
+      <div className="flex items-center justify-between">
+        <h2 className="flex items-center gap-2 text-sm font-semibold text-foreground">
+          <span
+            className="inline-block h-3 w-3 shrink-0 rounded-sm"
+            style={{
+              backgroundColor:
+                feature.color ?? meta?.defaultColor ?? "#64748b",
+            }}
+          />
+          {feature.label || meta?.label || feature.kind}
+          {isPending && (
+            <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700">
+              pending
+            </span>
+          )}
+        </h2>
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={onClose}
+          className="h-8 px-2 text-xs text-muted-foreground hover:text-foreground"
+        >
+          <X className="mr-1 h-3.5 w-3.5" />
+          Close
+        </Button>
+      </div>
+      <FeatureFields
+        key={feature.featureId}
+        feature={feature}
+        featureKinds={featureKinds}
+        onPatch={onPatch}
+        onDelete={onDelete}
+        locked={locked}
+      />
     </div>
   );
 }

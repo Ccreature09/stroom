@@ -1,8 +1,11 @@
 "use client";
 
 import { useMemo, useState, useTransition } from "react";
-import type { ZoneTypeDTO, HallDTO } from "@/lib/warehouse-map/types";
+import type { HallDTO } from "@/lib/warehouse-map/types";
+import type { Point } from "@/lib/warehouse-map/geometry";
 import { bulkGenerateLocations, type BulkGenerateResult } from "./actions";
+
+export type BulkGeneratorKind = "racking" | "floor_line" | "shelving";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -24,40 +27,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Boxes, Rows3, LayoutGrid } from "lucide-react";
-
-function ZoneSelect({
-  zoneTypes,
-  value,
-  onChange,
-}: {
-  zoneTypes: ZoneTypeDTO[];
-  value: string;
-  onChange: (value: string) => void;
-}) {
-  return (
-    <>
-      <input
-        type="hidden"
-        name="zoneId"
-        value={value === "none" ? "" : value}
-      />
-      <Select value={value} onValueChange={onChange}>
-        <SelectTrigger className="w-full">
-          <SelectValue placeholder="No zone" />
-        </SelectTrigger>
-        <SelectContent>
-          <SelectItem value="none">No zone</SelectItem>
-          {zoneTypes.map((z) => (
-            <SelectItem key={z.zoneId} value={String(z.zoneId)}>
-              {z.name}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
-    </>
-  );
-}
+import { Boxes, Rows3, LayoutGrid, Crosshair } from "lucide-react";
 
 function OrientationSelect({
   value,
@@ -107,6 +77,86 @@ function TemplateField({
   );
 }
 
+/**
+ * A repeating rhythm along the generator's primary axis -- "1, empty, 2,
+ * empty, 2" for a block of single aisles then wider double blocks, each
+ * separated by a cross-aisle gap. Optional: blank keeps the plain contiguous
+ * layout this generator always had. See parsePattern in actions.ts for the
+ * exact mini-syntax this parses.
+ */
+function PatternField({
+  id,
+  name,
+  label,
+  placeholder,
+}: {
+  id: string;
+  name: string;
+  label: string;
+  placeholder: string;
+}) {
+  return (
+    <div className="space-y-1.5 sm:col-span-3">
+      <Label htmlFor={id} className="text-xs">
+        {label}
+      </Label>
+      <Input
+        id={id}
+        name={name}
+        placeholder={placeholder}
+        className="font-mono text-xs"
+      />
+      <p className="text-[11px] text-muted-foreground">
+        Optional. Comma-separated counts and <code>empty</code> markers,
+        repeated until the count above is placed -- &quot;{placeholder}&quot;
+        lays down that rhythm and cycles it, cutting the last run short rather
+        than overshooting. Leave blank for one contiguous run.
+      </p>
+    </div>
+  );
+}
+
+/**
+ * Replaces manual Start X/Y number entry with a canvas click. Generation
+ * coordinates are exact to the millimetre and this hall could be tens of
+ * metres across, so typing a plausible-sounding number was really a guess;
+ * clicking the spot you actually mean is the same information with none of
+ * the arithmetic. The picked point still reaches the server the same way --
+ * hidden startX/startY inputs -- so bulkGenerateLocations needed no changes.
+ */
+function StartPointField({
+  startPoint,
+  onRequestPick,
+}: {
+  startPoint: Point | null;
+  onRequestPick: () => void;
+}) {
+  return (
+    <div className="space-y-1.5 sm:col-span-2">
+      <Label className="text-xs">Start point</Label>
+      <div className="flex items-center gap-2">
+        <div className="flex h-9 flex-1 items-center rounded-md border bg-muted/30 px-3 text-xs text-muted-foreground">
+          {startPoint
+            ? `X: ${startPoint.x}mm · Y: ${startPoint.y}mm`
+            : "Not set yet"}
+        </div>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={onRequestPick}
+          className="h-9 shrink-0 text-xs"
+        >
+          <Crosshair className="mr-1.5 h-3.5 w-3.5" />
+          {startPoint ? "Re-pick on canvas" : "Pick on canvas"}
+        </Button>
+      </div>
+      <input type="hidden" name="startX" value={startPoint?.x ?? 0} />
+      <input type="hidden" name="startY" value={startPoint?.y ?? 0} />
+    </div>
+  );
+}
+
 function ResultBanner({ result }: { result: BulkGenerateResult | null }) {
   if (!result) return null;
   if (result.error) {
@@ -134,15 +184,23 @@ function ResultBanner({ result }: { result: BulkGenerateResult | null }) {
 export function BulkGenerateDialog({
   warehouseId,
   hall,
-  zoneTypes,
   open,
   onOpenChange,
+  startPoints,
+  onRequestPick,
 }: {
   warehouseId: number;
   hall: HallDTO;
-  zoneTypes: ZoneTypeDTO[];
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /** One picked point per generator type -- picking for racking doesn't
+   *  disturb whatever was already picked for shelving. Lives in the parent
+   *  (layout-designer.tsx), not here: this whole component unmounts while
+   *  the dialog is closed for picking (see HallToolbar's `{showBulkGenerate
+   *  && <BulkGenerateDialog />}`), so anything that needs to survive that
+   *  round trip can't live in this component's own state. */
+  startPoints: Record<BulkGeneratorKind, Point | null>;
+  onRequestPick: (kind: BulkGeneratorKind) => void;
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -178,8 +236,9 @@ export function BulkGenerateDialog({
             <RackingForm
               warehouseId={warehouseId}
               hallId={hall.hallId}
-              zoneTypes={zoneTypes}
               onDone={() => onOpenChange(false)}
+              startPoint={startPoints.racking}
+              onRequestPick={() => onRequestPick("racking")}
             />
           </TabsContent>
 
@@ -187,8 +246,9 @@ export function BulkGenerateDialog({
             <FloorLineForm
               warehouseId={warehouseId}
               hallId={hall.hallId}
-              zoneTypes={zoneTypes}
               onDone={() => onOpenChange(false)}
+              startPoint={startPoints.floor_line}
+              onRequestPick={() => onRequestPick("floor_line")}
             />
           </TabsContent>
 
@@ -196,8 +256,9 @@ export function BulkGenerateDialog({
             <ShelvingForm
               warehouseId={warehouseId}
               hallId={hall.hallId}
-              zoneTypes={zoneTypes}
               onDone={() => onOpenChange(false)}
+              startPoint={startPoints.shelving}
+              onRequestPick={() => onRequestPick("shelving")}
             />
           </TabsContent>
         </Tabs>
@@ -213,17 +274,18 @@ export function BulkGenerateDialog({
 function RackingForm({
   warehouseId,
   hallId,
-  zoneTypes,
   onDone,
+  startPoint,
+  onRequestPick,
 }: {
   warehouseId: number;
   hallId: number;
-  zoneTypes: ZoneTypeDTO[];
   onDone: () => void;
+  startPoint: Point | null;
+  onRequestPick: () => void;
 }) {
   const [isPending, startTransition] = useTransition();
   const [result, setResult] = useState<BulkGenerateResult | null>(null);
-  const [zoneId, setZoneId] = useState("none");
   const [horizontalDirection, setHorizontalDirection] = useState("ltr");
   const [verticalDirection, setVerticalDirection] = useState("utd");
   const [useRows, setUseRows] = useState(false);
@@ -259,14 +321,6 @@ function RackingForm({
           id="rk-template"
           placeholder="A{Aisle:letter}-{Row:number}-{Bay:number}-{Level:number}"
         />
-        <div className="space-y-1.5">
-          <Label htmlFor="rk-zoneId">Zone</Label>
-          <ZoneSelect
-            zoneTypes={zoneTypes}
-            value={zoneId}
-            onChange={setZoneId}
-          />
-        </div>
       </div>
 
       <div className="rounded-lg border bg-muted/30 p-3">
@@ -376,10 +430,17 @@ function RackingForm({
             />
           </div>
           <div className="space-y-1.5" />
+
+          <PatternField
+            id="rk-aislePattern"
+            name="aislePattern"
+            label="Aisle layout pattern"
+            placeholder="1, empty, 2, empty, 2"
+          />
         </div>
       </div>
 
-      <div className="grid grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 gap-3">
         <div className="space-y-1.5">
           <Label htmlFor="rk-bayWidthMm" className="text-xs">
             Bay width (mm)
@@ -404,30 +465,8 @@ function RackingForm({
             defaultValue={1000}
           />
         </div>
-        <div className="space-y-1.5">
-          <Label htmlFor="rk-startX" className="text-xs">
-            Start X (mm)
-          </Label>
-          <Input
-            id="rk-startX"
-            name="startX"
-            type="number"
-            min={0}
-            defaultValue={0}
-          />
-        </div>
-        <div className="space-y-1.5">
-          <Label htmlFor="rk-startY" className="text-xs">
-            Start Y (mm)
-          </Label>
-          <Input
-            id="rk-startY"
-            name="startY"
-            type="number"
-            min={0}
-            defaultValue={0}
-          />
-        </div>
+
+        <StartPointField startPoint={startPoint} onRequestPick={onRequestPick} />
       </div>
 
       <div className="grid grid-cols-2 gap-3">
@@ -493,16 +532,22 @@ function RackingForm({
       </div>
 
       <p className="text-xs text-muted-foreground">
-        Will create{" "}
-        <span className="font-semibold text-foreground">{total}</span> location
-        {total === 1 ? "" : "s"}.
+        {startPoint ? (
+          <>
+            Will create{" "}
+            <span className="font-semibold text-foreground">{total}</span>{" "}
+            location{total === 1 ? "" : "s"}.
+          </>
+        ) : (
+          "Pick a start point on the canvas before generating."
+        )}
       </p>
 
       <ResultBanner result={result} />
 
       <Button
         type="submit"
-        disabled={isPending || total === 0}
+        disabled={isPending || total === 0 || !startPoint}
         className="w-full"
       >
         {isPending ? "Generating…" : `Generate ${total} locations`}
@@ -518,17 +563,18 @@ function RackingForm({
 function FloorLineForm({
   warehouseId,
   hallId,
-  zoneTypes,
   onDone,
+  startPoint,
+  onRequestPick,
 }: {
   warehouseId: number;
   hallId: number;
-  zoneTypes: ZoneTypeDTO[];
   onDone: () => void;
+  startPoint: Point | null;
+  onRequestPick: () => void;
 }) {
   const [isPending, startTransition] = useTransition();
   const [result, setResult] = useState<BulkGenerateResult | null>(null);
-  const [zoneId, setZoneId] = useState("none");
   const [orientation, setOrientation] = useState("horizontal");
   const [sequenceDirection, setSequenceDirection] = useState("forward");
   const [slotCount, setSlotCount] = useState(8);
@@ -552,14 +598,6 @@ function FloorLineForm({
 
       <div className="grid grid-cols-2 gap-3">
         <TemplateField id="fl-template" placeholder="DOCK{Bay:number}" />
-        <div className="space-y-1.5">
-          <Label htmlFor="fl-zoneId">Zone</Label>
-          <ZoneSelect
-            zoneTypes={zoneTypes}
-            value={zoneId}
-            onChange={setZoneId}
-          />
-        </div>
       </div>
 
       <div className="grid grid-cols-3 gap-3">
@@ -600,9 +638,16 @@ function FloorLineForm({
             defaultValue={200}
           />
         </div>
+
+        <PatternField
+          id="fl-slotPattern"
+          name="slotPattern"
+          label="Slot layout pattern"
+          placeholder="1, empty, 2, empty, 2"
+        />
       </div>
 
-      <div className="grid grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 gap-3">
         <div className="space-y-1.5">
           <Label htmlFor="fl-slotWidthMm" className="text-xs">
             Slot width (mm)
@@ -627,30 +672,8 @@ function FloorLineForm({
             defaultValue={12000}
           />
         </div>
-        <div className="space-y-1.5">
-          <Label htmlFor="fl-startX" className="text-xs">
-            Start X (mm)
-          </Label>
-          <Input
-            id="fl-startX"
-            name="startX"
-            type="number"
-            min={0}
-            defaultValue={0}
-          />
-        </div>
-        <div className="space-y-1.5">
-          <Label htmlFor="fl-startY" className="text-xs">
-            Start Y (mm)
-          </Label>
-          <Input
-            id="fl-startY"
-            name="startY"
-            type="number"
-            min={0}
-            defaultValue={0}
-          />
-        </div>
+
+        <StartPointField startPoint={startPoint} onRequestPick={onRequestPick} />
       </div>
 
       <div className="grid grid-cols-2 gap-3">
@@ -690,17 +713,23 @@ function FloorLineForm({
       </div>
 
       <p className="text-xs text-muted-foreground">
-        Will create{" "}
-        <span className="font-semibold text-foreground">{slotCount}</span>{" "}
-        location{slotCount === 1 ? "" : "s"}. Good for dock doors, staging
-        lanes, or drop lines.
+        {startPoint ? (
+          <>
+            Will create{" "}
+            <span className="font-semibold text-foreground">{slotCount}</span>{" "}
+            location{slotCount === 1 ? "" : "s"}. Good for dock doors, staging
+            lanes, or drop lines.
+          </>
+        ) : (
+          "Pick a start point on the canvas before generating."
+        )}
       </p>
 
       <ResultBanner result={result} />
 
       <Button
         type="submit"
-        disabled={isPending || slotCount <= 0}
+        disabled={isPending || slotCount <= 0 || !startPoint}
         className="w-full"
       >
         {isPending ? "Generating…" : `Generate ${slotCount} locations`}
@@ -716,17 +745,18 @@ function FloorLineForm({
 function ShelvingForm({
   warehouseId,
   hallId,
-  zoneTypes,
   onDone,
+  startPoint,
+  onRequestPick,
 }: {
   warehouseId: number;
   hallId: number;
-  zoneTypes: ZoneTypeDTO[];
   onDone: () => void;
+  startPoint: Point | null;
+  onRequestPick: () => void;
 }) {
   const [isPending, startTransition] = useTransition();
   const [result, setResult] = useState<BulkGenerateResult | null>(null);
-  const [zoneId, setZoneId] = useState("none");
   const [orientation, setOrientation] = useState("horizontal");
   const [sequenceDirection, setSequenceDirection] = useState("forward");
   const [bayCount, setBayCount] = useState(6);
@@ -759,14 +789,6 @@ function ShelvingForm({
           id="sh-template"
           placeholder="SHELF-A{Bay:number}-{Level:number}"
         />
-        <div className="space-y-1.5">
-          <Label htmlFor="sh-zoneId">Zone</Label>
-          <ZoneSelect
-            zoneTypes={zoneTypes}
-            value={zoneId}
-            onChange={setZoneId}
-          />
-        </div>
       </div>
 
       <div className="grid grid-cols-3 gap-3">
@@ -834,9 +856,16 @@ function ShelvingForm({
           />
         </div>
         <div className="space-y-1.5" />
+
+        <PatternField
+          id="sh-bayPattern"
+          name="bayPattern"
+          label="Bay layout pattern"
+          placeholder="1, empty, 2, empty, 2"
+        />
       </div>
 
-      <div className="grid grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 gap-3">
         <div className="space-y-1.5">
           <Label htmlFor="sh-bayWidthMm" className="text-xs">
             Shelf width (mm)
@@ -861,30 +890,8 @@ function ShelvingForm({
             defaultValue={500}
           />
         </div>
-        <div className="space-y-1.5">
-          <Label htmlFor="sh-startX" className="text-xs">
-            Start X (mm)
-          </Label>
-          <Input
-            id="sh-startX"
-            name="startX"
-            type="number"
-            min={0}
-            defaultValue={0}
-          />
-        </div>
-        <div className="space-y-1.5">
-          <Label htmlFor="sh-startY" className="text-xs">
-            Start Y (mm)
-          </Label>
-          <Input
-            id="sh-startY"
-            name="startY"
-            type="number"
-            min={0}
-            defaultValue={0}
-          />
-        </div>
+
+        <StartPointField startPoint={startPoint} onRequestPick={onRequestPick} />
       </div>
 
       <div className="grid grid-cols-2 gap-3">
@@ -924,17 +931,23 @@ function ShelvingForm({
       </div>
 
       <p className="text-xs text-muted-foreground">
-        Will create{" "}
-        <span className="font-semibold text-foreground">{total}</span> location
-        {total === 1 ? "" : "s"}. No aisle dimension -- good for a single run of
-        wall shelving.
+        {startPoint ? (
+          <>
+            Will create{" "}
+            <span className="font-semibold text-foreground">{total}</span>{" "}
+            location{total === 1 ? "" : "s"}. No aisle dimension -- good for a
+            single run of wall shelving.
+          </>
+        ) : (
+          "Pick a start point on the canvas before generating."
+        )}
       </p>
 
       <ResultBanner result={result} />
 
       <Button
         type="submit"
-        disabled={isPending || total === 0}
+        disabled={isPending || total === 0 || !startPoint}
         className="w-full"
       >
         {isPending ? "Generating…" : `Generate ${total} locations`}

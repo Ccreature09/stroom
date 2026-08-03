@@ -1,22 +1,14 @@
 "use client";
 
-import { useState } from "react";
-import type {
-  DraftGeometry,
-  LocationDTO,
-  LocationPatch,
-  ZoneTypeDTO,
-} from "@/lib/warehouse-map/types";
+import type { LocationDTO, LocationPatch } from "@/lib/warehouse-map/types";
 import {
   LOCATION_TYPES,
   LOCATION_TYPE_LABELS,
   parseLocationType,
-  type LocationType,
 } from "@/lib/warehouse-map/naming";
 import { DraftNumberField, DraftTextField } from "./draft-fields";
 
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -26,316 +18,19 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Alert, AlertDescription } from "@/components/ui/alert";
-import { RotateCw, Trash2, X } from "lucide-react";
-
-function parseOptionalInt(value: FormDataEntryValue | null): number | null {
-  if (value === null) return null;
-  const raw = String(value).trim();
-  if (!raw) return null;
-  const parsed = Number(raw);
-  return Number.isFinite(parsed) ? Math.round(parsed) : null;
-}
-
-function ZoneSelect({
-  zoneTypes,
-  defaultValue,
-  name = "zoneId",
-}: {
-  zoneTypes: ZoneTypeDTO[];
-  defaultValue?: number | null;
-  name?: string;
-}) {
-  const [value, setValue] = useState<string>(
-    defaultValue ? String(defaultValue) : "none",
-  );
-
-  return (
-    <>
-      <input type="hidden" name={name} value={value === "none" ? "" : value} />
-      <Select value={value} onValueChange={setValue}>
-        <SelectTrigger className="w-full">
-          <SelectValue placeholder="No zone" />
-        </SelectTrigger>
-        <SelectContent>
-          <SelectItem value="none">No zone</SelectItem>
-          {zoneTypes.map((z) => (
-            <SelectItem key={z.zoneId} value={String(z.zoneId)}>
-              {z.name}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
-    </>
-  );
-}
-
-function LocationTypeSelect({
-  defaultValue = "NONE",
-}: {
-  defaultValue?: LocationType;
-}) {
-  const [value, setValue] = useState<LocationType>(defaultValue);
-
-  return (
-    <div className="space-y-1.5">
-      <Label htmlFor="locationType">Location type</Label>
-      <input type="hidden" name="locationType" value={value} />
-      <Select value={value} onValueChange={(v) => setValue(v as LocationType)}>
-        <SelectTrigger id="locationType" className="w-full">
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent>
-          {LOCATION_TYPES.map((type) => (
-            <SelectItem key={type} value={type}>
-              {LOCATION_TYPE_LABELS[type]}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
-      <p className="text-[11px] text-muted-foreground">
-        Racking locations sharing an aisle number move and resize together on
-        the canvas.
-      </p>
-    </div>
-  );
-}
-
-export function CreateLocationPanel({
-  draft,
-  zoneTypes,
-  onCreate,
-  onClose,
-  locked,
-}: {
-  draft: DraftGeometry;
-  zoneTypes: ZoneTypeDTO[];
-  onCreate: (data: LocationPatch) => void;
-  onClose: () => void;
-  locked: boolean;
-}) {
-  const [error, setError] = useState<string>();
-
-  function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setError(undefined);
-    const formData = new FormData(event.currentTarget);
-
-    const locationCode = String(formData.get("locationCode") ?? "").trim();
-    if (!locationCode) {
-      setError("Location code is required.");
-      return;
-    }
-
-    const physicalX = Number(formData.get("physicalX"));
-    const physicalY = Number(formData.get("physicalY"));
-    const physicalWidthMm = Number(formData.get("physicalWidthMm"));
-    const physicalLengthMm = Number(formData.get("physicalLengthMm"));
-    if (
-      !Number.isFinite(physicalX) ||
-      !Number.isFinite(physicalY) ||
-      !Number.isFinite(physicalWidthMm) ||
-      physicalWidthMm <= 0 ||
-      !Number.isFinite(physicalLengthMm) ||
-      physicalLengthMm <= 0
-    ) {
-      setError("Geometry fields must be valid numbers.");
-      return;
-    }
-    const rotationRaw = Number(formData.get("rotationDegrees") ?? 0);
-    const rotationDegrees = Number.isFinite(rotationRaw)
-      ? ((Math.round(rotationRaw) % 360) + 360) % 360
-      : 0;
-
-    onCreate({
-      locationCode,
-      zoneId: parseOptionalInt(formData.get("zoneId")),
-      aisle: parseOptionalInt(formData.get("aisle")),
-      bay: parseOptionalInt(formData.get("bay")),
-      level: parseOptionalInt(formData.get("level")),
-      row: parseOptionalInt(formData.get("row")),
-      locationType: parseLocationType(formData.get("locationType")),
-      heightMm: parseOptionalInt(formData.get("heightMm")),
-      maxWeightKg: parseOptionalInt(formData.get("maxWeightKg")),
-      floorLevel: parseOptionalInt(formData.get("floorLevel")) ?? 1,
-      physicalX,
-      physicalY,
-      physicalWidthMm,
-      physicalLengthMm,
-      rotationDegrees,
-    });
-    onClose();
-  }
-
-  return (
-    <div className="flex h-full w-80 shrink-0 flex-col overflow-y-auto border-l bg-background p-5">
-      <div className="flex items-center justify-between">
-        <h2 className="text-sm font-semibold text-foreground">New location</h2>
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={onClose}
-          className="h-8 px-2 text-xs text-muted-foreground hover:text-foreground"
-        >
-          Cancel
-        </Button>
-      </div>
-      <p className="mt-1 text-xs text-muted-foreground">
-        Staged as a draft -- nothing is saved until you click Save Map.
-      </p>
-
-      <fieldset disabled={locked} className="contents">
-      <form onSubmit={handleSubmit} className="mt-4 space-y-3">
-        <div className="space-y-1.5">
-          <Label htmlFor="locationCode">Location code</Label>
-          <Input
-            id="locationCode"
-            name="locationCode"
-            required
-            placeholder="WH1-BULK-04-12-3"
-          />
-        </div>
-
-        <div className="space-y-1.5">
-          <Label htmlFor="zoneId">Zone</Label>
-          <ZoneSelect zoneTypes={zoneTypes} />
-        </div>
-
-        <LocationTypeSelect />
-
-        <div className="grid grid-cols-2 gap-2">
-          <div className="space-y-1.5">
-            <Label htmlFor="aisle">Aisle</Label>
-            <Input id="aisle" name="aisle" type="number" />
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="row">Row (optional)</Label>
-            <Input id="row" name="row" type="number" min={1} />
-          </div>
-        </div>
-
-        <div className="grid grid-cols-2 gap-2">
-          <div className="space-y-1.5">
-            <Label htmlFor="bay">Bay</Label>
-            <Input id="bay" name="bay" type="number" />
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="level">Level</Label>
-            <Input id="level" name="level" type="number" />
-          </div>
-        </div>
-
-        <div className="grid grid-cols-2 gap-2">
-          <div className="space-y-1.5">
-            <Label htmlFor="heightMm">Height (mm)</Label>
-            <Input id="heightMm" name="heightMm" type="number" />
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="maxWeightKg">Max weight (kg)</Label>
-            <Input id="maxWeightKg" name="maxWeightKg" type="number" />
-          </div>
-        </div>
-
-        <div className="space-y-1.5">
-          <Label htmlFor="floorLevel">Floor level</Label>
-          <Input
-            id="floorLevel"
-            name="floorLevel"
-            type="number"
-            min={1}
-            defaultValue={1}
-          />
-        </div>
-
-        <div className="space-y-1.5 border-t pt-3">
-          <Label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-            Spatial (world grid, mm)
-          </Label>
-          <div className="grid grid-cols-2 gap-2">
-            <div className="space-y-1.5">
-              <Label htmlFor="physicalX">X (mm)</Label>
-              <Input
-                id="physicalX"
-                name="physicalX"
-                type="number"
-                min={0}
-                defaultValue={draft.physicalX}
-              />
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="physicalY">Y (mm)</Label>
-              <Input
-                id="physicalY"
-                name="physicalY"
-                type="number"
-                min={0}
-                defaultValue={draft.physicalY}
-              />
-            </div>
-          </div>
-          <div className="grid grid-cols-2 gap-2">
-            <div className="space-y-1.5">
-              <Label htmlFor="physicalWidthMm">Width (mm)</Label>
-              <Input
-                id="physicalWidthMm"
-                name="physicalWidthMm"
-                type="number"
-                min={1}
-                defaultValue={draft.physicalWidthMm}
-              />
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="physicalLengthMm">Length (mm)</Label>
-              <Input
-                id="physicalLengthMm"
-                name="physicalLengthMm"
-                type="number"
-                min={1}
-                defaultValue={draft.physicalLengthMm}
-              />
-            </div>
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="rotationDegrees">Rotation (deg)</Label>
-            <Input
-              id="rotationDegrees"
-              name="rotationDegrees"
-              type="number"
-              min={0}
-              max={359}
-              defaultValue={0}
-            />
-          </div>
-        </div>
-
-        {error && (
-          <Alert variant="destructive" className="py-2 text-xs">
-            <AlertDescription>{error}</AlertDescription>
-          </Alert>
-        )}
-
-        <Button type="submit" className="w-full">
-          Create location
-        </Button>
-      </form>
-      </fieldset>
-    </div>
-  );
-}
+import { RotateCw, Trash2 } from "lucide-react";
 
 // Shared field body for editing one location -- used both by the
-// single-selection panel and, per selection in the dropdown, by the
-// multi-select panel, so both reading and editing always go through the
+// single-selection panel and, per selection in the dropdown, by the mixed
+// multi-object panel, so both reading and editing always go through the
 // exact same fields.
-function LocationFields({
+export function LocationFields({
   location,
-  zoneTypes,
   onPatch,
   onDelete,
   locked,
 }: {
   location: LocationDTO;
-  zoneTypes: ZoneTypeDTO[];
   onPatch: (patch: LocationPatch) => void;
   onDelete: () => void;
   locked: boolean;
@@ -384,28 +79,6 @@ function LocationFields({
         required
         onCommit={(value) => onPatch({ locationCode: value })}
       />
-
-      <div className="space-y-1.5">
-        <Label>Zone</Label>
-        <Select
-          value={location.zoneId != null ? String(location.zoneId) : "none"}
-          onValueChange={(val) =>
-            onPatch({ zoneId: val === "none" ? null : Number(val) })
-          }
-        >
-          <SelectTrigger className="w-full">
-            <SelectValue placeholder="No zone" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="none">No zone</SelectItem>
-            {zoneTypes.map((z) => (
-              <SelectItem key={z.zoneId} value={String(z.zoneId)}>
-                {z.name}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </div>
 
       <div className="space-y-1.5">
         <Label>Location type</Label>
@@ -531,6 +204,22 @@ function LocationFields({
 
       <div className="flex items-center space-x-2 pt-1">
         <Checkbox
+          id={`isTemporary-${location.locationId}`}
+          checked={location.isTemporary === true}
+          onCheckedChange={(checked) =>
+            onPatch({ isTemporary: checked === true })
+          }
+        />
+        <Label
+          htmlFor={`isTemporary-${location.locationId}`}
+          className="text-xs font-medium leading-none cursor-pointer"
+        >
+          Temporary (staging/buffer, not permanent storage)
+        </Label>
+      </div>
+
+      <div className="flex items-center space-x-2">
+        <Checkbox
           id={`isBlocked-${location.locationId}`}
           checked={location.isBlocked === true}
           onCheckedChange={(checked) =>
@@ -559,14 +248,12 @@ function LocationFields({
 
 export function EditLocationPanel({
   location,
-  zoneTypes,
   onPatch,
   onDelete,
   onClose,
   locked,
 }: {
   location: LocationDTO;
-  zoneTypes: ZoneTypeDTO[];
   onPatch: (patch: LocationPatch) => void;
   onDelete: () => void;
   onClose: () => void;
@@ -595,99 +282,10 @@ export function EditLocationPanel({
       <LocationFields
         key={location.locationId}
         location={location}
-        zoneTypes={zoneTypes}
         onPatch={onPatch}
         onDelete={onDelete}
         locked={locked}
       />
-    </div>
-  );
-}
-
-export function MultiSelectPanel({
-  locations,
-  zoneTypes,
-  onPatch,
-  onDelete,
-  onClose,
-  locked,
-}: {
-  locations: LocationDTO[];
-  zoneTypes: ZoneTypeDTO[];
-  onPatch: (locationId: number, patch: LocationPatch) => void;
-  onDelete: (locationId: number) => void;
-  onClose: () => void;
-  locked: boolean;
-}) {
-  const [chosenId, setChosenId] = useState<number | null>(
-    locations[0]?.locationId ?? null,
-  );
-
-  // If the selection set changes (e.g. one member was deleted) and the
-  // previously-chosen id fell out of it, fall back to the first remaining
-  // one -- adjusted during render rather than in an effect.
-  const stillPresent =
-    chosenId != null && locations.some((l) => l.locationId === chosenId);
-  if (!stillPresent) {
-    const fallback = locations[0]?.locationId ?? null;
-    if (fallback !== chosenId) setChosenId(fallback);
-  }
-
-  const chosen =
-    locations.find((l) => l.locationId === chosenId) ?? locations[0];
-
-  return (
-    <div className="flex h-full w-80 shrink-0 flex-col overflow-y-auto border-l bg-background p-5">
-      <div className="flex items-center justify-between">
-        <h2 className="text-sm font-semibold text-foreground">
-          {locations.length} locations selected
-        </h2>
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={onClose}
-          className="h-8 px-2 text-xs text-muted-foreground hover:text-foreground"
-        >
-          <X className="mr-1 h-3.5 w-3.5" />
-          Close
-        </Button>
-      </div>
-
-      {chosen ? (
-        <>
-          <div className="mt-3 space-y-1.5">
-            <Label className="text-xs">Editing</Label>
-            <Select
-              value={String(chosen.locationId)}
-              onValueChange={(val) => setChosenId(Number(val))}
-            >
-              <SelectTrigger className="w-full">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {locations.map((l) => (
-                  <SelectItem key={l.locationId} value={String(l.locationId)}>
-                    {l.locationCode}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-
-          <LocationFields
-            key={chosen.locationId}
-            location={chosen}
-            zoneTypes={zoneTypes}
-            onPatch={(patch) => onPatch(chosen.locationId, patch)}
-            onDelete={() => onDelete(chosen.locationId)}
-            locked={locked}
-          />
-        </>
-      ) : (
-        <p className="mt-4 text-sm text-muted-foreground">
-          No locations selected.
-        </p>
-      )}
     </div>
   );
 }
