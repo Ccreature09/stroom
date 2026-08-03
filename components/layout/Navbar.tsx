@@ -10,7 +10,7 @@ export default async function Navbar() {
     <header className="flex items-center justify-between px-6 py-4 bg-white border-b border-slate-200">
       <Link
         href="/"
-        className="text-xl font-bold tracking-tight text-slate-900"
+        className="text-xl font-bold tracking-tight text-[#06402B]"
       >
         stroom
       </Link>
