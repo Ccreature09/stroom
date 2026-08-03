@@ -10,7 +10,6 @@ import type {
   LiveAssetDTO,
   LocationDTO,
   NavGraphDTO,
-  ZoneTypeDTO,
 } from "@/lib/warehouse-map/types";
 import type { LiveAsset } from "@/lib/warehouse-map/live-map";
 import type { Point } from "@/lib/warehouse-map/geometry";
@@ -74,7 +73,6 @@ export default function LiveMapView({
   selectedHallId,
   hall,
   locations,
-  zoneTypes,
   features,
   featureKinds,
   navGraph,
@@ -90,7 +88,6 @@ export default function LiveMapView({
   selectedHallId: number;
   hall: HallDTO;
   locations: LocationDTO[];
-  zoneTypes: ZoneTypeDTO[];
   features: FeatureDTO[];
   featureKinds: FeatureKindDTO[];
   navGraph: NavGraphDTO;
@@ -251,7 +248,6 @@ export default function LiveMapView({
           <LiveMapCanvas
             hall={hall}
             locations={locations}
-            zoneTypes={zoneTypes}
             features={features}
             featureKinds={featureKinds}
             navGraph={navGraph}

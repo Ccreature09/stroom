@@ -15,9 +15,8 @@ import type {
   HallDTO,
   LocationDTO,
   NavGraphDTO,
-  ZoneTypeDTO,
 } from "@/lib/warehouse-map/types";
-import { resolveZoneColor, sortFeaturesForRender } from "@/lib/warehouse-map/types";
+import { colorForLocation, sortFeaturesForRender } from "@/lib/warehouse-map/types";
 import { footprintVertices, type Point } from "@/lib/warehouse-map/geometry";
 import {
   CONFIDENCE_STALE,
@@ -54,7 +53,6 @@ function parseHexToInt(hex: string | null | undefined, fallback: number) {
 export type LiveMapCanvasProps = {
   hall: HallDTO;
   locations: LocationDTO[];
-  zoneTypes: ZoneTypeDTO[];
   features: FeatureDTO[];
   featureKinds: FeatureKindDTO[];
   navGraph: NavGraphDTO;
@@ -84,7 +82,6 @@ export type LiveMapCanvasProps = {
 export default function LiveMapCanvas({
   hall,
   locations,
-  zoneTypes,
   features,
   featureKinds,
   navGraph,
@@ -198,10 +195,11 @@ export default function LiveMapCanvas({
     }
     layer.addChild(featureLayer);
 
-    // Storage, coloured by zone. One Graphics for all of them: this is a
-    // read-only view, so there is nothing to hit-test per bay.
+    // Storage, coloured by type (temporary/staging locations stand out in
+    // amber regardless of type -- see colorForLocation). One Graphics for all
+    // of them: this is a read-only view, so there is nothing to hit-test per
+    // bay.
     const storage = new Graphics();
-    const zoneById = new Map(zoneTypes.map((z) => [z.zoneId, z]));
     // Bays stack by level at the same footprint; drawing one per footprint
     // keeps a 100k-location DC from becoming 100k draw commands.
     const drawn = new Set<string>();
@@ -209,9 +207,7 @@ export default function LiveMapCanvas({
       const key = `${location.physicalX}:${location.physicalY}:${location.physicalWidthMm}:${location.physicalLengthMm}`;
       if (drawn.has(key)) continue;
       drawn.add(key);
-      const colour = resolveZoneColor(
-        location.zoneId != null ? zoneById.get(location.zoneId) : null,
-      );
+      const colour = colorForLocation(location);
       storage
         .rect(
           location.physicalX,
@@ -462,7 +458,7 @@ export default function LiveMapCanvas({
     if (!isReady) return;
     drawStatic();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [locations, features, zoneTypes, navGraph, showNavGraph, isReady]);
+  }, [locations, features, navGraph, showNavGraph, isReady]);
 
   useEffect(() => {
     if (!isReady) return;

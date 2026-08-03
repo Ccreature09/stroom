@@ -12,7 +12,6 @@ import {
   navEdges,
   navNodes,
   warehouses,
-  zoneTypes,
 } from "@/drizzle/schema";
 import { requireLiveMapContext } from "@/lib/warehouse-map/context";
 import { sanitizePoints, type GeometryKind } from "@/lib/warehouse-map/geometry";
@@ -106,7 +105,6 @@ export default async function LiveMapPage({
 
   const [
     locationRows,
-    zoneRows,
     featureRows,
     featureKindRows,
     navNodeRows,
@@ -118,7 +116,6 @@ export default async function LiveMapPage({
       .select({
         locationId: locations.locationId,
         locationCode: locations.locationCode,
-        zoneId: locations.zoneId,
         aisle: locations.aisle,
         bay: locations.bay,
         level: locations.level,
@@ -127,6 +124,7 @@ export default async function LiveMapPage({
         heightMm: locations.heightMm,
         maxWeightKg: locations.maxWeightKg,
         isBlocked: locations.isBlocked,
+        isTemporary: locations.isTemporary,
         physicalX: locations.physicalX,
         physicalY: locations.physicalY,
         physicalWidthMm: locations.physicalWidthMm,
@@ -141,19 +139,6 @@ export default async function LiveMapPage({
           eq(locations.hallId, hall.hallId),
         ),
       ),
-    db
-      .select({
-        zoneId: zoneTypes.zoneId,
-        name: zoneTypes.name,
-        isPickable: zoneTypes.isPickable,
-        isTemperatureControlled: zoneTypes.isTemperatureControlled,
-        requiresHazmatClearance: zoneTypes.requiresHazmatClearance,
-        requiresBarcodeScan: zoneTypes.requiresBarcodeScan,
-        storagePermanence: zoneTypes.storagePermanence,
-        color: zoneTypes.color,
-      })
-      .from(zoneTypes)
-      .where(eq(zoneTypes.warehouseId, parsedWarehouseId)),
     db
       .select({
         featureId: layoutFeatures.featureId,
@@ -171,7 +156,6 @@ export default async function LiveMapPage({
         layerIndex: layoutFeatures.layerIndex,
         isObstacle: layoutFeatures.isObstacle,
         isVisualOnly: layoutFeatures.isVisualOnly,
-        zoneId: layoutFeatures.zoneId,
         label: layoutFeatures.label,
         color: layoutFeatures.color,
         attrs: layoutFeatures.attrs,
@@ -357,7 +341,6 @@ export default async function LiveMapPage({
           selectedHallId={hall.hallId}
           hall={hall}
           locations={mapLocations}
-          zoneTypes={zoneRows}
           features={mapFeatures}
           featureKinds={mapFeatureKinds}
           navGraph={navGraph}
