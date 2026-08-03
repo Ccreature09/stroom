@@ -102,3 +102,17 @@ export function isLocationType(value: unknown): value is LocationType {
 export function parseLocationType(value: unknown): LocationType {
   return isLocationType(value) ? value : "NONE";
 }
+
+// Stock footprint offered when a location is placed with a single click from
+// the Add location menu, rather than dragged out. Racking matches the modal
+// footprint already in use across this warehouse (1200x1000mm); shelf and
+// floor are reasoned defaults since no equivalent sample exists yet.
+export const LOCATION_TYPE_DEFAULT_SIZE_MM: Record<
+  LocationType,
+  { widthMm: number; lengthMm: number }
+> = {
+  RACKING: { widthMm: 1200, lengthMm: 1000 },
+  SHELF: { widthMm: 900, lengthMm: 400 },
+  FLOOR: { widthMm: 1500, lengthMm: 1500 },
+  NONE: { widthMm: 1000, lengthMm: 1000 },
+};

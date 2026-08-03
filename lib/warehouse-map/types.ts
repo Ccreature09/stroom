@@ -3,21 +3,13 @@ import { computeEnvelope } from "./geometry";
 import type { FeatureAttrs, FeatureCategory } from "./feature-kinds";
 import type { LocationType } from "./naming";
 
-export type ZoneTypeDTO = {
-  zoneId: number;
-  name: string;
-  isPickable: boolean | null;
-  isTemperatureControlled: boolean | null;
-  requiresHazmatClearance: boolean | null;
-  requiresBarcodeScan: boolean;
-  storagePermanence: string;
-  color: string | null;
-};
+// A label-visibility toggle group: locations plus every feature category.
+// "LOCATION" is not itself a FeatureCategory, since locations aren't features.
+export type LabelCategoryKey = "LOCATION" | FeatureCategory;
 
 export type LocationDTO = {
   locationId: number;
   locationCode: string;
-  zoneId: number | null;
   aisle: number | null;
   bay: number | null;
   level: number | null;
@@ -26,6 +18,9 @@ export type LocationDTO = {
   heightMm: number | null;
   maxWeightKg: number | null;
   isBlocked: boolean | null;
+  // A staging/buffer slot -- pallets waiting to move or load -- as opposed
+  // to permanent storage. Replaces the old zone-based storage_permanence.
+  isTemporary: boolean;
   physicalX: number;
   physicalY: number;
   physicalWidthMm: number;
@@ -46,6 +41,7 @@ export type HallDTO = {
 // Editable subset of a hall's metadata -- shape of an in-flight draft edit
 // before it's committed to the database via "Save Map".
 export type HallPatch = Partial<{
+  name: string;
   physicalWidthMm: number;
   physicalLengthMm: number;
   clearHeightMm: number | null;
@@ -57,7 +53,6 @@ export type HallPatch = Partial<{
 // (canvas drag/resize commits land here too).
 export type LocationPatch = Partial<{
   locationCode: string;
-  zoneId: number | null;
   aisle: number | null;
   bay: number | null;
   level: number | null;
@@ -66,6 +61,7 @@ export type LocationPatch = Partial<{
   heightMm: number | null;
   maxWeightKg: number | null;
   isBlocked: boolean;
+  isTemporary: boolean;
   physicalX: number;
   physicalY: number;
   physicalWidthMm: number;
@@ -218,7 +214,6 @@ export type FeatureDTO = {
   layerIndex: number;
   isObstacle: boolean;
   isVisualOnly: boolean;
-  zoneId: number | null;
   label: string | null;
   color: string | null;
   attrs: FeatureAttrs;
@@ -240,7 +235,6 @@ export type FeaturePatch = Partial<{
   layerIndex: number;
   isObstacle: boolean;
   isVisualOnly: boolean;
-  zoneId: number | null;
   label: string | null;
   color: string | null;
   attrs: FeatureAttrs;
@@ -252,22 +246,11 @@ export type NewFeatureDraft = FeaturePatch & {
   geometryKind: GeometryKind;
 };
 
-export type ZonePatch = Partial<{
-  name: string;
-  isPickable: boolean;
-  isTemperatureControlled: boolean;
-  requiresHazmatClearance: boolean;
-  requiresBarcodeScan: boolean;
-  storagePermanence: string;
-  color: string | null;
-}>;
-
-// A brand-new location/zone that only exists in the draft store. tempId is
-// always negative so it can share the same numeric id space as real rows
-// (LocationDTO.locationId / ZoneTypeDTO.zoneId) without colliding, letting
-// the canvas/panels treat pending-create rows exactly like saved ones.
+// A brand-new location that only exists in the draft store. tempId is always
+// negative so it can share the same numeric id space as real rows
+// (LocationDTO.locationId) without colliding, letting the canvas/panels treat
+// pending-create rows exactly like saved ones.
 export type NewLocationDraft = LocationPatch & { tempId: number };
-export type NewZoneDraft = ZonePatch & { tempId: number };
 
 // Everything staged-but-unsaved for one hall. One of these is snapshotted
 // per undo/redo step (see the history stack in layout-designer.tsx).
@@ -276,9 +259,6 @@ export type HallState = {
   locationPatches: Record<number, LocationPatch>;
   deletedLocationIds: number[];
   newLocations: NewLocationDraft[];
-  zonePatches: Record<number, ZonePatch>;
-  deletedZoneIds: number[];
-  newZones: NewZoneDraft[];
   featurePatches: Record<number, FeaturePatch>;
   deletedFeatureIds: number[];
   newFeatures: NewFeatureDraft[];
@@ -287,17 +267,16 @@ export type HallState = {
 // Bumped whenever the HallState shape changes. Both persistence layers check
 // it -- localStorage in layout-designer.tsx and layout_drafts.state_version on
 // the server -- and discard anything older rather than rehydrating a shape the
-// reducer no longer understands.
-export const DRAFT_STATE_VERSION = 2;
+// reducer no longer understands. Bumped to 3 when zones were removed (drafts
+// with the old zonePatches/deletedZoneIds/newZones/zoneId shape must not be
+// rehydrated against a reducer that no longer knows what to do with them).
+export const DRAFT_STATE_VERSION = 3;
 
 export const EMPTY_HALL_STATE: HallState = {
   hallPatch: {},
   locationPatches: {},
   deletedLocationIds: [],
   newLocations: [],
-  zonePatches: {},
-  deletedZoneIds: [],
-  newZones: [],
   featurePatches: {},
   deletedFeatureIds: [],
   newFeatures: [],
@@ -307,7 +286,6 @@ function newLocationDraftToDTO(draft: NewLocationDraft): LocationDTO {
   return {
     locationId: draft.tempId,
     locationCode: draft.locationCode ?? `DRAFT-${Math.abs(draft.tempId)}`,
-    zoneId: draft.zoneId ?? null,
     aisle: draft.aisle ?? null,
     bay: draft.bay ?? null,
     level: draft.level ?? null,
@@ -316,25 +294,13 @@ function newLocationDraftToDTO(draft: NewLocationDraft): LocationDTO {
     heightMm: draft.heightMm ?? null,
     maxWeightKg: draft.maxWeightKg ?? null,
     isBlocked: draft.isBlocked ?? false,
+    isTemporary: draft.isTemporary ?? false,
     physicalX: draft.physicalX ?? 0,
     physicalY: draft.physicalY ?? 0,
     physicalWidthMm: draft.physicalWidthMm ?? 1000,
     physicalLengthMm: draft.physicalLengthMm ?? 1000,
     rotationDegrees: draft.rotationDegrees ?? 0,
     floorLevel: draft.floorLevel ?? 1,
-  };
-}
-
-function newZoneDraftToDTO(draft: NewZoneDraft): ZoneTypeDTO {
-  return {
-    zoneId: draft.tempId,
-    name: draft.name ?? `Draft zone ${Math.abs(draft.tempId)}`,
-    isPickable: draft.isPickable ?? true,
-    isTemperatureControlled: draft.isTemperatureControlled ?? false,
-    requiresHazmatClearance: draft.requiresHazmatClearance ?? false,
-    requiresBarcodeScan: draft.requiresBarcodeScan ?? true,
-    storagePermanence: draft.storagePermanence ?? "PERMANENT",
-    color: draft.color ?? null,
   };
 }
 
@@ -357,22 +323,6 @@ export function applyHallStateToLocations(
   return [...patched, ...created];
 }
 
-export function applyHallStateToZones(
-  base: ZoneTypeDTO[],
-  state: HallState | undefined,
-): ZoneTypeDTO[] {
-  if (!state) return base;
-  const deleted = new Set(state.deletedZoneIds);
-  const patched = base
-    .filter((z) => !deleted.has(z.zoneId))
-    .map((z) => {
-      const patch = state.zonePatches[z.zoneId];
-      return patch ? { ...z, ...patch } : z;
-    });
-  const created = state.newZones.map(newZoneDraftToDTO);
-  return [...patched, ...created];
-}
-
 function newFeatureDraftToDTO(draft: NewFeatureDraft): FeatureDTO {
   const widthMm = draft.widthMm ?? 1000;
   const lengthMm = draft.lengthMm ?? 1000;
@@ -392,7 +342,6 @@ function newFeatureDraftToDTO(draft: NewFeatureDraft): FeatureDTO {
     layerIndex: draft.layerIndex ?? 0,
     isObstacle: draft.isObstacle ?? true,
     isVisualOnly: draft.isVisualOnly ?? false,
-    zoneId: draft.zoneId ?? null,
     label: draft.label ?? null,
     color: draft.color ?? null,
     attrs: draft.attrs ?? {},
@@ -444,9 +393,6 @@ export function hallStateChangeCount(state: HallState): number {
     Object.keys(state.locationPatches).length +
     state.deletedLocationIds.length +
     state.newLocations.length +
-    Object.keys(state.zonePatches).length +
-    state.deletedZoneIds.length +
-    state.newZones.length +
     Object.keys(state.featurePatches).length +
     state.deletedFeatureIds.length +
     state.newFeatures.length
@@ -461,53 +407,25 @@ export type DraftGeometry = {
   physicalLengthMm: number;
 };
 
-// Stable color per zone so the same zone always renders the same color across
-// re-renders/re-fetches, without persisting a color column in the database.
-const ZONE_PALETTE = [
-  0x2563eb, // blue
-  0x16a34a, // green
-  0xd97706, // amber
-  0xdb2777, // pink
-  0x7c3aed, // violet
-  0x0891b2, // cyan
-  0xca8a04, // yellow-ish
-  0xdc2626, // red
-  0x059669, // emerald
-  0x4f46e5, // indigo
-];
+// Fixed palette by location type, replacing the old per-zone palette --
+// every location already knows its own type, whereas zone was a separate
+// lookup nothing actually read. isTemporary always wins over type (see
+// colorForLocation) so a staging slot reads as staging regardless of what
+// type it's tagged as.
+const LOCATION_TYPE_COLORS: Record<LocationType, number> = {
+  RACKING: 0x2563eb, // blue
+  SHELF: 0x7c3aed, // violet
+  FLOOR: 0x16a34a, // green
+  NONE: 0x94a3b8, // slate
+};
 
-export function colorForZone(zoneId: number | null): number {
-  if (zoneId === null) return 0x94a3b8; // slate-400 for "no zone"
-  // Pending-create zones/locations use negative temp ids (see NewZoneDraft),
-  // and JS's `%` preserves the dividend's sign -- Math.abs keeps the index
-  // valid instead of indexing the palette array with a negative number
-  // (which silently returns undefined and crashes downstream .toString()).
-  return ZONE_PALETTE[Math.abs(zoneId) % ZONE_PALETTE.length];
-}
+export const TEMPORARY_LOCATION_COLOR = 0xf59e0b; // amber
 
-function parseHexColor(hex: string): number | null {
-  const match = /^#?([0-9a-fA-F]{6})$/.exec(hex.trim());
-  if (!match) return null;
-  return parseInt(match[1], 16);
-}
-
-// A zone's displayed color: its own explicitly picked color if set, else the
-// same stable palette color derived from its id as before.
-export function resolveZoneColor(
-  zone: Pick<ZoneTypeDTO, "zoneId" | "color"> | null | undefined,
+export function colorForLocation(
+  loc: Pick<LocationDTO, "locationType" | "isTemporary">,
 ): number {
-  if (!zone) return colorForZone(null);
-  if (zone.color) {
-    const parsed = parseHexColor(zone.color);
-    if (parsed !== null) return parsed;
-  }
-  return colorForZone(zone.zoneId);
-}
-
-export function cssColorForZone(
-  zone: Pick<ZoneTypeDTO, "zoneId" | "color"> | null,
-): string {
-  return `#${resolveZoneColor(zone).toString(16).padStart(6, "0")}`;
+  if (loc.isTemporary) return TEMPORARY_LOCATION_COLOR;
+  return LOCATION_TYPE_COLORS[loc.locationType];
 }
 
 // ---------------------------------------------------------------------------
@@ -515,30 +433,14 @@ export function cssColorForZone(
 // ---------------------------------------------------------------------------
 
 /**
- * Locations sharing a group key move and delete together as a single unit.
- * A group is Zone + Location Type (e.g. "Zone A + Racking"), computed
- * on the fly rather than persisted as its own column.
- */
-export function groupKeyFor(
-  loc: Pick<LocationDTO, "zoneId" | "locationType">,
-): string {
-  return `${loc.zoneId ?? "none"}:${loc.locationType}`;
-}
-
-export function locationIdsInGroup(
-  locations: LocationDTO[],
-  groupKey: string,
-): number[] {
-  return locations
-    .filter((loc) => groupKeyFor(loc) === groupKey)
-    .map((loc) => loc.locationId);
-}
-
-/**
  * Aisle-level group: every racking location sharing the same aisle number
  * (across all bays and stacked levels) moves and resizes together as a
- * single unit. Unlike groupKeyFor (zone+type), this is racking-specific and
- * keyed purely on the aisle number.
+ * single unit. Racking is the only location type with an implicit batch
+ * grouping -- it used to extend to shelf/floor storage keyed by zone
+ * assignment, but zones never had real per-location assignments (every row
+ * was unzoned) and isTemporary is too coarse a stand-in: every temporary
+ * FLOOR location would collapse into one group regardless of where or when
+ * it was created. Shelf/floor locations now always select/move individually.
  */
 export function locationIdsInAisle(
   locations: LocationDTO[],
@@ -551,14 +453,41 @@ export function locationIdsInAisle(
 
 /**
  * Bay aggregation: for racking/shelf locations, many rows in the DB (one per
- * level) share the same physical footprint (aisle+bay). The canvas should
- * only render one representative node per (aisle, bay) at a time, switchable
- * via the level overlay. This groups locations by that footprint key.
+ * level) share the same physical footprint. The canvas should only render one
+ * representative node per footprint at a time, switchable via the level
+ * overlay. This groups locations by that footprint key.
+ *
+ * The key is the rotated physical envelope, not the (aisle, bay) label pair --
+ * matching `collectBayFootprints` in graph-compiler.ts, which faces this exact
+ * same "what counts as one bay" question server-side and already answers it
+ * this way. Labels are not a safe substitute: `aisle`/`bay` are numbers a
+ * generator assigns, and the bulk generator restarts them from `aisleStart`/
+ * `bayStart` (default 1) on every run. A second bulk-generate over a different
+ * part of the same hall -- an ordinary way to build up a large layout in
+ * pieces -- reuses the same small numbers for a physically unrelated block of
+ * racking. Keying on the label alone folded every such collision into one
+ * group and silently dropped every member but one from `visible`: not merely
+ * unaggregated, but never drawn anywhere, while sitting in the database
+ * exactly as inserted. Shelving made this closer to certain than rare, since
+ * its generator always writes `aisle: null`, collapsing the old key to just
+ * the bay number for every shelf unit in the hall.
  */
 export function bayFootprintKey(
-  loc: Pick<LocationDTO, "aisle" | "bay">,
+  loc: Pick<
+    LocationDTO,
+    "physicalX" | "physicalY" | "physicalWidthMm" | "physicalLengthMm" | "rotationDegrees"
+  >,
 ): string {
-  return `${loc.aisle ?? "x"}:${loc.bay ?? "x"}`;
+  const envelope = computeEnvelope({
+    geometryKind: "RECT",
+    originXMm: loc.physicalX,
+    originYMm: loc.physicalY,
+    widthMm: loc.physicalWidthMm,
+    lengthMm: loc.physicalLengthMm,
+    rotationDegrees: loc.rotationDegrees,
+    points: null,
+  });
+  return `${envelope.minX}:${envelope.minY}:${envelope.maxX}:${envelope.maxY}`;
 }
 
 export function groupByBayFootprint(

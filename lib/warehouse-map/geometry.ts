@@ -283,6 +283,29 @@ export function segmentIntersectsRect(
   return edges.some((edge) => segmentIntersection(segment, edge) !== null);
 }
 
+/**
+ * Whether a segment touches a polygon at all -- either endpoint inside it, or
+ * the segment crossing one of its edges.
+ *
+ * The rect version above is the fast path for axis-aligned footprints; this is
+ * for authored polygons (exclusion zones, oddly shaped areas) where the
+ * bounding box would reject far too much floor.
+ */
+export function segmentIntersectsPolygon(
+  segment: Segment,
+  polygon: Point[],
+): boolean {
+  if (polygon.length < 3) return false;
+  if (pointInPolygon(segment.a, polygon)) return true;
+  if (pointInPolygon(segment.b, polygon)) return true;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    if (segmentIntersection(segment, { a: polygon[j], b: polygon[i] })) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /** Closest point on a segment to `point`, and how far along it that is. */
 export function projectOntoSegment(
   point: Point,
@@ -343,6 +366,325 @@ export function sanitizePoints(value: unknown): Point[] | null {
  * rectangle the user dragged out. A polygon starts as that rectangle; a
  * polyline starts as its long axis, which is what a wall or conveyor wants.
  */
+export type ResizeCorner = "nw" | "ne" | "se" | "sw";
+
+/**
+ * Local coordinates of a box corner, given the box's own width/length. `nw` is
+ * the origin because rotation is about the origin (see the conventions above).
+ */
+function localCorner(
+  corner: ResizeCorner,
+  width: number,
+  length: number,
+): Point {
+  switch (corner) {
+    case "nw":
+      return { x: 0, y: 0 };
+    case "ne":
+      return { x: width, y: 0 };
+    case "se":
+      return { x: width, y: length };
+    case "sw":
+      return { x: 0, y: length };
+  }
+}
+
+const OPPOSITE_CORNER: Record<ResizeCorner, ResizeCorner> = {
+  nw: "se",
+  ne: "sw",
+  se: "nw",
+  sw: "ne",
+};
+
+/** World position of one corner of a (possibly rotated) box. */
+export function worldCorner(
+  originXMm: number,
+  originYMm: number,
+  widthMm: number,
+  lengthMm: number,
+  rotationDegrees: number,
+  corner: ResizeCorner,
+): Point {
+  const local = localCorner(corner, widthMm, lengthMm);
+  const rotated = rotateAboutOrigin(local.x, local.y, rotationDegrees);
+  return { x: originXMm + rotated.x, y: originYMm + rotated.y };
+}
+
+/**
+ * Union bounding box of several envelopes. Used to size the outline drawn
+ * around a mixed multi-selection and to find the pivot for a group rotate --
+ * an empty input returns a degenerate zero-size box at the origin rather than
+ * throwing, since a selection can transiently be empty between renders.
+ */
+export function unionEnvelopes(envelopes: Envelope[]): Envelope {
+  if (envelopes.length === 0) {
+    return { minX: 0, minY: 0, maxX: 0, maxY: 0 };
+  }
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const e of envelopes) {
+    if (e.minX < minX) minX = e.minX;
+    if (e.minY < minY) minY = e.minY;
+    if (e.maxX > maxX) maxX = e.maxX;
+    if (e.maxY > maxY) maxY = e.maxY;
+  }
+  return { minX, minY, maxX, maxY };
+}
+
+/**
+ * Rigid-body rotation of one member of a group: rotates its origin around an
+ * external pivot by `deltaDegrees` and adds the same delta to its own
+ * rotation. `points` (feature-local, relative to the origin) need no change --
+ * only where the origin sits and which way the box now faces.
+ *
+ * Derivation: a box is the transform T(origin) ∘ Rot(rotation). Rotating that
+ * whole rigid body by `delta` about pivot P is Rot_P(delta) ∘ T(origin) ∘
+ * Rot(rotation), which expands to T(P + Rot(delta)(origin - P)) ∘
+ * Rot(delta + rotation) -- i.e. exactly the origin/rotation update below.
+ */
+export function rigidRotateAround(
+  originXMm: number,
+  originYMm: number,
+  rotationDegrees: number,
+  pivotXMm: number,
+  pivotYMm: number,
+  deltaDegrees: number,
+): { originXMm: number; originYMm: number; rotationDegrees: number } {
+  const rel = rotateAboutOrigin(
+    originXMm - pivotXMm,
+    originYMm - pivotYMm,
+    deltaDegrees,
+  );
+  return {
+    originXMm: Math.round(pivotXMm + rel.x),
+    originYMm: Math.round(pivotYMm + rel.y),
+    rotationDegrees: normalizeRotation(rotationDegrees + deltaDegrees),
+  };
+}
+
+/**
+ * Translation to apply to every member of a group so its combined bounding
+ * box sits inside the hall, preserving every member's position relative to
+ * the others. A box bigger than the hall on an axis pins to that axis's near
+ * edge rather than being left to hang off both sides.
+ */
+export function clampBBoxOffset(
+  bbox: Envelope,
+  hallWidthMm: number,
+  hallLengthMm: number,
+): Point {
+  const width = bbox.maxX - bbox.minX;
+  const length = bbox.maxY - bbox.minY;
+
+  const dx =
+    width > hallWidthMm
+      ? -bbox.minX
+      : Math.max(-bbox.minX, Math.min(0, hallWidthMm - bbox.maxX));
+  const dy =
+    length > hallLengthMm
+      ? -bbox.minY
+      : Math.max(-bbox.minY, Math.min(0, hallLengthMm - bbox.maxY));
+
+  return { x: dx, y: dy };
+}
+
+/**
+ * Resizes a rotated box by dragging one corner, holding the opposite corner
+ * fixed in world space.
+ *
+ * The naive version -- deriving width from the pointer's world X and length
+ * from its world Y -- silently assumes the box is axis-aligned. Once a feature
+ * is rotated 90° its local width runs vertically on screen, so dragging
+ * sideways stretched it the wrong way. Everything here happens in the box's
+ * own rotated frame instead, so a drag along the box's visible long edge
+ * always changes the dimension the user is actually pulling.
+ */
+export function resizeRotatedBox(
+  originXMm: number,
+  originYMm: number,
+  widthMm: number,
+  lengthMm: number,
+  rotationDegrees: number,
+  corner: ResizeCorner,
+  pointer: Point,
+  minSizeMm: number,
+): { originXMm: number; originYMm: number; widthMm: number; lengthMm: number } {
+  const anchor = OPPOSITE_CORNER[corner];
+  // The anchor's world position is fixed for the whole gesture: it is computed
+  // from the geometry as it was when the drag started.
+  const anchorWorld = worldCorner(
+    originXMm,
+    originYMm,
+    widthMm,
+    lengthMm,
+    rotationDegrees,
+    anchor,
+  );
+
+  // Pointer offset from the anchor, expressed in the box's local frame.
+  const local = rotateAboutOrigin(
+    pointer.x - anchorWorld.x,
+    pointer.y - anchorWorld.y,
+    -rotationDegrees,
+  );
+
+  // Which way the dragged corner grows along each local axis.
+  const signX = corner === "ne" || corner === "se" ? 1 : -1;
+  const signY = corner === "sw" || corner === "se" ? 1 : -1;
+
+  const nextWidth = Math.max(minSizeMm, Math.round(local.x * signX));
+  const nextLength = Math.max(minSizeMm, Math.round(local.y * signY));
+
+  // Re-anchor: the origin is wherever it has to be for the anchor corner of
+  // the *new* box to land back on the same world point.
+  const anchorLocal = localCorner(anchor, nextWidth, nextLength);
+  const rotatedAnchor = rotateAboutOrigin(
+    anchorLocal.x,
+    anchorLocal.y,
+    rotationDegrees,
+  );
+
+  return {
+    originXMm: Math.round(anchorWorld.x - rotatedAnchor.x),
+    originYMm: Math.round(anchorWorld.y - rotatedAnchor.y),
+    widthMm: nextWidth,
+    lengthMm: nextLength,
+  };
+}
+
+export type ResizeAxis = "width" | "length";
+export type ResizeEnd = "start" | "end";
+
+/**
+ * Resizes a rotated box along a single local axis, holding the other axis's
+ * size completely fixed regardless of where the pointer actually is.
+ *
+ * Some feature kinds have one dimension that is a real physical spec (a dock
+ * door's opening width, a wall's thickness) and should never move under a
+ * drag -- only a corner handle can offer that, since corner-dragging changes
+ * both dimensions from wherever the pointer lands. This is the single-axis
+ * counterpart: `axis` says which dimension the drag is allowed to change,
+ * `end` says which edge of that axis is being pulled (the opposite edge is
+ * the anchor, exactly like resizeRotatedBox's opposite corner).
+ */
+export function resizeRotatedBoxAlongAxis(
+  originXMm: number,
+  originYMm: number,
+  widthMm: number,
+  lengthMm: number,
+  rotationDegrees: number,
+  axis: ResizeAxis,
+  end: ResizeEnd,
+  pointer: Point,
+  minSizeMm: number,
+): { originXMm: number; originYMm: number; widthMm: number; lengthMm: number } {
+  // Any corner on the fixed edge works as the anchor, since the locked axis
+  // never changes -- the two candidates for a given (axis, end) always agree
+  // on where that edge sits.
+  const anchor: ResizeCorner =
+    axis === "length"
+      ? end === "end"
+        ? "nw"
+        : "sw"
+      : end === "end"
+        ? "nw"
+        : "ne";
+
+  const anchorWorld = worldCorner(
+    originXMm,
+    originYMm,
+    widthMm,
+    lengthMm,
+    rotationDegrees,
+    anchor,
+  );
+
+  const local = rotateAboutOrigin(
+    pointer.x - anchorWorld.x,
+    pointer.y - anchorWorld.y,
+    -rotationDegrees,
+  );
+
+  let nextWidth = widthMm;
+  let nextLength = lengthMm;
+
+  if (axis === "length") {
+    const sign = end === "end" ? 1 : -1;
+    nextLength = Math.max(minSizeMm, Math.round(local.y * sign));
+  } else {
+    const sign = end === "end" ? 1 : -1;
+    nextWidth = Math.max(minSizeMm, Math.round(local.x * sign));
+  }
+
+  const anchorLocal = localCorner(anchor, nextWidth, nextLength);
+  const rotatedAnchor = rotateAboutOrigin(
+    anchorLocal.x,
+    anchorLocal.y,
+    rotationDegrees,
+  );
+
+  return {
+    originXMm: Math.round(anchorWorld.x - rotatedAnchor.x),
+    originYMm: Math.round(anchorWorld.y - rotatedAnchor.y),
+    widthMm: nextWidth,
+    lengthMm: nextLength,
+  };
+}
+
+/**
+ * World position of the midpoint of one edge along the adjustable axis --
+ * where a single-axis resize handle sits. For axis "length" this is the
+ * midpoint of the box's width at y=0 (end "start") or y=length (end "end");
+ * symmetric for axis "width".
+ */
+export function edgeMidpoint(
+  originXMm: number,
+  originYMm: number,
+  widthMm: number,
+  lengthMm: number,
+  rotationDegrees: number,
+  axis: ResizeAxis,
+  end: ResizeEnd,
+): Point {
+  const local =
+    axis === "length"
+      ? { x: widthMm / 2, y: end === "end" ? lengthMm : 0 }
+      : { x: end === "end" ? widthMm : 0, y: lengthMm / 2 };
+  const rotated = rotateAboutOrigin(local.x, local.y, rotationDegrees);
+  return { x: originXMm + rotated.x, y: originYMm + rotated.y };
+}
+
+/**
+ * Footprint for a feature dropped by a single click: centred on the cursor and
+ * pulled back inside the hall if it would hang over an edge.
+ *
+ * Shared by the drag-free placement gesture and the ghost preview that
+ * preceded it, so what you see under the cursor is exactly what gets created.
+ * A footprint larger than the hall pins to the near edge rather than jumping.
+ */
+export function centredPlacement(
+  centreXMm: number,
+  centreYMm: number,
+  widthMm: number,
+  lengthMm: number,
+  hallWidthMm: number,
+  hallLengthMm: number,
+): { x: number; y: number; width: number; height: number } {
+  const width = Math.min(Math.max(0, widthMm), hallWidthMm);
+  const height = Math.min(Math.max(0, lengthMm), hallLengthMm);
+  const x = Math.max(
+    0,
+    Math.min(Math.round(centreXMm - width / 2), hallWidthMm - width),
+  );
+  const y = Math.max(
+    0,
+    Math.min(Math.round(centreYMm - height / 2), hallLengthMm - height),
+  );
+  return { x, y, width, height };
+}
+
 export function defaultPointsForDrawnRect(
   geometryKind: GeometryKind,
   widthMm: number,

@@ -5,7 +5,7 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { createClient as createSupabaseClient } from "@supabase/supabase-js";
 import { db } from "@/lib/db";
-import { employees, halls, positionTypes, warehouses, zoneTypes } from "@/drizzle/schema";
+import { employees, halls, positionTypes, warehouses } from "@/drizzle/schema";
 import { createClient } from "@/lib/server";
 
 export const UNDERLAY_BUCKET = "layout-underlays";
@@ -176,20 +176,6 @@ export async function hallBelongsToWarehouse(
     .select({ hallId: halls.hallId })
     .from(halls)
     .where(and(eq(halls.hallId, hallId), eq(halls.warehouseId, warehouseId)))
-    .limit(1);
-  return Boolean(row);
-}
-
-export async function zoneBelongsToWarehouse(
-  zoneId: number,
-  warehouseId: number,
-) {
-  const [row] = await db
-    .select({ zoneId: zoneTypes.zoneId })
-    .from(zoneTypes)
-    .where(
-      and(eq(zoneTypes.zoneId, zoneId), eq(zoneTypes.warehouseId, warehouseId)),
-    )
     .limit(1);
   return Boolean(row);
 }

@@ -11,13 +11,19 @@
 import type { FeatureDTO, LocationDTO } from "./types";
 import {
   computeEnvelope,
+  distanceToPolyline,
+  footprintVertices,
+  pointInPolygon,
   projectOntoSegment,
   segmentIntersection,
+  segmentIntersectsPolygon,
   segmentIntersectsRect,
+  worldPoints,
   type Point,
   type Rect,
   type Segment,
 } from "./geometry";
+import { pathWidthMmFor } from "./feature-kinds";
 export { segmentIntersectsRect };
 
 // --- Tuning ---------------------------------------------------------------
@@ -51,6 +57,68 @@ export const RUN_BREAK_MM = 1500;
 export const PERIMETER_OFFSET_MM = 1500;
 /** Longest cross-aisle the compiler will invent between corridor ends. */
 export const MAX_CONNECTOR_MM = 20000;
+/** Lattice spacing for a free-roam zone that does not state its own. */
+export const ZONE_DEFAULT_PITCH_MM = 2000;
+/**
+ * Hard floor on lattice spacing. Must stay above MERGE_RADIUS_MM: `ensureNode`
+ * fuses anything closer than that into one node, so a finer pitch would
+ * collapse neighbouring lattice points together and produce a mesh full of
+ * self-edges that get dropped -- a lattice that looks dense and routes worse
+ * than a coarse one.
+ */
+export const ZONE_MIN_PITCH_MM = MERGE_RADIUS_MM * 2;
+/**
+ * Ceiling on lattice points per zone, enforced by coarsening the pitch rather
+ * than truncating the area (half a zone is worse than a coarse whole one).
+ *
+ * The binding constraint is `splitAtIntersections`, which is O(segments^2).
+ * 8-connectivity emits close to 4 segments per node, so 1200 nodes is already
+ * ~4800 segments and ~11M pair tests. Raising this is not free.
+ */
+export const MAX_ZONE_NODES = 1200;
+/**
+ * Smallest island of lattice worth keeping. Below this it is a sliver left by
+ * clipping -- a couple of points wedged in a rack gap -- not floor anyone can
+ * work on, and keeping it does active harm (see `buildZoneLattice`).
+ */
+export const MIN_ZONE_POCKET_NODES = 4;
+/**
+ * How far a mesh node stands off the thing it belongs to -- a zone corner is
+ * pulled this far inside the zone, an obstacle corner this far out from the
+ * obstacle. Nodes sitting exactly on a boundary are the single largest source
+ * of trouble in a visibility graph: `pointInPolygon` gives no guarantee for
+ * them, and every sightline that starts on an edge grazes that edge.
+ */
+export const ZONE_MESH_STANDOFF_MM = SNAP_MM;
+/**
+ * Sightlines are tested against obstacles shrunk by this much, having already
+ * been grown by ZONE_MESH_STANDOFF_MM to place the corner nodes. The gap is
+ * what lets a path hug an obstacle: without it, the sightline between two
+ * corners of the same obstacle runs exactly along the rectangle it is being
+ * tested against and is rejected, so paths could never round a column.
+ */
+export const ZONE_MESH_GRAZE_MM = 5;
+/**
+ * Above this many candidate nodes a zone compiles as a grid instead.
+ *
+ * Visibility is O(N^2) sightlines, each tested against every obstacle in the
+ * hall -- fine at N = 12, not at N = 200. An area chopped up by dozens of
+ * small obstacles is exactly where the grid is both faster and simpler, so
+ * that is where it gets used.
+ */
+export const MAX_ZONE_MESH_NODES = 120;
+/** How close an existing segment may sit to a zone's boundary and still be
+ *  treated as touching it, for stitching. Reuses SNAP_MM, the same "close
+ *  enough to be the same point" tolerance the rest of the compiler already
+ *  uses for node dedup and endpoint alignment. */
+export const ZONE_TOUCH_TOLERANCE_MM = SNAP_MM;
+/**
+ * Zone travel costs slightly more than an equivalent lane. Open floor is
+ * shared with people, pallets and parked equipment, so a router that treats it
+ * as identical to a marked aisle will cut diagonally across a pack area to
+ * save two metres -- which is not how anyone actually drives.
+ */
+export const ZONE_IMPEDANCE = 1.15;
 /** Fixed cost of servicing a pick face, before any lifting. */
 export const HANDLING_BASE_MS = 15000;
 /** Extra handling cost per rack level above the first. Level changes lift
@@ -75,6 +143,18 @@ const PORTAL_FEATURE_KINDS = new Set([
   "GOODS_LIFT",
 ]);
 const DOCK_FEATURE_KINDS = new Set(["DOCK_DOOR"]);
+/** Areas where the whole surface is navigable rather than a centreline. */
+const ZONE_FEATURE_KINDS = new Set(["DRIVE_ZONE", "WORK_ZONE"]);
+/**
+ * Areas nothing may be routed through. These are not `isObstacle` features --
+ * an exclusion is about who may travel, not about something physically in the
+ * way -- so the lattice has to honour them explicitly.
+ */
+const EXCLUSION_FEATURE_KINDS = new Set([
+  "VEHICLE_EXCLUSION",
+  "PEDESTRIAN_EXCLUSION",
+  "NO_ENTRY_ZONE",
+]);
 
 // --- Types ----------------------------------------------------------------
 
@@ -109,13 +189,22 @@ export type CompiledNode = {
 export type CompiledEdge = {
   fromKey: string;
   toKey: string;
-  edgeKind: "LANE" | "AISLE" | "CROSS_AISLE" | "WALKWAY" | "PORTAL" | "ACCESS";
+  edgeKind:
+    | "LANE"
+    | "AISLE"
+    | "CROSS_AISLE"
+    | "WALKWAY"
+    | "PORTAL"
+    | "ACCESS"
+    | "ZONE";
   traversal: "BIDIRECTIONAL" | "FORWARD_ONLY" | "REVERSE_ONLY";
   lengthMm: number;
   widthMm: number | null;
   maxSpeedMms: number | null;
   minClearanceMm: number | null;
   allowedVehicleMask: number;
+  /** Cost multiplier on travel time. 1 is "as fast as the geometry allows". */
+  impedance: number;
   sourceFeatureId: number | null;
 };
 
@@ -139,7 +228,10 @@ export type CompileWarning = {
     | "UNREACHABLE_LOCATIONS"
     | "AISLE_TOO_NARROW"
     | "PORTAL_UNLINKED"
-    | "LOCATION_WITHOUT_ACCESS";
+    | "LOCATION_WITHOUT_ACCESS"
+    | "ZONE_UNUSABLE"
+    | "ZONE_COARSENED"
+    | "ZONE_MESH_FALLBACK";
   message: string;
   featureIds?: number[];
   locationIds?: number[];
@@ -155,6 +247,8 @@ export type CompileResult = {
     inferredCorridors: number;
     authoredLanes: number;
     connectors: number;
+    navigableZones: number;
+    zoneNodes: number;
     componentCount: number;
     reachableLocationCount: number;
     unreachableLocationCount: number;
@@ -353,6 +447,11 @@ export function inferCorridors(
   for (const axis of ["H", "V"] as const) {
     const axisRuns = runs.filter((r) => r.axis === axis);
     if (axisRuns.length === 0) continue;
+    // Corridors laid by *this* pass. `corridors` accumulates across both
+    // passes, and asking "is this face already served?" of a corridor running
+    // the other way is a category error -- its position is measured on the
+    // other axis entirely.
+    const axisCorridors: InferredCorridor[] = [];
 
     for (let i = 0; i < axisRuns.length; i++) {
       for (let j = 0; j < axisRuns.length; j++) {
@@ -382,11 +481,13 @@ export function inferCorridors(
         if (blocked) continue;
 
         const centre = (a.bandMax + b.bandMin) / 2;
-        corridors.push({
+        const inner: InferredCorridor = {
           ...runSegment(a, centre, overlapMin, overlapMax),
           widthMm: gap,
           kind: "INNER",
-        });
+        };
+        corridors.push(inner);
+        axisCorridors.push(inner);
       }
     }
 
@@ -405,7 +506,7 @@ export function inferCorridors(
         [run.bandMax, 1],
       ] as const) {
         // Already served by an inferred corridor on this side?
-        const served = corridors.some((corridor) => {
+        const served = axisCorridors.some((corridor) => {
           const position = axis === "H" ? corridor.a.y : corridor.a.x;
           const onThisSide =
             direction < 0
@@ -427,19 +528,25 @@ export function inferCorridors(
         if (run.spanMax - run.spanMin < MIN_OVERLAP_MM) continue;
 
         // Do not lay a perimeter aisle straight through another rack run.
+        // Every run, not just this axis's: a block of vertical racking is
+        // just as solid to a horizontal perimeter aisle as another horizontal
+        // run would be, and scoping this to axisRuns drove an aisle straight
+        // through the perpendicular block whenever a hall mixed the two.
         const candidate = runSegment(run, position, run.spanMin, run.spanMax);
-        const blocked = axisRuns.some(
+        const blocked = runs.some(
           (other) =>
             other !== run &&
             segmentIntersectsRect(candidate, other.rect, SNAP_MM),
         );
         if (blocked) continue;
 
-        corridors.push({
+        const perimeter: InferredCorridor = {
           ...candidate,
           widthMm: PERIMETER_OFFSET_MM * 2,
           kind: "PERIMETER",
-        });
+        };
+        corridors.push(perimeter);
+        axisCorridors.push(perimeter);
       }
     }
   }
@@ -461,6 +568,7 @@ type WorkingSegment = {
   maxSpeedMms: number | null;
   minClearanceMm: number | null;
   allowedVehicleMask: number;
+  impedance: number;
   sourceFeatureId: number | null;
   traversal: CompiledEdge["traversal"];
 };
@@ -527,6 +635,19 @@ export function splitAtIntersections(
 
   for (let i = 0; i < segments.length; i++) {
     for (let j = i + 1; j < segments.length; j++) {
+      // Two lattice edges never need cutting against each other. They are
+      // built to meet only at lattice points, and the one place they do cross
+      // -- the two diagonals of a cell, which meet at its centre -- is a
+      // crossing with no junction at it: splitting there would invent a node
+      // per cell, roughly tripling the lattice and putting a kink in every
+      // diagonal run. Lattice-vs-lane crossings still split, which is what
+      // actually stitches an authored lane into the mesh.
+      if (
+        segments[i].edgeKind === "ZONE" &&
+        segments[j].edgeKind === "ZONE"
+      ) {
+        continue;
+      }
       const hit = segmentIntersection(segments[i], segments[j]);
       if (!hit) continue;
       for (const index of [i, j]) {
@@ -538,6 +659,479 @@ export function splitAtIntersections(
   }
 
   return applyCuts(segments, cutsBySegment);
+}
+
+// --- Free-roam zones ------------------------------------------------------
+
+export type NavigableZone = {
+  featureId: number;
+  /** Boundary in world mm, already rotated. */
+  polygon: Point[];
+  pitchMm: number;
+  allowedVehicleMask: number;
+  maxSpeedMms: number | null;
+};
+
+export type ZoneLattice = {
+  segments: WorkingSegment[];
+  /** Every lattice point that survived clipping, for stitching lanes on. */
+  nodes: Point[];
+  /** What the pitch ended up being after the MAX_ZONE_NODES clamp. */
+  pitchUsedMm: number;
+  coarsened: boolean;
+};
+
+function pointInRect(point: Point, rect: Rect): boolean {
+  return (
+    point.x > rect.minX &&
+    point.x < rect.maxX &&
+    point.y > rect.minY &&
+    point.y < rect.maxY
+  );
+}
+
+/**
+ * Fills a navigable area with a grid of nodes and the edges between them.
+ *
+ * A lane is a centreline: one line that says "travel here". An open area has
+ * no such line -- the whole surface is travel space -- which is exactly why
+ * `inferCorridors` refuses to guess one for gaps wider than MAX_CORRIDOR_MM.
+ * A lattice is the cheapest honest answer: sample the area, keep what is
+ * actually clear, and let the router pick its way across.
+ *
+ * 8-connected, not 4. With only the axis neighbours a diagonal crossing
+ * becomes a staircase, and `turnPenaltyMs` charges a full 90-degree turn at
+ * every single step of it -- a 20 m diagonal would cost more than going the
+ * long way round. The diagonals make that one straight arc.
+ */
+export function buildZoneLattice(
+  zone: NavigableZone,
+  blocked: { rects: Rect[]; polygons: Point[][] },
+): ZoneLattice {
+  const empty: ZoneLattice = {
+    segments: [],
+    nodes: [],
+    pitchUsedMm: zone.pitchMm,
+    coarsened: false,
+  };
+  if (zone.polygon.length < 3) return empty;
+
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const p of zone.polygon) {
+    if (p.x < minX) minX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y > maxY) maxY = p.y;
+  }
+
+  let pitch = Math.max(ZONE_MIN_PITCH_MM, Math.round(zone.pitchMm));
+  const area = (maxX - minX) * (maxY - minY);
+  let coarsened = false;
+  if (area / (pitch * pitch) > MAX_ZONE_NODES) {
+    pitch = Math.ceil(Math.sqrt(area / MAX_ZONE_NODES));
+    coarsened = true;
+  }
+
+  // Sample the *cell centres* of one absolute grid: (k + 0.5) * pitch.
+  //
+  // Two properties matter here. Anchoring to absolute multiples rather than to
+  // the zone's own corner means two zones sharing a pitch interlock, instead
+  // of producing offset lattices that pass through each other without ever
+  // meeting. And the half-pitch offset keeps samples off the boundary itself:
+  // a zone dragged out to round coordinates has edges on exact pitch
+  // multiples, `pointInPolygon` gives no guarantee for a point sitting on an
+  // edge, and the result was whole boundary rows flickering in and out and
+  // splitting the lattice into pieces.
+  const firstIndex = (low: number) => Math.ceil(low / pitch - 0.5);
+  const sample = (index: number) => (index + 0.5) * pitch;
+  const ix0 = firstIndex(minX);
+  const iy0 = firstIndex(minY);
+  const startX = sample(ix0);
+  const startY = sample(iy0);
+  const columns = Math.floor((maxX - startX) / pitch) + 1;
+  const rows = Math.floor((maxY - startY) / pitch) + 1;
+  if (columns < 1 || rows < 1) return { ...empty, pitchUsedMm: pitch, coarsened };
+
+  // Keep the lattice off the face of anything solid. A sample landing exactly
+  // on a rack's boundary passes a strict inside-test and survives, which lays
+  // a row of nodes flush against the racking -- floor no truck can occupy, and
+  // the source of most of the slivers the pocket-pruning below has to clean
+  // up. Standing back by the snap tolerance removes them at the sampling step.
+  const clear = (rect: Rect): Rect => ({
+    minX: rect.minX - SNAP_MM,
+    minY: rect.minY - SNAP_MM,
+    maxX: rect.maxX + SNAP_MM,
+    maxY: rect.maxY + SNAP_MM,
+  });
+  const blockedRects = blocked.rects.map(clear);
+
+  const usable = (point: Point): boolean => {
+    if (!pointInPolygon(point, zone.polygon)) return false;
+    for (const rect of blockedRects) if (pointInRect(point, rect)) return false;
+    for (const poly of blocked.polygons) {
+      if (pointInPolygon(point, poly)) return false;
+    }
+    return true;
+  };
+
+  const grid: (Point | null)[][] = [];
+  const nodes: Point[] = [];
+  for (let iy = 0; iy < rows; iy++) {
+    const row: (Point | null)[] = [];
+    for (let ix = 0; ix < columns; ix++) {
+      const point = { x: startX + ix * pitch, y: startY + iy * pitch };
+      if (usable(point)) {
+        row.push(point);
+        nodes.push(point);
+      } else {
+        row.push(null);
+      }
+    }
+    grid.push(row);
+  }
+
+  const crossesBoundary = (segment: Segment): boolean => {
+    // Both ends are already known to be inside, so any boundary crossing means
+    // the segment leaves and re-enters -- which only a concave zone can do,
+    // and which would cut a corner through floor that is not part of the zone.
+    for (let i = 0, j = zone.polygon.length - 1; i < zone.polygon.length; j = i++) {
+      if (segmentIntersection(segment, { a: zone.polygon[j], b: zone.polygon[i] })) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  const passable = (a: Point, b: Point): boolean => {
+    const segment = { a, b };
+    for (const rect of blockedRects) {
+      if (segmentIntersectsRect(segment, rect)) return false;
+    }
+    for (const poly of blocked.polygons) {
+      if (segmentIntersectsPolygon(segment, poly)) return false;
+    }
+    return !crossesBoundary(segment);
+  };
+
+  const template = {
+    edgeKind: "ZONE" as const,
+    widthMm: null,
+    maxSpeedMms: zone.maxSpeedMms,
+    minClearanceMm: null,
+    allowedVehicleMask: zone.allowedVehicleMask,
+    impedance: ZONE_IMPEDANCE,
+    sourceFeatureId: zone.featureId,
+    traversal: "BIDIRECTIONAL" as const,
+  };
+
+  // E, SE, S, SW covers all eight directions exactly once per pair.
+  const NEIGHBOURS: Array<[number, number]> = [
+    [1, 0],
+    [1, 1],
+    [0, 1],
+    [-1, 1],
+  ];
+
+  const segments: WorkingSegment[] = [];
+  for (let iy = 0; iy < rows; iy++) {
+    for (let ix = 0; ix < columns; ix++) {
+      const from = grid[iy][ix];
+      if (!from) continue;
+      for (const [dx, dy] of NEIGHBOURS) {
+        const nx = ix + dx;
+        const ny = iy + dy;
+        if (nx < 0 || nx >= columns || ny < 0 || ny >= rows) continue;
+        const to = grid[ny][nx];
+        if (!to) continue;
+        if (!passable(from, to)) continue;
+        segments.push({ ...template, a: from, b: to });
+      }
+    }
+  }
+
+  const pruned = pruneZonePockets(segments, nodes);
+  return { ...pruned, pitchUsedMm: pitch, coarsened };
+}
+
+/**
+ * Splits a lattice or mesh into connected pieces and drops the ones too small
+ * to be usable floor.
+ *
+ * Slivers matter beyond being untidy: access points attach to the *nearest*
+ * segment, so two points stranded in a rack gap can capture a bay's pick face
+ * onto an island and compile that bay as unreachable.
+ */
+function pruneZonePockets(
+  segments: WorkingSegment[],
+  nodes: Point[],
+): { segments: WorkingSegment[]; nodes: Point[] } {
+  const pointKey = (p: Point) => `${p.x}:${p.y}`;
+  const componentOf = connectedComponents(
+    nodes.map(pointKey),
+    segments.map((s) => ({ fromKey: pointKey(s.a), toKey: pointKey(s.b) })),
+  );
+  const componentSize = new Map<string, number>();
+  for (const root of componentOf.values()) {
+    componentSize.set(root, (componentSize.get(root) ?? 0) + 1);
+  }
+  const isKept = (p: Point) => {
+    const root = componentOf.get(pointKey(p));
+    return (
+      root !== undefined &&
+      (componentSize.get(root) ?? 0) >= MIN_ZONE_POCKET_NODES
+    );
+  };
+  return {
+    segments: segments.filter((s) => isKept(s.a)),
+    nodes: nodes.filter(isKept),
+  };
+}
+
+/** Grows a rect outwards on every side. */
+function expandRect(rect: Rect, by: number): Rect {
+  return {
+    minX: rect.minX - by,
+    minY: rect.minY - by,
+    maxX: rect.maxX + by,
+    maxY: rect.maxY + by,
+  };
+}
+
+/**
+ * Visibility mesh over a navigable area.
+ *
+ * The insight a lattice misses is that a shortest path across open floor is
+ * straight except where something forces it to bend, and the only places it
+ * can bend are corners. So rather than sampling the whole surface, put a node
+ * on each corner a path could turn on -- the area's own corners, the corners
+ * of anything standing inside it -- plus wherever the outside network reaches
+ * the area, and join every pair that can see each other. A 40 x 20 m apron
+ * comes out around a dozen nodes instead of several hundred, and the paths
+ * are exact rather than quantised to 45 degrees.
+ *
+ * Obstacle corners are the part that cannot be skipped. A path through a
+ * region with holes in it bends around the corners of those holes, and those
+ * corners are not on the outer boundary -- so a mesh built from boundary nodes
+ * alone is not merely coarse, it is wrong the moment there is a column in the
+ * middle of the floor, which in a warehouse is most of the time.
+ */
+export function buildZoneVisibilityMesh(
+  zone: NavigableZone,
+  blocked: { rects: Rect[]; polygons: Point[][] },
+  /** Where the existing network touches this zone: lane ends inside it, and
+   *  the points at which lanes cross its boundary. */
+  portals: Point[],
+): { segments: WorkingSegment[]; nodes: Point[]; overflowed: boolean } {
+  const polygon = zone.polygon;
+  const none = { segments: [], nodes: [], overflowed: false };
+  if (polygon.length < 3) return none;
+
+  const standoff = ZONE_MESH_STANDOFF_MM;
+  const grown = blocked.rects.map((r) => expandRect(r, standoff));
+
+  const insideZone = (p: Point) => pointInPolygon(p, polygon);
+  const clearOfBlockers = (p: Point) => {
+    for (const rect of grown) if (pointInRect(p, rect)) return false;
+    for (const poly of blocked.polygons) if (pointInPolygon(p, poly)) return false;
+    return true;
+  };
+
+  const candidates: Point[] = [];
+  const seen = new Set<string>();
+  const add = (p: Point) => {
+    const point = { x: Math.round(p.x), y: Math.round(p.y) };
+    const key = `${point.x}:${point.y}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    candidates.push(point);
+  };
+
+  // The zone's own corners, pulled inside along the angle bisector. Which way
+  // the bisector points depends on whether the corner is convex or reflex, so
+  // rather than working that out, try it and flip if it landed outside.
+  for (let i = 0; i < polygon.length; i++) {
+    const vertex = polygon[i];
+    const previous = polygon[(i - 1 + polygon.length) % polygon.length];
+    const next = polygon[(i + 1) % polygon.length];
+    const unit = (from: Point, to: Point) => {
+      const dx = to.x - from.x;
+      const dy = to.y - from.y;
+      const length = Math.hypot(dx, dy) || 1;
+      return { x: dx / length, y: dy / length };
+    };
+    const a = unit(vertex, previous);
+    const b = unit(vertex, next);
+    let dx = a.x + b.x;
+    let dy = a.y + b.y;
+    const length = Math.hypot(dx, dy);
+    if (length < 1e-9) {
+      // Straight-through vertex: no bisector, and nothing to turn on either.
+      continue;
+    }
+    dx /= length;
+    dy /= length;
+    let inward = { x: vertex.x + dx * standoff, y: vertex.y + dy * standoff };
+    if (!insideZone(inward)) {
+      inward = { x: vertex.x - dx * standoff, y: vertex.y - dy * standoff };
+    }
+    if (insideZone(inward) && clearOfBlockers(inward)) add(inward);
+  }
+
+  // Corners of everything standing in the zone, taken from the grown rect so
+  // they already carry their clearance.
+  for (const rect of grown) {
+    for (const corner of [
+      { x: rect.minX, y: rect.minY },
+      { x: rect.maxX, y: rect.minY },
+      { x: rect.maxX, y: rect.maxY },
+      { x: rect.minX, y: rect.maxY },
+    ]) {
+      if (insideZone(corner) && clearOfBlockers(corner)) add(corner);
+    }
+  }
+
+  // Where the outside network reaches in. Not standing these off: they have to
+  // land on the lane node they are joining, not near it.
+  for (const portal of portals) {
+    if (clearOfBlockers(portal)) add(portal);
+  }
+
+  if (candidates.length < 2) return none;
+  if (candidates.length > MAX_ZONE_MESH_NODES) {
+    return { segments: [], nodes: [], overflowed: true };
+  }
+
+  const nearlyAt = (p: Point, q: Point) => Math.hypot(p.x - q.x, p.y - q.y) < 2;
+
+  const visible = (a: Point, b: Point): boolean => {
+    const segment = { a, b };
+
+    // Must not leave the zone. Touching the boundary at an endpoint is normal
+    // (a portal sits on it), so only a crossing away from both ends counts.
+    for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+      const hit = segmentIntersection(segment, { a: polygon[j], b: polygon[i] });
+      if (!hit) continue;
+      if (nearlyAt(hit, a) || nearlyAt(hit, b)) continue;
+      return false;
+    }
+    const midpoint = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    if (!insideZone(midpoint)) return false;
+
+    for (const rect of grown) {
+      if (segmentIntersectsRect(segment, rect, ZONE_MESH_GRAZE_MM)) return false;
+    }
+    for (const poly of blocked.polygons) {
+      if (segmentIntersectsPolygon(segment, poly)) return false;
+    }
+    return true;
+  };
+
+  const template = {
+    edgeKind: "ZONE" as const,
+    widthMm: null,
+    maxSpeedMms: zone.maxSpeedMms,
+    minClearanceMm: null,
+    allowedVehicleMask: zone.allowedVehicleMask,
+    impedance: ZONE_IMPEDANCE,
+    sourceFeatureId: zone.featureId,
+    traversal: "BIDIRECTIONAL" as const,
+  };
+
+  const segments: WorkingSegment[] = [];
+  for (let i = 0; i < candidates.length; i++) {
+    for (let j = i + 1; j < candidates.length; j++) {
+      const a = candidates[i];
+      const b = candidates[j];
+      if (Math.hypot(b.x - a.x, b.y - a.y) <= MERGE_RADIUS_MM) continue;
+      if (!visible(a, b)) continue;
+      segments.push({ ...template, a, b });
+    }
+  }
+
+  const pruned = pruneZonePockets(segments, candidates);
+  return { ...pruned, overflowed: false };
+}
+
+/**
+ * Where the existing network reaches into, or merely touches, a zone.
+ *
+ * Three cases, and only the third is subtle. A segment ending inside the
+ * zone, or crossing properly into it, both register on `pointInPolygon` /
+ * `segmentIntersection` directly and get a real node once the ordinary
+ * `splitAtIntersections` pass runs over the whole network later. A segment
+ * that only *grazes* a zone edge -- runs flush along it, or stops a few
+ * millimetres short of it after snapping -- registers on neither:
+ * `segmentIntersection` explicitly excludes the parallel case (see its own
+ * comment; that exclusion exists for a different reason and has this side
+ * effect here), and an endpoint sitting just outside the polygon fails
+ * `pointInPolygon` outright. This is not a rare shape for a zone specifically
+ * -- a road bordering a work cell, or a drive area's edge landing exactly on
+ * an aisle mouth, is the ordinary way these get drawn, not a mistake.
+ *
+ * A graze still needs a genuine cut on the existing segment, not just a node
+ * dropped near it -- a node placed on a line without splitting it is
+ * geometrically right and topologically isolated (see `applyCuts`). Rather
+ * than cutting it here, a short stub is added from the graze point back onto
+ * the existing segment: it crosses the segment for real, so the same
+ * `splitAtIntersections` pass that handles every other crossing in the
+ * network makes the cut, and the stub's zone-side end becomes a mesh portal.
+ */
+export function findZoneTouches(
+  existing: WorkingSegment[],
+  polygon: Point[],
+  blocked: { rects: Rect[]; polygons: Point[][] },
+  stubTemplate: Omit<WorkingSegment, "a" | "b">,
+  tolerance: number = ZONE_TOUCH_TOLERANCE_MM,
+): { portals: Point[]; stubs: WorkingSegment[] } {
+  const portals: Point[] = [];
+  const stubs: WorkingSegment[] = [];
+  const closed = [...polygon, polygon[0]];
+
+  const blockedByObstacle = (segment: Segment): boolean => {
+    for (const rect of blocked.rects) {
+      if (segmentIntersectsRect(segment, rect)) return true;
+    }
+    for (const poly of blocked.polygons) {
+      if (segmentIntersectsPolygon(segment, poly)) return true;
+    }
+    return false;
+  };
+
+  for (const segment of existing) {
+    for (const end of [segment.a, segment.b]) {
+      if (
+        pointInPolygon(end, polygon) ||
+        distanceToPolyline(end, closed) <= tolerance
+      ) {
+        portals.push(end);
+      }
+    }
+
+    for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+      const hit = segmentIntersection(segment, {
+        a: polygon[j],
+        b: polygon[i],
+      });
+      if (hit) portals.push(hit);
+    }
+
+    // Graze: a zone corner sits close to the *middle* of this segment without
+    // the two ever crossing. `proj.point` is real geometry already on the
+    // segment, so a stub out to the corner is enough to force the cut.
+    for (const corner of polygon) {
+      const proj = projectOntoSegment(corner, segment);
+      if (proj.distance > tolerance) continue;
+      const stub = { a: proj.point, b: corner };
+      if (blockedByObstacle(stub)) continue;
+      portals.push(proj.point);
+      stubs.push({ ...stubTemplate, ...stub });
+    }
+  }
+
+  return { portals, stubs };
 }
 
 function fullVehicleMask(vehicles: VehicleProfile[]): number {
@@ -592,8 +1186,13 @@ export function obstacleRects(
   return result;
 }
 
-/** Union-find over node keys, used for the connectivity report. */
-function connectedComponents(
+/**
+ * Union-find over node keys. Used for the connectivity report at compile
+ * time, and reused client-side (layout-designer-canvas.tsx) to colour
+ * disconnected pieces on the canvas -- both need the exact same notion of
+ * "same component" or the warning text and what's drawn red could disagree.
+ */
+export function connectedComponents(
   nodeKeys: string[],
   edges: Array<{ fromKey: string; toKey: string }>,
 ): Map<string, string> {
@@ -635,6 +1234,29 @@ export function compileNavigationGraph(input: CompilerInput): CompileResult {
   const travellerHeight =
     input.hall.clearHeightMm ?? DEFAULT_TRAVELLER_HEIGHT_MM;
 
+  // Human-readable names for warning messages -- a bare count ("7 separate
+  // pieces", "3 locations unreachable") tells you nothing you don't already
+  // know from the map; the code/label is what actually lets you go find the
+  // thing on the canvas instead of guessing from a screenshot.
+  const locationCodeById = new Map(
+    input.locations.map((l) => [l.locationId, l.locationCode]),
+  );
+  const featureNameById = new Map(
+    input.features.map((f) => [f.featureId, f.label || f.kind]),
+  );
+  function namesFor(
+    ids: number[],
+    lookup: Map<number, string>,
+    limit = 5,
+  ): string {
+    const unique = Array.from(new Set(ids));
+    const shown = unique
+      .slice(0, limit)
+      .map((id) => lookup.get(id) ?? `#${id}`);
+    const rest = unique.length - shown.length;
+    return rest > 0 ? `${shown.join(", ")}, and ${rest} more` : shown.join(", ");
+  }
+
   // 1. Rack runs and inferred corridors.
   const footprints = collectBayFootprints(input.locations, floorLevel);
   const runs = inferRackRuns(footprints);
@@ -655,6 +1277,7 @@ export function compileNavigationGraph(input: CompilerInput): CompileResult {
     maxSpeedMms: null,
     minClearanceMm: null,
     allowedVehicleMask: allVehicles,
+    impedance: 1,
     sourceFeatureId: null,
     traversal: "BIDIRECTIONAL",
   }));
@@ -674,10 +1297,13 @@ export function compileNavigationGraph(input: CompilerInput): CompileResult {
 
     const isWalkway = feature.kind === "PEDESTRIAN_WALKWAY";
     const mask = isWalkway ? footVehicles || allVehicles : allVehicles;
-    const world = points.map((p) => ({
-      x: feature.originXMm + p.x,
-      y: feature.originYMm + p.y,
-    }));
+    // Rotation matters: `points` are feature-local and unrotated, so origin+p
+    // is only the world position of an unrotated lane. Every lane the designer
+    // places starts out horizontal, and the "Rotate 90°" button is the only
+    // way to get a vertical one -- so ignoring rotation here compiled every
+    // vertical lane back into a horizontal one at the wrong coordinates,
+    // which is why they appeared on the canvas but never in the graph.
+    const world = worldPoints(feature);
 
     for (let i = 1; i < world.length; i++) {
       const segment = { a: world[i - 1], b: world[i] };
@@ -693,17 +1319,25 @@ export function compileNavigationGraph(input: CompilerInput): CompileResult {
           : feature.kind === "CROSS_AISLE"
             ? "CROSS_AISLE"
             : "LANE",
-        widthMm: Number(feature.attrs.widthMm) || null,
-        maxSpeedMms: Number(feature.attrs.maxSpeedMms) || null,
+        // Attribute keys must match FEATURE_ATTR_SPECS -- these read
+        // `widthMm`/`maxSpeedMms`/`FORWARD` before, none of which the panel
+        // ever writes, so an authored lane's width, speed limit and one-way
+        // flag were all silently dropped. `pathWidthMmFor` is the same
+        // resolver the canvas draws the band with, so the routed width and
+        // the drawn width cannot drift apart.
+        widthMm: pathWidthMmFor(feature.kind, feature.attrs),
+        maxSpeedMms: Number(feature.attrs.speedLimitMms) || null,
         minClearanceMm: feature.heightMm,
         allowedVehicleMask: mask,
+        impedance: 1,
         sourceFeatureId: feature.featureId,
+        // A one-way lane runs in the direction it was drawn, first point to
+        // last. Reversing it is a matter of redrawing, so there is no
+        // REVERSE_ONLY case to read here.
         traversal:
-          feature.attrs.direction === "FORWARD"
+          feature.attrs.direction === "ONE_WAY"
             ? "FORWARD_ONLY"
-            : feature.attrs.direction === "REVERSE"
-              ? "REVERSE_ONLY"
-              : "BIDIRECTIONAL",
+            : "BIDIRECTIONAL",
       });
       authoredLaneCount++;
     }
@@ -712,7 +1346,7 @@ export function compileNavigationGraph(input: CompilerInput): CompileResult {
   if (crossingLanes.length > 0) {
     warnings.push({
       code: "LANE_CROSSES_OBSTACLE",
-      message: `${new Set(crossingLanes).size} authored lane(s) pass through an obstacle. Columns in aisles are common — check these rather than assuming the lane is wrong.`,
+      message: `${new Set(crossingLanes).size} authored lane(s) pass through an obstacle: ${namesFor(crossingLanes, featureNameById)}. Columns in aisles are common — check these rather than assuming the lane is wrong.`,
       featureIds: Array.from(new Set(crossingLanes)),
     });
   }
@@ -760,6 +1394,7 @@ export function compileNavigationGraph(input: CompilerInput): CompileResult {
         maxSpeedMms: null,
         minClearanceMm: null,
         allowedVehicleMask: allVehicles,
+        impedance: 1,
         sourceFeatureId: null,
         traversal: "BIDIRECTIONAL",
       });
@@ -767,11 +1402,170 @@ export function compileNavigationGraph(input: CompilerInput): CompileResult {
     }
   }
 
-  if (inferredCorridorCount === 0 && authoredLaneCount === 0) {
+  // 3b. Free-roam zones. These come after the connector pass on purpose: that
+  //     pass scans every AISLE endpoint pairwise, and a lattice would flood it
+  //     with thousands of candidates that could never be cross-aisles anyway.
+  const exclusionPolygons: Point[][] = [];
+  for (const feature of input.features) {
+    if (feature.floorLevel !== floorLevel) continue;
+    if (!EXCLUSION_FEATURE_KINDS.has(feature.kind)) continue;
+    const polygon = footprintVertices(feature);
+    if (polygon.length >= 3) exclusionPolygons.push(polygon);
+  }
+
+  const blockedForZones = {
+    rects: [...runRects, ...obstacles.map((o) => o.rect)],
+    polygons: exclusionPolygons,
+  };
+
+  let zoneCount = 0;
+  let zoneNodeCount = 0;
+  const coarsenedZones: number[] = [];
+  const emptyZones: number[] = [];
+  const overflowedZones: number[] = [];
+
+  for (const feature of input.features) {
+    if (feature.floorLevel !== floorLevel) continue;
+    if (!ZONE_FEATURE_KINDS.has(feature.kind)) continue;
+
+    const polygon = footprintVertices(feature);
+    if (polygon.length < 3) continue;
+    zoneCount++;
+
+    // Who may travel here. A work zone is pedestrian-only unless it says
+    // otherwise; a drive zone is the reverse. Falling back to the full mask
+    // when a warehouse has no pedestrian class keeps a zone routable rather
+    // than silently unreachable.
+    const isWorkZone = feature.kind === "WORK_ZONE";
+    let mask: number;
+    if (isWorkZone) {
+      mask = feature.attrs.allowsVehicles
+        ? allVehicles
+        : footVehicles || allVehicles;
+    } else {
+      mask = feature.attrs.allowsPedestrians
+        ? allVehicles
+        : allVehicles & ~footVehicles || allVehicles;
+    }
+
+    const zone: NavigableZone = {
+      featureId: feature.featureId,
+      polygon,
+      pitchMm: Number(feature.attrs.nodePitchMm) || ZONE_DEFAULT_PITCH_MM,
+      allowedVehicleMask: mask,
+      maxSpeedMms: Number(feature.attrs.speedLimitMms) || null,
+    };
+
+    // Snapshot before adding anything: a zone attaches to the network as it
+    // stood, never to itself, and never twice to an earlier zone's mesh.
+    const priorSegments = segments.slice();
+
+    // Where the existing network reaches, or merely touches, this zone.
+    const { portals, stubs } = findZoneTouches(priorSegments, polygon, blockedForZones, {
+      edgeKind: "ZONE",
+      widthMm: null,
+      maxSpeedMms: null,
+      minClearanceMm: null,
+      allowedVehicleMask: mask,
+      impedance: ZONE_IMPEDANCE,
+      sourceFeatureId: feature.featureId,
+      traversal: "BIDIRECTIONAL",
+    });
+    // Pushed immediately, not deferred to `built`: a stub cuts a segment that
+    // belongs to the network at large (a lane, or an earlier zone's mesh),
+    // and splitAtIntersections (step 4) runs on the whole `segments` array
+    // once, after every zone has had its turn.
+    segments.push(...stubs);
+
+    const wantsGrid = feature.attrs.meshMode === "GRID";
+    let built: { segments: WorkingSegment[]; nodes: Point[] } | null = null;
+
+    if (!wantsGrid) {
+      const mesh = buildZoneVisibilityMesh(zone, blockedForZones, portals);
+      if (mesh.overflowed) {
+        // Too cluttered for sightlines to stay affordable. Fall through to the
+        // grid, which does not care how many obstacles there are.
+        overflowedZones.push(feature.featureId);
+      } else {
+        built = mesh;
+      }
+    }
+
+    if (!built) {
+      const lattice = buildZoneLattice(zone, blockedForZones);
+      if (lattice.coarsened) coarsenedZones.push(feature.featureId);
+      built = lattice;
+
+      // The lattice samples a grid and so has no node at a lane's end -- it
+      // needs joining up explicitly. The visibility mesh took its portals as
+      // node seeds, so it is already attached and this would only duplicate.
+      const reach = lattice.pitchUsedMm;
+      for (const point of portals) {
+        let nearest: Point | null = null;
+        let nearestDistance = reach;
+        for (const node of lattice.nodes) {
+          const distance = Math.hypot(node.x - point.x, node.y - point.y);
+          if (distance < nearestDistance) {
+            nearestDistance = distance;
+            nearest = node;
+          }
+        }
+        if (!nearest || nearestDistance <= SNAP_MM) continue;
+        built.segments.push({
+          a: point,
+          b: nearest,
+          edgeKind: "ZONE",
+          widthMm: null,
+          maxSpeedMms: null,
+          minClearanceMm: null,
+          allowedVehicleMask: mask,
+          impedance: ZONE_IMPEDANCE,
+          sourceFeatureId: feature.featureId,
+          traversal: "BIDIRECTIONAL",
+        });
+      }
+    }
+
+    if (built.segments.length === 0) {
+      emptyZones.push(feature.featureId);
+      continue;
+    }
+
+    zoneNodeCount += built.nodes.length;
+    segments.push(...built.segments);
+  }
+
+  if (emptyZones.length > 0) {
+    warnings.push({
+      code: "ZONE_UNUSABLE",
+      message: `${emptyZones.length} free-roam area(s) produced no routable floor: ${namesFor(emptyZones, featureNameById)}. Either the area is smaller than its grid pitch, or racking and obstacles cover all of it.`,
+      featureIds: emptyZones,
+    });
+  }
+  if (overflowedZones.length > 0) {
+    warnings.push({
+      code: "ZONE_MESH_FALLBACK",
+      message: `${overflowedZones.length} free-roam area(s) have too many obstacles in them for straight-line routing and were compiled as a grid instead: ${namesFor(overflowedZones, featureNameById)}. Paths across them follow the grid rather than running straight.`,
+      featureIds: overflowedZones,
+    });
+  }
+  if (coarsenedZones.length > 0) {
+    warnings.push({
+      code: "ZONE_COARSENED",
+      message: `${coarsenedZones.length} free-roam area(s) were too large for their grid pitch and were routed on a coarser one: ${namesFor(coarsenedZones, featureNameById)}. Raise the pitch, or split the area up, if you need the detail.`,
+      featureIds: coarsenedZones,
+    });
+  }
+
+  if (
+    inferredCorridorCount === 0 &&
+    authoredLaneCount === 0 &&
+    zoneNodeCount === 0
+  ) {
     warnings.push({
       code: "NO_CORRIDORS",
       message:
-        "No aisles could be inferred and no travel lanes are drawn, so there is nothing to route on. Draw a travel lane, or check that racking runs face each other across a gap of 0.8–8 m.",
+        "No aisles could be inferred, and no travel lanes or free-roam areas are drawn, so there is nothing to route on. Draw a travel lane or a drive/work area, or check that racking runs face each other across a gap of 0.8–8 m.",
     });
   }
 
@@ -976,6 +1770,7 @@ export function compileNavigationGraph(input: CompilerInput): CompileResult {
       maxSpeedMms: segment.maxSpeedMms,
       minClearanceMm: segment.minClearanceMm,
       allowedVehicleMask: segment.allowedVehicleMask,
+      impedance: segment.impedance,
       sourceFeatureId: segment.sourceFeatureId,
     });
   }
@@ -1013,6 +1808,7 @@ export function compileNavigationGraph(input: CompilerInput): CompileResult {
       maxSpeedMms: null,
       minClearanceMm: clearHeight,
       allowedVehicleMask: allVehicles,
+      impedance: 1,
       sourceFeatureId: feature.featureId,
     });
   }
@@ -1071,7 +1867,7 @@ export function compileNavigationGraph(input: CompilerInput): CompileResult {
   if (locationsWithoutAccess.length > 0) {
     warnings.push({
       code: "LOCATION_WITHOUT_ACCESS",
-      message: `${locationsWithoutAccess.length} location(s) have no aisle within reach and cannot be picked from.`,
+      message: `${locationsWithoutAccess.length} location(s) have no aisle within reach and cannot be picked from: ${namesFor(locationsWithoutAccess, locationCodeById)}.`,
       locationIds: locationsWithoutAccess.slice(0, 50),
     });
   }
@@ -1109,10 +1905,33 @@ export function compileNavigationGraph(input: CompilerInput): CompileResult {
   }
   const componentCount = componentSizes.size;
 
+  // The "main" network is the one that serves the most pick faces, not the one
+  // with the most nodes.
+  //
+  // Node count was a fine proxy while every node came from an aisle or a lane.
+  // A free-roam zone breaks it: one 30 x 16 m area compiles to more nodes than
+  // an entire rack block, so an unconnected zone would be declared the main
+  // network and every real location in the hall reported as unreachable. What
+  // actually makes a component the main one is how much of the warehouse you
+  // can pick from it; node count only breaks ties (and covers a hall that has
+  // no locations yet, where every component scores zero).
+  const accessPointsPerComponent = new Map<string, number>();
+  for (const accessPoint of accessPoints) {
+    const root = roots.get(accessPoint.nodeKey);
+    if (root === undefined) continue;
+    accessPointsPerComponent.set(
+      root,
+      (accessPointsPerComponent.get(root) ?? 0) + 1,
+    );
+  }
+
   let largestRoot: string | null = null;
+  let largestServed = -1;
   let largestSize = 0;
   for (const [root, size] of componentSizes) {
-    if (size > largestSize) {
+    const served = accessPointsPerComponent.get(root) ?? 0;
+    if (served > largestServed || (served === largestServed && size > largestSize)) {
+      largestServed = served;
       largestSize = size;
       largestRoot = root;
     }
@@ -1126,16 +1945,52 @@ export function compileNavigationGraph(input: CompilerInput): CompileResult {
   }
 
   if (componentCount > 1) {
+    // Name every stray piece, not just the largest-vs-rest count: a piece
+    // with no location on it at all (an isolated walkway, say) would
+    // otherwise never appear in any warning, leaving no way to find it on
+    // the canvas except by eye.
+    const strayRoots = Array.from(componentSizes)
+      .filter(([root]) => root !== largestRoot)
+      .sort(([, a], [, b]) => b - a);
+
+    const pieceDescriptions = strayRoots.map(([root, size]) => {
+      const featureIds = new Set<number>();
+      let sampleNode: CompiledNode | undefined;
+      for (const edge of edges) {
+        if (roots.get(edge.fromKey) !== root) continue;
+        if (edge.sourceFeatureId != null) featureIds.add(edge.sourceFeatureId);
+      }
+      for (const key of nodeKeys) {
+        if (roots.get(key) === root) {
+          sampleNode = nodes.get(key);
+          break;
+        }
+      }
+      const label =
+        featureIds.size > 0
+          ? namesFor(Array.from(featureIds), featureNameById, 3)
+          : sampleNode
+            ? `an inferred aisle near (${Math.round(sampleNode.xMm)}, ${Math.round(sampleNode.yMm)})`
+            : "an unnamed piece";
+      return `${label} (${size} node${size === 1 ? "" : "s"})`;
+    });
+
+    const shownPieces = pieceDescriptions.slice(0, 5);
+    const morePieces = pieceDescriptions.length - shownPieces.length;
+    const pieceSuffix =
+      morePieces > 0 ? `; and ${morePieces} more piece(s)` : "";
+
     warnings.push({
       code: "DISCONNECTED_GRAPH",
-      message: `The network has ${componentCount} separate pieces. Anything outside the largest one cannot be routed to — add a travel lane joining them.`,
+      message: `The network has ${componentCount} separate pieces. Besides the main one: ${shownPieces.join("; ")}${pieceSuffix}. Anything in these cannot be routed to — add a travel lane joining them to the rest.`,
     });
   }
   if (unreachable.size > 0) {
+    const ids = Array.from(unreachable);
     warnings.push({
       code: "UNREACHABLE_LOCATIONS",
-      message: `${unreachable.size} location(s) are not reachable from the main network.`,
-      locationIds: Array.from(unreachable).slice(0, 50),
+      message: `${ids.length} location(s) are not reachable from the main network: ${namesFor(ids, locationCodeById)}.`,
+      locationIds: ids.slice(0, 50),
     });
   }
 
@@ -1154,6 +2009,8 @@ export function compileNavigationGraph(input: CompilerInput): CompileResult {
       inferredCorridors: inferredCorridorCount,
       authoredLanes: authoredLaneCount,
       connectors: connectorCount,
+      navigableZones: zoneCount,
+      zoneNodes: zoneNodeCount,
       componentCount,
       reachableLocationCount: totalLocations - unreachable.size,
       unreachableLocationCount: unreachable.size,
