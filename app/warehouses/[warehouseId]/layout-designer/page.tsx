@@ -16,7 +16,6 @@ import {
   positionTypes,
   halls as hallsTable,
   warehouses,
-  zoneTypes,
 } from "@/drizzle/schema";
 import {
   UNDERLAY_BUCKET,
@@ -241,19 +240,19 @@ export default async function WarehouseLayoutDesignerPage({
   const selectedHall =
     halls.find((h) => h.hallId === requestedHallId) ?? halls[0];
 
-  const [hallLocationRows, hallZoneTypes, hallFeatureRows, featureKindRows] =
+  const [hallLocationRows, hallFeatureRows, featureKindRows] =
     await Promise.all([
       db
         .select({
           locationId: locations.locationId,
           locationCode: locations.locationCode,
-          zoneId: locations.zoneId,
           aisle: locations.aisle,
           bay: locations.bay,
           level: locations.level,
           heightMm: locations.heightMm,
           maxWeightKg: locations.maxWeightKg,
           isBlocked: locations.isBlocked,
+          isTemporary: locations.isTemporary,
           physicalX: locations.physicalX,
           physicalY: locations.physicalY,
           physicalWidthMm: locations.physicalWidthMm,
@@ -272,20 +271,6 @@ export default async function WarehouseLayoutDesignerPage({
         ),
       db
         .select({
-          zoneId: zoneTypes.zoneId,
-          name: zoneTypes.name,
-          isPickable: zoneTypes.isPickable,
-          isTemperatureControlled: zoneTypes.isTemperatureControlled,
-          requiresHazmatClearance: zoneTypes.requiresHazmatClearance,
-          requiresBarcodeScan: zoneTypes.requiresBarcodeScan,
-          storagePermanence: zoneTypes.storagePermanence,
-          color: zoneTypes.color,
-        })
-        .from(zoneTypes)
-        .where(eq(zoneTypes.warehouseId, parsedWarehouseId))
-        .orderBy(zoneTypes.name),
-      db
-        .select({
           featureId: layoutFeatures.featureId,
           floorLevel: layoutFeatures.floorLevel,
           kind: layoutFeatures.kind,
@@ -301,7 +286,6 @@ export default async function WarehouseLayoutDesignerPage({
           layerIndex: layoutFeatures.layerIndex,
           isObstacle: layoutFeatures.isObstacle,
           isVisualOnly: layoutFeatures.isVisualOnly,
-          zoneId: layoutFeatures.zoneId,
           label: layoutFeatures.label,
           color: layoutFeatures.color,
           attrs: layoutFeatures.attrs,
@@ -538,7 +522,7 @@ export default async function WarehouseLayoutDesignerPage({
   }
 
   return (
-    <main className="flex min-h-[calc(100vh-64px)] flex-1 flex-col gap-4 bg-[linear-gradient(180deg,#ebe7dc_0%,#f7f4ed_24%,#f4f1e8_100%)] p-4 sm:p-6">
+    <main className="flex h-[calc(100vh-64px)] flex-1 flex-col gap-4 overflow-hidden bg-[linear-gradient(180deg,#ebe7dc_0%,#f7f4ed_24%,#f4f1e8_100%)] p-4 sm:p-6">
       <Card className="rounded-2xl shadow-sm">
         <CardHeader className="px-6 py-6 sm:px-8">
           <DynamicBreadcrumb />
@@ -546,7 +530,7 @@ export default async function WarehouseLayoutDesignerPage({
             Layout Designer
           </CardTitle>
           <CardDescription className="mt-2 text-sm">
-            Configure floor plans, rack coordinates, and zone assignments for{" "}
+            Configure floor plans, rack coordinates, and staging locations for{" "}
             <span className="font-semibold text-foreground">
               {warehouse.name ?? "Warehouse"}
             </span>
@@ -561,7 +545,6 @@ export default async function WarehouseLayoutDesignerPage({
           halls={halls}
           selectedHallId={selectedHall.hallId}
           locations={hallLocations}
-          zoneTypes={hallZoneTypes}
           features={hallFeatures}
           featureKinds={featureKinds}
           currentVersionNumber={currentVersionNumber}

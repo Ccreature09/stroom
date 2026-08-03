@@ -12,25 +12,19 @@ import { useRouter } from "next/navigation";
 import { AlertTriangle, History, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import HallToolbar from "./hall-toolbar";
-import LayoutDesignerCanvas, {
-  type GeometryUpdate,
-  type Tool,
-} from "./layout-designer-canvas";
-import {
-  CreateLocationPanel,
-  EditLocationPanel,
-  EmptyLocationPanel,
-  MultiSelectPanel,
-} from "./location-panel";
-import { CreateFeaturePanel, EditFeaturePanel } from "./feature-panel";
+import LayoutTopBar from "./layout-top-bar";
+import LayoutDesignerCanvas, { type Tool } from "./layout-designer-canvas";
+import { EditLocationPanel, EmptyLocationPanel } from "./location-panel";
+import { EditFeaturePanel } from "./feature-panel";
+import { MultiObjectPanel } from "./multi-object-panel";
 import type {
-  DraftGeometry,
   FeatureDTO,
   FeatureKindDTO,
   FeaturePatch,
   HallDTO,
   HallPatch,
   HallState,
+  LabelCategoryKey,
   LayoutVersionDTO,
   LocationDTO,
   LocationPatch,
@@ -38,20 +32,36 @@ import type {
   RoutingVehicleDTO,
   RecoveredDraft,
   UnderlayDTO,
-  ZonePatch,
-  ZoneTypeDTO,
 } from "@/lib/warehouse-map/types";
 import {
   DRAFT_STATE_VERSION,
   EMPTY_HALL_STATE,
   applyHallStateToFeatures,
   applyHallStateToLocations,
-  applyHallStateToZones,
   hallStateChangeCount,
 } from "@/lib/warehouse-map/types";
-import { defaultPointsForDrawnRect } from "@/lib/warehouse-map/geometry";
+import {
+  centredPlacement,
+  clampBBoxOffset,
+  computeEnvelope,
+  defaultPointsForDrawnRect,
+  rigidRotateAround,
+  unionEnvelopes,
+  type Envelope,
+  type Point,
+} from "@/lib/warehouse-map/geometry";
+import type { BulkGeneratorKind } from "./bulk-generator-dialog";
+import {
+  CATEGORY_ORDER,
+  defaultPlacementSizeMm,
+} from "@/lib/warehouse-map/feature-kinds";
+import {
+  LOCATION_TYPE_DEFAULT_SIZE_MM,
+  LOCATION_TYPES,
+  type LocationType,
+} from "@/lib/warehouse-map/naming";
 import { commitHallStates, type PublishConflict } from "./actions";
-import type { RoutePreview } from "./routing-actions";
+import type { RoutePreview } from "@/lib/warehouse-map/routing-server";
 import { saveHallDraft } from "./lifecycle-actions";
 
 type HallHistory = {
@@ -66,15 +76,7 @@ type DraftAction =
   | { type: "EDIT_HALL_FIELD"; hallId: number; field: keyof HallPatch; value: HallPatch[keyof HallPatch] }
   | { type: "CREATE_LOCATION"; hallId: number; tempId: number; data: LocationPatch }
   | { type: "PATCH_LOCATION"; hallId: number; locationId: number; patch: LocationPatch }
-  | {
-      type: "PATCH_LOCATIONS_BULK";
-      hallId: number;
-      updates: Array<{ locationId: number; patch: LocationPatch }>;
-    }
   | { type: "DELETE_LOCATION"; hallId: number; locationId: number }
-  | { type: "CREATE_ZONE"; hallId: number; tempId: number; data: ZonePatch }
-  | { type: "PATCH_ZONE"; hallId: number; zoneId: number; patch: ZonePatch }
-  | { type: "DELETE_ZONE"; hallId: number; zoneId: number }
   | {
       type: "CREATE_FEATURE";
       hallId: number;
@@ -90,10 +92,20 @@ type DraftAction =
       patch: FeaturePatch;
     }
   | { type: "DELETE_FEATURE"; hallId: number; featureId: number }
+  | {
+      // One history entry covering a mixed group of locations and features
+      // moved or rotated together, so undoing a single drag/rotate gesture
+      // takes exactly one undo rather than one per member.
+      type: "PATCH_GROUP";
+      hallId: number;
+      locationUpdates: Array<{ locationId: number; patch: LocationPatch }>;
+      featureUpdates: Array<{ featureId: number; patch: FeaturePatch }>;
+    }
   | { type: "UNDO"; hallId: number }
   | { type: "REDO"; hallId: number }
   | { type: "RESET_ALL" }
-  | { type: "HYDRATE"; state: DraftState };
+  | { type: "HYDRATE"; state: DraftState }
+  | { type: "FORGET_HALL"; hallId: number };
 
 function withoutKey<V>(record: Record<number, V>, key: number): Record<number, V> {
   const next = { ...record };
@@ -143,6 +155,28 @@ function patchLocationInState(
   };
 }
 
+function patchFeatureInState(
+  present: HallState,
+  featureId: number,
+  patch: FeaturePatch,
+): HallState {
+  if (featureId < 0) {
+    return {
+      ...present,
+      newFeatures: present.newFeatures.map((nf) =>
+        nf.tempId === featureId ? { ...nf, ...patch } : nf,
+      ),
+    };
+  }
+  return {
+    ...present,
+    featurePatches: {
+      ...present.featurePatches,
+      [featureId]: { ...present.featurePatches[featureId], ...patch },
+    },
+  };
+}
+
 function draftReducer(state: DraftState, action: DraftAction): DraftState {
   switch (action.type) {
     case "EDIT_HALL_FIELD":
@@ -165,15 +199,6 @@ function draftReducer(state: DraftState, action: DraftAction): DraftState {
         patchLocationInState(present, action.locationId, action.patch),
       );
 
-    case "PATCH_LOCATIONS_BULK":
-      return pushHistory(state, action.hallId, (present) => {
-        let next = present;
-        for (const { locationId, patch } of action.updates) {
-          next = patchLocationInState(next, locationId, patch);
-        }
-        return next;
-      });
-
     case "DELETE_LOCATION":
       return pushHistory(state, action.hallId, (present) => {
         if (action.locationId < 0) {
@@ -194,51 +219,6 @@ function draftReducer(state: DraftState, action: DraftAction): DraftState {
         };
       });
 
-    case "CREATE_ZONE":
-      return pushHistory(state, action.hallId, (present) => ({
-        ...present,
-        newZones: [...present.newZones, { ...action.data, tempId: action.tempId }],
-      }));
-
-    case "PATCH_ZONE":
-      return pushHistory(state, action.hallId, (present) => {
-        if (action.zoneId < 0) {
-          return {
-            ...present,
-            newZones: present.newZones.map((nz) =>
-              nz.tempId === action.zoneId ? { ...nz, ...action.patch } : nz,
-            ),
-          };
-        }
-        return {
-          ...present,
-          zonePatches: {
-            ...present.zonePatches,
-            [action.zoneId]: {
-              ...present.zonePatches[action.zoneId],
-              ...action.patch,
-            },
-          },
-        };
-      });
-
-    case "DELETE_ZONE":
-      return pushHistory(state, action.hallId, (present) => {
-        if (action.zoneId < 0) {
-          return {
-            ...present,
-            newZones: present.newZones.filter(
-              (nz) => nz.tempId !== action.zoneId,
-            ),
-          };
-        }
-        return {
-          ...present,
-          zonePatches: withoutKey(present.zonePatches, action.zoneId),
-          deletedZoneIds: [...present.deletedZoneIds, action.zoneId],
-        };
-      });
-
     case "CREATE_FEATURE":
       return pushHistory(state, action.hallId, (present) => ({
         ...present,
@@ -254,26 +234,9 @@ function draftReducer(state: DraftState, action: DraftAction): DraftState {
       }));
 
     case "PATCH_FEATURE":
-      return pushHistory(state, action.hallId, (present) => {
-        if (action.featureId < 0) {
-          return {
-            ...present,
-            newFeatures: present.newFeatures.map((nf) =>
-              nf.tempId === action.featureId ? { ...nf, ...action.patch } : nf,
-            ),
-          };
-        }
-        return {
-          ...present,
-          featurePatches: {
-            ...present.featurePatches,
-            [action.featureId]: {
-              ...present.featurePatches[action.featureId],
-              ...action.patch,
-            },
-          },
-        };
-      });
+      return pushHistory(state, action.hallId, (present) =>
+        patchFeatureInState(present, action.featureId, action.patch),
+      );
 
     case "DELETE_FEATURE":
       return pushHistory(state, action.hallId, (present) => {
@@ -290,6 +253,18 @@ function draftReducer(state: DraftState, action: DraftAction): DraftState {
           featurePatches: withoutKey(present.featurePatches, action.featureId),
           deletedFeatureIds: [...present.deletedFeatureIds, action.featureId],
         };
+      });
+
+    case "PATCH_GROUP":
+      return pushHistory(state, action.hallId, (present) => {
+        let next = present;
+        for (const { locationId, patch } of action.locationUpdates) {
+          next = patchLocationInState(next, locationId, patch);
+        }
+        for (const { featureId, patch } of action.featureUpdates) {
+          next = patchFeatureInState(next, featureId, patch);
+        }
+        return next;
       });
 
     case "UNDO": {
@@ -326,6 +301,11 @@ function draftReducer(state: DraftState, action: DraftAction): DraftState {
     case "HYDRATE":
       return action.state;
 
+    // Discards a deleted hall's draft history so a later Save Map doesn't
+    // try to commit changes against a hall that no longer exists.
+    case "FORGET_HALL":
+      return withoutKey(state, action.hallId);
+
     default:
       return state;
   }
@@ -354,7 +334,6 @@ export default function LayoutDesigner({
   halls,
   selectedHallId,
   locations,
-  zoneTypes,
   features,
   featureKinds,
   currentVersionNumber,
@@ -368,7 +347,6 @@ export default function LayoutDesigner({
   halls: HallDTO[];
   selectedHallId: number;
   locations: LocationDTO[];
-  zoneTypes: ZoneTypeDTO[];
   features: FeatureDTO[];
   featureKinds: FeatureKindDTO[];
   currentVersionNumber: number;
@@ -379,21 +357,48 @@ export default function LayoutDesigner({
   routingVehicles: RoutingVehicleDTO[];
 }) {
   const router = useRouter();
+  // Pure presentational UI state for the collapsible left panel -- not part
+  // of the draft engine, nothing here is persisted or undoable.
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [tool, setTool] = useState<Tool>("select");
-  const [selectedLocationId, setSelectedLocationId] = useState<number | null>(
-    null,
-  );
+  // The full selection is always these two arrays, even when exactly one
+  // thing is selected -- see handleSelectionChange for why a single unified
+  // shape replaced separate single/multi state.
   const [selectedLocationIds, setSelectedLocationIds] = useState<number[]>([]);
-  const [selectedFeatureId, setSelectedFeatureId] = useState<number | null>(
-    null,
-  );
-  const [featureDraft, setFeatureDraft] = useState<{
-    originXMm: number;
-    originYMm: number;
-    widthMm: number;
-    lengthMm: number;
-  } | null>(null);
-  const [draft, setDraft] = useState<DraftGeometry | null>(null);
+  const [selectedFeatureIds, setSelectedFeatureIds] = useState<number[]>([]);
+  // While on, a plain canvas click adds to the selection instead of
+  // replacing it -- see the doc comment on the canvas's `multiSelectMode`
+  // prop. Toggled from Route Preview, since picking several stops that are
+  // spread across a large hall is the reason this exists.
+  const [multiSelectMode, setMultiSelectMode] = useState(false);
+  // Bulk Generate's "pick start point on canvas" flow. The dialog itself is
+  // owned here too (not inside HallToolbar, where it used to live) because
+  // picking has to close it to let clicks reach the canvas, then reopen it --
+  // both ends of that round trip need to be driven from whatever owns
+  // showBulkGenerate. bulkGenStartPoints is keyed per generator type so
+  // picking a spot for racking doesn't clobber one already picked for
+  // shelving, and it persists across the dialog closing and reopening since
+  // it lives up here, not inside the (re-mounted-on-open) dialog content.
+  const [showBulkGenerate, setShowBulkGenerate] = useState(false);
+  const [bulkGenPickTarget, setBulkGenPickTarget] =
+    useState<BulkGeneratorKind | null>(null);
+  const [bulkGenStartPoints, setBulkGenStartPoints] = useState<
+    Record<BulkGeneratorKind, Point | null>
+  >({ racking: null, floor_line: null, shelving: null });
+  // The kind/type chosen from the Add feature/location menu, waiting for a
+  // click to place it. Arming one always disarms the other -- see
+  // handlePickFeatureKind/handlePickLocationType.
+  const [armedFeatureKind, setArmedFeatureKind] =
+    useState<FeatureKindDTO | null>(null);
+  const [armedLocationType, setArmedLocationType] =
+    useState<LocationType | null>(null);
+  // Remembers whatever was last armed even after the user leaves feature/draw
+  // mode (armedFeatureKind/armedLocationType above are cleared on every tool
+  // switch) -- the canvas's L/F keyboard shortcuts re-arm this without
+  // needing the Add menu, and fall back to the first kind/type if nothing
+  // has been picked yet this session.
+  const lastFeatureKindRef = useRef<FeatureKindDTO | null>(null);
+  const lastLocationTypeRef = useRef<LocationType | null>(null);
   const [isSavingMap, startSaveMapTransition] = useTransition();
   const [publishConflict, setPublishConflict] =
     useState<PublishConflict | null>(null);
@@ -406,11 +411,78 @@ export default function LayoutDesigner({
   const [showNavGraph, setShowNavGraph] = useState(true);
   const [routePreview, setRoutePreview] = useState<RoutePreview | null>(null);
 
+  // Label visibility: one master toggle, plus one sub-toggle per category
+  // (locations, and every feature category). Pure display state -- not part
+  // of the draft engine, not persisted, not undoable, exactly like
+  // showNavGraph above.
+  const [showLabels, setShowLabels] = useState(true);
+  const [labelCategoryVisibility, setLabelCategoryVisibility] = useState<
+    Record<LabelCategoryKey, boolean>
+  >(() => {
+    const initial: Partial<Record<LabelCategoryKey, boolean>> = {
+      LOCATION: true,
+    };
+    for (const category of CATEGORY_ORDER) initial[category] = true;
+    return initial as Record<LabelCategoryKey, boolean>;
+  });
+
   const [draftState, dispatch] = useReducer(draftReducer, {} as DraftState);
   const tempIdRef = useRef(0);
   function nextTempId() {
     tempIdRef.current -= 1;
     return tempIdRef.current;
+  }
+
+  /**
+   * Placeholder location codes are `NEW-<TYPE>-<suffix>-<id>`, and this
+   * suffix is what keeps them unique *across* sessions, not just within one.
+   * tempIdRef always restarts at 0 on a fresh mount (see lowestTempIdIn
+   * below for the one case it doesn't), so without something session-scoped
+   * in the code, two separate sessions that each place, say, five FLOOR
+   * locations before renaming any of them would both mint `NEW-FLOOR-5` --
+   * and if the first session's got saved and never renamed, the second
+   * session's Save Map fails on the warehouse/location_code unique
+   * constraint with nothing on screen to explain why, since as far as that
+   * user can see every location *they* placed this session has a distinct
+   * code. Four base36 characters is 1.6M combinations, plenty to make two
+   * sessions colliding on both this and the same type+count vanishingly
+   * unlikely, and it's still short enough to read at a glance in the panel
+   * the user renames it in immediately after placing it.
+   */
+  // useState's lazy initializer, not useRef, is the one hook React
+  // guarantees runs exactly once regardless of StrictMode/Compiler
+  // re-invocation rules -- useRef's initial-value argument is still
+  // evaluated on every render (only the resulting ref object is stable), so
+  // Math.random() belongs here, not there.
+  const [sessionCodeSuffix] = useState(() =>
+    Math.random().toString(36).slice(2, 6),
+  );
+
+  /**
+   * A restored draft (localStorage or server-recovered layout_drafts) can
+   * carry negative temp ids from a *previous* mount -- tempIdRef itself
+   * always restarts at 0 on a fresh mount, since it's a plain ref with no
+   * persistence of its own. Without this, the counter could hand out a temp
+   * id that collides with one already sitting in the just-hydrated draft:
+   * two newLocations entries sharing one id overwrite each other in the
+   * canvas's per-id node map (the older one appears to vanish) and then
+   * both generate the same `NEW-<TYPE>-<suffix>-<id>` code, which fails the
+   * warehouse/location_code unique constraint at Save Map -- the session
+   * suffix above doesn't help here since it's one fixed value for the whole
+   * restored session. Seeding the counter from the lowest id already present
+   * closes that gap.
+   */
+  function lowestTempIdIn(state: DraftState): number {
+    let lowest = 0;
+    for (const history of Object.values(state)) {
+      for (const nl of history.present.newLocations) {
+        if (nl.tempId < lowest) lowest = nl.tempId;
+      }
+      for (const nf of history.present.newFeatures) {
+        if (nf.tempId < lowest) lowest = nf.tempId;
+      }
+    }
+    return lowest;
   }
 
   // Recover any draft left over from a previous session (refresh, crash,
@@ -443,6 +515,7 @@ export default function LayoutDesigner({
     }
 
     if (Object.keys(next).length > 0) {
+      tempIdRef.current = Math.min(tempIdRef.current, lowestTempIdIn(next));
       dispatch({ type: "HYDRATE", state: next });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -570,33 +643,33 @@ export default function LayoutDesigner({
     () => applyHallStateToLocations(locations, hallState),
     [locations, hallState],
   );
-  const effectiveZoneTypes = useMemo(
-    () => applyHallStateToZones(zoneTypes, hallState),
-    [zoneTypes, hallState],
-  );
   const effectiveFeatures = useMemo(
     () => applyHallStateToFeatures(features, hallState),
     [features, hallState],
   );
-  const selectedFeature = useMemo(
-    () =>
-      effectiveFeatures.find((f) => f.featureId === selectedFeatureId) ?? null,
-    [effectiveFeatures, selectedFeatureId],
-  );
 
-  const selectedLocation = useMemo(
-    () =>
-      effectiveLocations.find((l) => l.locationId === selectedLocationId) ??
-      null,
-    [effectiveLocations, selectedLocationId],
-  );
-  const selectedLocationsForMulti = useMemo(
+  const selectedLocationObjects = useMemo(
     () =>
       selectedLocationIds
         .map((id) => effectiveLocations.find((l) => l.locationId === id))
         .filter((l): l is LocationDTO => Boolean(l)),
     [effectiveLocations, selectedLocationIds],
   );
+  const selectedFeatureObjects = useMemo(
+    () =>
+      selectedFeatureIds
+        .map((id) => effectiveFeatures.find((f) => f.featureId === id))
+        .filter((f): f is FeatureDTO => Boolean(f)),
+    [effectiveFeatures, selectedFeatureIds],
+  );
+  const totalSelectedCount =
+    selectedLocationObjects.length + selectedFeatureObjects.length;
+  // Exactly one thing selected gets the full single-item edit panel; these
+  // are undefined for every other case (0 selected, or 2+).
+  const selectedLocation =
+    totalSelectedCount === 1 ? (selectedLocationObjects[0] ?? null) : null;
+  const selectedFeature =
+    totalSelectedCount === 1 ? (selectedFeatureObjects[0] ?? null) : null;
 
   // Level overlay: which height level is active for rackings/shelves. Only
   // shown when the hall actually has multi-level racking/shelf locations.
@@ -611,76 +684,215 @@ export default function LayoutDesigner({
     }
     return Array.from(levels).sort((a, b) => a - b);
   }, [effectiveLocations]);
-  const [activeLevel, setActiveLevel] = useState<number | null>(
-    availableLevels[0] ?? null,
-  );
+  // null (no level pinned) is the genuine default, not availableLevels[0] --
+  // resolveVisibleLocations already falls back to the lowest level on its own
+  // when activeLevel is null, so a non-null default bought nothing visually
+  // and instead left the L1 button silently "pressed" from first load. That
+  // used to be harmless (display-only); once selection/move started reading
+  // activeLevel too (see resolveGroupIds in the canvas), a hidden default
+  // level meant every racking move looked like "no filter applied" to the
+  // user while actually being scoped to level 1 -- moving only the bottom
+  // level of an aisle and leaving the rest behind.
+  const [activeLevel, setActiveLevel] = useState<number | null>(null);
 
   function handleToolChange(next: Tool) {
+    // Panning is a camera move, not an object interaction -- entering or
+    // leaving "pan" (including the automatic switch a middle-mouse-button
+    // drag makes, see the canvas's pointerdown handler) must not disturb
+    // whatever is selected. Without this, panning across the hall to reach a
+    // far-off location for a multi-stop route silently dropped everything
+    // picked so far, which defeated the entire point of selecting distant
+    // locations for one.
+    const isPanTransition = next === "pan" || tool === "pan";
     setTool(next);
-    setSelectedLocationId(null);
-    setSelectedLocationIds([]);
-    setSelectedFeatureId(null);
-    setDraft(null);
-    setFeatureDraft(null);
-  }
-
-  function handleDraftDrawn(geometry: DraftGeometry) {
-    setDraft(geometry);
-  }
-
-  // Locations and features are separate selections, and the right-hand panel
-  // shows one at a time -- selecting either clears the other so the panel is
-  // never ambiguous about what an edit applies to.
-  function handleSelect(locationId: number | null) {
-    setSelectedLocationIds([]);
-    setSelectedLocationId(locationId);
-    if (locationId !== null) setSelectedFeatureId(null);
-  }
-
-  function handleMultiSelect(locationIds: number[]) {
-    setSelectedLocationId(null);
-    setSelectedLocationIds(locationIds);
-    setRoutePreview(null);
-    if (locationIds.length > 0) setSelectedFeatureId(null);
-  }
-
-  function handleSelectFeature(featureId: number | null) {
-    setSelectedFeatureId(featureId);
-    if (featureId !== null) {
-      setSelectedLocationId(null);
+    if (!isPanTransition) {
       setSelectedLocationIds([]);
+      setSelectedFeatureIds([]);
     }
+    // Switching to any other tool disarms whatever was armed; "feature" and
+    // "draw" mode only exist while a kind/type is actually armed.
+    if (next !== "feature") setArmedFeatureKind(null);
+    if (next !== "draw") setArmedLocationType(null);
+  }
+
+  /**
+   * Toggles click-to-add selection. Turning it on also forces the Select
+   * tool (the additive-click gesture only fires there and in Move & Resize)
+   * without going through handleToolChange, since that would wipe out
+   * exactly the selection the user is about to build on.
+   */
+  function handleToggleMultiSelect() {
+    setMultiSelectMode((prev) => {
+      const next = !prev;
+      if (next) {
+        setTool("select");
+        setArmedFeatureKind(null);
+        setArmedLocationType(null);
+      }
+      return next;
+    });
+  }
+
+  /**
+   * Closes Bulk Generate so the canvas can take the next click, rather than
+   * making the user type a start coordinate. The dialog's own form state
+   * survives this: it's closed, not unmounted from where its fields actually
+   * live (bulkGenStartPoints is up here; everything else stays inside the
+   * still-mounted BulkGenerateDialog wrapper), so nothing the user already
+   * configured on another tab is lost while they point at the canvas.
+   */
+  function handleRequestBulkGenPick(kind: BulkGeneratorKind) {
+    setBulkGenPickTarget(kind);
+    setShowBulkGenerate(false);
+  }
+
+  function handleBulkGenPointPicked(worldXMm: number, worldYMm: number) {
+    const kind = bulkGenPickTarget;
+    if (!kind) return;
+    // The viewport shows a margin of grid outside the hall's own rectangle
+    // (so its edge isn't flush with the canvas edge), which a click can
+    // legitimately land in -- clamped here rather than left to the server
+    // action's plain non-negative check, which would just reject it with
+    // "Start X/Y must be whole numbers" and no obvious reason why.
+    const x = Math.round(
+      Math.max(0, Math.min(worldXMm, hall.physicalWidthMm)),
+    );
+    const y = Math.round(
+      Math.max(0, Math.min(worldYMm, hall.physicalLengthMm)),
+    );
+    setBulkGenStartPoints((prev) => ({ ...prev, [kind]: { x, y } }));
+    setBulkGenPickTarget(null);
+    setShowBulkGenerate(true);
+  }
+
+  function handleCancelBulkGenPick() {
+    setBulkGenPickTarget(null);
+    setShowBulkGenerate(true);
+  }
+
+  // Choosing a kind from the Add feature menu arms it and enters feature mode.
+  // The selection is cleared so the right-hand panel is not showing something
+  // else while the next click is going to create a brand new object, and any
+  // armed location type is cleared since only one thing can be armed at once.
+  function handlePickFeatureKind(kind: FeatureKindDTO) {
+    lastFeatureKindRef.current = kind;
+    setArmedFeatureKind(kind);
+    setArmedLocationType(null);
+    setTool("feature");
+    setSelectedLocationIds([]);
+    setSelectedFeatureIds([]);
+  }
+
+  // Mirrors handlePickFeatureKind above for the Add location menu.
+  function handlePickLocationType(type: LocationType) {
+    lastLocationTypeRef.current = type;
+    setArmedLocationType(type);
+    setArmedFeatureKind(null);
+    setTool("draw");
+    setSelectedLocationIds([]);
+    setSelectedFeatureIds([]);
+  }
+
+  // The canvas's F keyboard shortcut: re-arms the last feature kind picked
+  // from the Add feature menu, or the first available kind if none has been
+  // picked yet this session.
+  function handleQuickArmFeature() {
+    const kind = lastFeatureKindRef.current ?? featureKinds[0];
+    if (kind) handlePickFeatureKind(kind);
+  }
+
+  // Mirrors handleQuickArmFeature above for the canvas's L shortcut.
+  function handleQuickArmLocation() {
+    const type = lastLocationTypeRef.current ?? LOCATION_TYPES[0];
+    if (type) handlePickLocationType(type);
+  }
+
+  /**
+   * One callback for every selection gesture the canvas can produce (click,
+   * shift-click, marquee) -- it always reports the final {locations,
+   * features} selection rather than an incremental change, so there is
+   * exactly one place selection state is written from user interaction.
+   */
+  function handleSelectionChange(locationIds: number[], featureIds: number[]) {
+    setSelectedLocationIds(locationIds);
+    setSelectedFeatureIds(featureIds);
+    setRoutePreview(null);
   }
 
   function handleClearSelection() {
-    setSelectedLocationId(null);
     setSelectedLocationIds([]);
-    setSelectedFeatureId(null);
+    setSelectedFeatureIds([]);
   }
 
-  function handleFeatureDrawn(geometry: {
-    originXMm: number;
-    originYMm: number;
-    widthMm: number;
-    lengthMm: number;
-  }) {
-    setFeatureDraft(geometry);
-  }
+  // Placement footprint for the armed kind. The feature_kinds table only sizes
+  // RECT kinds, so rooms and walkways fall back to the code-side defaults.
+  const armedFeaturePlacement = useMemo(() => {
+    if (!armedFeatureKind) return null;
+    const size = defaultPlacementSizeMm(
+      armedFeatureKind.kind,
+      armedFeatureKind.defaultGeometryKind,
+      armedFeatureKind.defaultWidthMm,
+      armedFeatureKind.defaultLengthMm,
+    );
+    return {
+      kind: armedFeatureKind.kind,
+      label: armedFeatureKind.label,
+      color: armedFeatureKind.defaultColor,
+      geometryKind: armedFeatureKind.defaultGeometryKind,
+      widthMm: size.widthMm,
+      lengthMm: size.lengthMm,
+    };
+  }, [armedFeatureKind]);
 
-  // The picked kind supplies geometry kind, height and obstacle defaults, so
-  // the drawn rectangle becomes a polyline for a wall or a point for a fire
-  // exit without the user choosing a geometry at all.
-  function handleCreateFeature(kind: FeatureKindDTO) {
-    if (!featureDraft) return;
+  /**
+   * Drops the armed kind centred on the clicked point, then hands the user
+   * straight to Move & Resize with it selected -- placing something you cannot
+   * immediately nudge or size is a dead end, and the size is a stock default
+   * that usually wants adjusting.
+   */
+  function handleFeaturePlaced(worldXMm: number, worldYMm: number) {
+    const kind = armedFeatureKind;
+    if (!kind) return;
+
     const tempId = nextTempId();
     const geometryKind = kind.defaultGeometryKind;
+    const size = defaultPlacementSizeMm(
+      kind.kind,
+      geometryKind,
+      kind.defaultWidthMm,
+      kind.defaultLengthMm,
+    );
 
-    const widthMm =
-      geometryKind === "POINT" ? 0 : (kind.defaultWidthMm ?? featureDraft.widthMm);
-    const lengthMm =
-      geometryKind === "POINT"
-        ? 0
-        : (kind.defaultLengthMm ?? featureDraft.lengthMm);
+    const placed = centredPlacement(
+      worldXMm,
+      worldYMm,
+      size.widthMm,
+      size.lengthMm,
+      hall.physicalWidthMm,
+      hall.physicalLengthMm,
+    );
+
+    let originXMm = placed.x;
+    let originYMm = placed.y;
+    let widthMm = placed.width;
+    let lengthMm = placed.height;
+
+    if (geometryKind === "POINT") {
+      // A point has no extent, so it belongs exactly where the user clicked.
+      originXMm = Math.round(
+        Math.max(0, Math.min(worldXMm, hall.physicalWidthMm)),
+      );
+      originYMm = Math.round(
+        Math.max(0, Math.min(worldYMm, hall.physicalLengthMm)),
+      );
+      widthMm = 0;
+      lengthMm = 0;
+    } else if (geometryKind === "CIRCLE") {
+      // widthMm is the diameter for a circle, so keep it square.
+      const diameter = Math.min(widthMm, lengthMm);
+      widthMm = diameter;
+      lengthMm = diameter;
+    }
 
     dispatch({
       type: "CREATE_FEATURE",
@@ -689,8 +901,8 @@ export default function LayoutDesigner({
       kind: kind.kind,
       geometryKind,
       data: {
-        originXMm: featureDraft.originXMm,
-        originYMm: featureDraft.originYMm,
+        originXMm,
+        originYMm,
         widthMm,
         lengthMm,
         rotationDegrees: 0,
@@ -705,17 +917,105 @@ export default function LayoutDesigner({
       },
     });
 
-    setFeatureDraft(null);
-    handleSelectFeature(tempId);
+    setArmedFeatureKind(null);
+    setTool("transform");
+    handleSelectionChange([], [tempId]);
+  }
+
+  /**
+   * Drops the armed location type centred on the clicked point, mirroring
+   * handleFeaturePlaced above. locationCode is required and unique per
+   * warehouse, so a placeholder is generated from the session suffix and the
+   * temp id -- see sessionCodeSuffix above for why the suffix matters --
+   * and the user renames it in the edit panel they land on immediately
+   * afterward.
+   */
+  function handleLocationPlaced(worldXMm: number, worldYMm: number) {
+    const type = armedLocationType;
+    if (!type) return;
+
+    const tempId = nextTempId();
+    const size = LOCATION_TYPE_DEFAULT_SIZE_MM[type];
+    const placed = centredPlacement(
+      worldXMm,
+      worldYMm,
+      size.widthMm,
+      size.lengthMm,
+      hall.physicalWidthMm,
+      hall.physicalLengthMm,
+    );
+
+    dispatch({
+      type: "CREATE_LOCATION",
+      hallId: hall.hallId,
+      tempId,
+      data: {
+        locationCode: `NEW-${type}-${sessionCodeSuffix}-${Math.abs(tempId)}`,
+        aisle: null,
+        bay: null,
+        level: null,
+        row: null,
+        locationType: type,
+        heightMm: null,
+        maxWeightKg: null,
+        isTemporary: false,
+        floorLevel: 1,
+        physicalX: placed.x,
+        physicalY: placed.y,
+        physicalWidthMm: placed.width,
+        physicalLengthMm: placed.height,
+        rotationDegrees: 0,
+      },
+    });
+
+    setArmedLocationType(null);
+    setTool("transform");
+    handleSelectionChange([tempId], []);
+  }
+
+  /**
+   * Every geometry-affecting patch -- the rotate button, a numeric field in
+   * the side panel, or a drag/resize commit off the canvas -- funnels through
+   * here, so this is the one place that has to keep a feature inside the
+   * hall. The canvas already pins drags/resizes interactively, but the panel
+   * writes origin/size/rotation directly with no such check (typing a
+   * rotation or dragging a rect wide open otherwise leaves it hanging off an
+   * edge). Recomputing the envelope and nudging the origin back in, exactly
+   * like handleRotateSelection does for a multi-selection, covers every path
+   * uniformly and a no-op patch (attrs, label, color, ...) leaves the
+   * envelope unchanged, so the offset comes back zero.
+   */
+  function clampFeaturePatch(
+    feature: FeatureDTO,
+    patch: FeaturePatch,
+  ): FeaturePatch {
+    const next = { ...feature, ...patch };
+    const offset = clampBBoxOffset(
+      computeEnvelope(next),
+      hall.physicalWidthMm,
+      hall.physicalLengthMm,
+    );
+    if (offset.x === 0 && offset.y === 0) return patch;
+    return {
+      ...patch,
+      originXMm: Math.round(next.originXMm + offset.x),
+      originYMm: Math.round(next.originYMm + offset.y),
+    };
   }
 
   function handlePatchFeature(featureId: number, patch: FeaturePatch) {
-    dispatch({ type: "PATCH_FEATURE", hallId: hall.hallId, featureId, patch });
+    const current = effectiveFeatures.find((f) => f.featureId === featureId);
+    dispatch({
+      type: "PATCH_FEATURE",
+      hallId: hall.hallId,
+      featureId,
+      patch: current ? clampFeaturePatch(current, patch) : patch,
+    });
   }
 
   function handleDeleteFeature(featureId: number) {
     dispatch({ type: "DELETE_FEATURE", hallId: hall.hallId, featureId });
-    if (selectedFeatureId === featureId) setSelectedFeatureId(null);
+    setSelectedFeatureIds((ids) => ids.filter((id) => id !== featureId));
   }
 
   function handleHallFieldChange(field: keyof HallPatch, value: unknown) {
@@ -735,41 +1035,150 @@ export default function LayoutDesigner({
     dispatch({ type: "REDO", hallId: hall.hallId });
   }
 
-  function handleCreateLocation(data: LocationPatch) {
-    const tempId = nextTempId();
-    dispatch({ type: "CREATE_LOCATION", hallId: hall.hallId, tempId, data });
-    setDraft(null);
-    setSelectedLocationIds([]);
-    setSelectedLocationId(tempId);
+  function handleHallDeleted(hallId: number) {
+    dispatch({ type: "FORGET_HALL", hallId });
+    router.push(`/warehouses/${warehouseId}/layout-designer`);
+  }
+
+  /** Location counterpart of clampFeaturePatch above -- same reasoning. */
+  function clampLocationPatch(
+    loc: LocationDTO,
+    patch: LocationPatch,
+  ): LocationPatch {
+    const next = { ...loc, ...patch };
+    const offset = clampBBoxOffset(
+      computeEnvelope({
+        geometryKind: "RECT",
+        originXMm: next.physicalX,
+        originYMm: next.physicalY,
+        widthMm: next.physicalWidthMm,
+        lengthMm: next.physicalLengthMm,
+        rotationDegrees: next.rotationDegrees,
+        points: null,
+      }),
+      hall.physicalWidthMm,
+      hall.physicalLengthMm,
+    );
+    if (offset.x === 0 && offset.y === 0) return patch;
+    return {
+      ...patch,
+      physicalX: Math.round(next.physicalX + offset.x),
+      physicalY: Math.round(next.physicalY + offset.y),
+    };
   }
 
   function handlePatchLocation(locationId: number, patch: LocationPatch) {
-    dispatch({ type: "PATCH_LOCATION", hallId: hall.hallId, locationId, patch });
-  }
-
-  function handlePatchLocationsBulk(
-    updates: Array<{ locationId: number; patch: LocationPatch }>,
-  ) {
-    dispatch({ type: "PATCH_LOCATIONS_BULK", hallId: hall.hallId, updates });
+    const current = effectiveLocations.find(
+      (l) => l.locationId === locationId,
+    );
+    dispatch({
+      type: "PATCH_LOCATION",
+      hallId: hall.hallId,
+      locationId,
+      patch: current ? clampLocationPatch(current, patch) : patch,
+    });
   }
 
   function handleDeleteLocation(locationId: number) {
     dispatch({ type: "DELETE_LOCATION", hallId: hall.hallId, locationId });
-    if (selectedLocationId === locationId) setSelectedLocationId(null);
     setSelectedLocationIds((ids) => ids.filter((id) => id !== locationId));
   }
 
-  function handleCreateZone(data: ZonePatch) {
-    const tempId = nextTempId();
-    dispatch({ type: "CREATE_ZONE", hallId: hall.hallId, tempId, data });
-  }
+  /**
+   * Rotates the whole current multi-selection as one rigid body about its
+   * combined bounding-box centre -- the Move & Resize tool's only rotate
+   * affordance for 2+ selected objects (there is no drag-resize equivalent;
+   * see the note on canvas Props.onGroupMove for why). Every member keeps its
+   * position relative to the others and gains the same rotation delta, then
+   * the whole rotated group is nudged back inside the hall if it now hangs
+   * over an edge.
+   */
+  function handleRotateSelection(deltaDegrees: number) {
+    if (totalSelectedCount < 2) return;
 
-  function handlePatchZone(zoneId: number, patch: ZonePatch) {
-    dispatch({ type: "PATCH_ZONE", hallId: hall.hallId, zoneId, patch });
-  }
+    const locationEnvelope = (loc: LocationDTO, x: number, y: number, rot: number) =>
+      computeEnvelope({
+        geometryKind: "RECT",
+        originXMm: x,
+        originYMm: y,
+        widthMm: loc.physicalWidthMm,
+        lengthMm: loc.physicalLengthMm,
+        rotationDegrees: rot,
+        points: null,
+      });
 
-  function handleDeleteZone(zoneId: number) {
-    dispatch({ type: "DELETE_ZONE", hallId: hall.hallId, zoneId });
+    const currentEnvelopes: Envelope[] = [
+      ...selectedLocationObjects.map((loc) =>
+        locationEnvelope(loc, loc.physicalX, loc.physicalY, loc.rotationDegrees),
+      ),
+      ...selectedFeatureObjects.map((f) => computeEnvelope(f)),
+    ];
+    const currentBBox = unionEnvelopes(currentEnvelopes);
+    const pivotX = (currentBBox.minX + currentBBox.maxX) / 2;
+    const pivotY = (currentBBox.minY + currentBBox.maxY) / 2;
+
+    const rotatedLocations = selectedLocationObjects.map((loc) => ({
+      loc,
+      next: rigidRotateAround(
+        loc.physicalX,
+        loc.physicalY,
+        loc.rotationDegrees,
+        pivotX,
+        pivotY,
+        deltaDegrees,
+      ),
+    }));
+    const rotatedFeatures = selectedFeatureObjects.map((feature) => ({
+      feature,
+      next: rigidRotateAround(
+        feature.originXMm,
+        feature.originYMm,
+        feature.rotationDegrees,
+        pivotX,
+        pivotY,
+        deltaDegrees,
+      ),
+    }));
+
+    const rotatedEnvelopes: Envelope[] = [
+      ...rotatedLocations.map(({ loc, next }) =>
+        locationEnvelope(loc, next.originXMm, next.originYMm, next.rotationDegrees),
+      ),
+      ...rotatedFeatures.map(({ feature, next }) =>
+        computeEnvelope({
+          ...feature,
+          originXMm: next.originXMm,
+          originYMm: next.originYMm,
+          rotationDegrees: next.rotationDegrees,
+        }),
+      ),
+    ];
+    const offset = clampBBoxOffset(
+      unionEnvelopes(rotatedEnvelopes),
+      hall.physicalWidthMm,
+      hall.physicalLengthMm,
+    );
+
+    dispatch({
+      type: "PATCH_GROUP",
+      hallId: hall.hallId,
+      locationUpdates: rotatedLocations.map(({ loc, next }) => ({
+        locationId: loc.locationId,
+        patch: {
+          physicalX: Math.round(next.originXMm + offset.x),
+          physicalY: Math.round(next.originYMm + offset.y),
+          rotationDegrees: next.rotationDegrees,
+        },
+      })),
+      featureUpdates: rotatedFeatures.map(({ feature, next }) => ({
+        featureId: feature.featureId,
+        patch: {
+          originXMm: Math.round(next.originXMm + offset.x),
+          originYMm: Math.round(next.originYMm + offset.y),
+          rotationDegrees: next.rotationDegrees,
+        },
+      })),
+    });
   }
 
   function handleSaveMap() {
@@ -882,13 +1291,35 @@ export default function LayoutDesigner({
         </div>
       )}
 
+      <LayoutTopBar
+        warehouseId={warehouseId}
+        halls={halls}
+        selectedHallId={hall.hallId}
+        onHallDeleted={handleHallDeleted}
+        tool={tool}
+        onToolChange={handleToolChange}
+        featureKinds={featureKinds}
+        armedFeatureKind={armedFeatureKind}
+        onPickFeatureKind={handlePickFeatureKind}
+        armedLocationType={armedLocationType}
+        onPickLocationType={handlePickLocationType}
+        locked={isSavingMap}
+        onSaveMap={handleSaveMap}
+        isSavingMap={isSavingMap}
+        pendingCount={pendingCount}
+        currentVersionNumber={currentVersionNumber}
+        versionHistory={versionHistory}
+        draftSaveState={draftSaveState}
+        sidebarCollapsed={sidebarCollapsed}
+        onToggleSidebar={() => setSidebarCollapsed((c) => !c)}
+      />
+
       <div className="relative flex min-h-0 flex-1 flex-row overflow-hidden">
       {/* 1. Left Sidebar: Toolbar */}
       <HallToolbar
         warehouseId={warehouseId}
         halls={halls}
         selectedHallId={hall.hallId}
-        zoneTypes={effectiveZoneTypes}
         tool={tool}
         onToolChange={handleToolChange}
         hallDraft={hallDraft}
@@ -897,16 +1328,7 @@ export default function LayoutDesigner({
         canRedoHall={canRedoHall}
         onUndoHall={handleUndoHall}
         onRedoHall={handleRedoHall}
-        onSaveMap={handleSaveMap}
-        isSavingMap={isSavingMap}
-        pendingCount={pendingCount}
-        onCreateZone={handleCreateZone}
-        onPatchZone={handlePatchZone}
-        onDeleteZone={handleDeleteZone}
         locked={isSavingMap}
-        currentVersionNumber={currentVersionNumber}
-        versionHistory={versionHistory}
-        draftSaveState={draftSaveState}
         underlay={hallUnderlay}
         measuredMm={measuredMm}
         onClearMeasurement={() => setMeasuredMm(null)}
@@ -914,19 +1336,33 @@ export default function LayoutDesigner({
         showNavGraph={showNavGraph}
         onToggleNavGraph={setShowNavGraph}
         routingVehicles={routingVehicles}
-        selectedLocations={selectedLocationsForMulti}
+        selectedLocations={selectedLocationObjects}
+        selectedFeatureCount={selectedFeatureObjects.length}
         routePreview={routePreview}
         onRoutePreview={setRoutePreview}
         onClearRoute={() => setRoutePreview(null)}
+        multiSelectMode={multiSelectMode}
+        onToggleMultiSelect={handleToggleMultiSelect}
+        onClearSelection={handleClearSelection}
+        showBulkGenerate={showBulkGenerate}
+        onShowBulkGenerateChange={setShowBulkGenerate}
+        bulkGenStartPoints={bulkGenStartPoints}
+        onRequestBulkGenPick={handleRequestBulkGenPick}
+        collapsed={sidebarCollapsed}
+        showLabels={showLabels}
+        onToggleShowLabels={setShowLabels}
+        labelCategoryVisibility={labelCategoryVisibility}
+        onToggleLabelCategory={(key, next) =>
+          setLabelCategoryVisibility((prev) => ({ ...prev, [key]: next }))
+        }
       />
 
       {/* 2. Middle Column: Canvas Container */}
-      <div className="relative flex min-w-0 flex-1 items-center justify-center p-6 bg-muted/30">
-        <div className="h-[600px] w-full max-w-5xl overflow-hidden rounded-xl shadow-sm">
+      <div className="relative flex min-w-0 flex-1 p-3 bg-muted/30">
+        <div className="h-full w-full overflow-hidden rounded-xl shadow-sm">
           <LayoutDesignerCanvas
             hall={hall}
             locations={effectiveLocations}
-            zoneTypes={effectiveZoneTypes}
             features={effectiveFeatures}
             featureKinds={featureKinds}
             underlay={hallUnderlay}
@@ -934,25 +1370,32 @@ export default function LayoutDesigner({
             showNavGraph={showNavGraph}
             routePoints={routePreview?.points ?? null}
             onMeasured={setMeasuredMm}
-            selectedFeatureId={selectedFeatureId}
-            onSelectFeature={handleSelectFeature}
-            onFeatureDrawn={handleFeatureDrawn}
+            selectedFeatureIds={selectedFeatureIds}
+            armedFeature={armedFeaturePlacement}
+            onFeaturePlaced={handleFeaturePlaced}
             onFeatureGeometryChange={handlePatchFeature}
-            selectedLocationId={selectedLocationId}
             selectedLocationIds={selectedLocationIds}
+            multiSelectMode={multiSelectMode}
+            onToggleMultiSelect={handleToggleMultiSelect}
+            armedLocationType={armedLocationType}
+            onLocationPlaced={handleLocationPlaced}
             activeLevel={activeLevel}
             availableLevels={availableLevels}
             onLevelChange={setActiveLevel}
             tool={tool}
+            onToolChange={handleToolChange}
+            onQuickArmLocation={handleQuickArmLocation}
+            onQuickArmFeature={handleQuickArmFeature}
+            pickingPoint={bulkGenPickTarget !== null}
+            onPointPicked={handleBulkGenPointPicked}
+            onCancelPointPick={handleCancelBulkGenPick}
             locked={isSavingMap}
-            onSelect={handleSelect}
-            onMultiSelect={handleMultiSelect}
-            onDraftDrawn={handleDraftDrawn}
+            onSelectionChange={handleSelectionChange}
             onGeometryChange={(locationId, geometry) => {
               handlePatchLocation(locationId, geometry);
             }}
-            onGroupMove={(locationIds, deltaX, deltaY) => {
-              const updates = locationIds.flatMap((id) => {
+            onGroupMove={(locationIds, featureIds, deltaXMm, deltaYMm) => {
+              const locationUpdates = locationIds.flatMap((id) => {
                 const loc = effectiveLocations.find(
                   (l) => l.locationId === id,
                 );
@@ -961,77 +1404,74 @@ export default function LayoutDesigner({
                   {
                     locationId: id,
                     patch: {
-                      physicalX: loc.physicalX + deltaX,
-                      physicalY: loc.physicalY + deltaY,
+                      physicalX: loc.physicalX + deltaXMm,
+                      physicalY: loc.physicalY + deltaYMm,
                     },
                   },
                 ];
               });
-              handlePatchLocationsBulk(updates);
-            }}
-            onGroupResize={(updates: GeometryUpdate[]) => {
-              handlePatchLocationsBulk(
-                updates.map((u) => ({
-                  locationId: u.locationId,
-                  patch: {
-                    physicalX: u.physicalX,
-                    physicalY: u.physicalY,
-                    physicalWidthMm: u.physicalWidthMm,
-                    physicalLengthMm: u.physicalLengthMm,
+              const featureUpdates = featureIds.flatMap((id) => {
+                const feature = effectiveFeatures.find(
+                  (f) => f.featureId === id,
+                );
+                if (!feature) return [];
+                return [
+                  {
+                    featureId: id,
+                    patch: {
+                      originXMm: feature.originXMm + deltaXMm,
+                      originYMm: feature.originYMm + deltaYMm,
+                    },
                   },
-                })),
-              );
+                ];
+              });
+              dispatch({
+                type: "PATCH_GROUP",
+                hallId: hall.hallId,
+                locationUpdates,
+                featureUpdates,
+              });
             }}
+            showLabels={showLabels}
+            labelCategoryVisibility={labelCategoryVisibility}
           />
         </div>
       </div>
 
-      {/* 3. Right Sidebar: property panel -- feature drafts and feature
-          selection take precedence, since both are only reachable from an
-          explicit feature gesture. */}
-      {featureDraft ? (
-        <CreateFeaturePanel
+      {/* 3. Right Sidebar: property panel -- a mixed multi-selection (2+
+          objects, locations and/or features) takes precedence over the
+          single-item panels, since "exactly one thing selected" is a
+          separate, more specific case. */}
+      {totalSelectedCount > 1 ? (
+        <MultiObjectPanel
+          locations={selectedLocationObjects}
+          features={selectedFeatureObjects}
           featureKinds={featureKinds}
-          onCreate={handleCreateFeature}
-          onClose={() => setFeatureDraft(null)}
+          onPatchLocation={handlePatchLocation}
+          onDeleteLocation={handleDeleteLocation}
+          onPatchFeature={handlePatchFeature}
+          onDeleteFeature={handleDeleteFeature}
+          onRotateSelection={handleRotateSelection}
+          onClose={handleClearSelection}
           locked={isSavingMap}
         />
       ) : selectedFeature ? (
         <EditFeaturePanel
           feature={selectedFeature}
           featureKinds={featureKinds}
-          zoneTypes={effectiveZoneTypes}
           onPatch={(patch) =>
             handlePatchFeature(selectedFeature.featureId, patch)
           }
           onDelete={() => handleDeleteFeature(selectedFeature.featureId)}
-          onClose={() => setSelectedFeatureId(null)}
-          locked={isSavingMap}
-        />
-      ) : draft ? (
-        <CreateLocationPanel
-          draft={draft}
-          zoneTypes={effectiveZoneTypes}
-          onCreate={handleCreateLocation}
-          onClose={() => setDraft(null)}
-          locked={isSavingMap}
-        />
-      ) : selectedLocationsForMulti.length > 1 ? (
-        <MultiSelectPanel
-          locations={selectedLocationsForMulti}
-          zoneTypes={effectiveZoneTypes}
-          onPatch={handlePatchLocation}
-          onDelete={handleDeleteLocation}
           onClose={handleClearSelection}
           locked={isSavingMap}
         />
       ) : selectedLocation ? (
         <EditLocationPanel
           location={selectedLocation}
-          zoneTypes={effectiveZoneTypes}
           onPatch={(patch) => handlePatchLocation(selectedLocation.locationId, patch)}
           onDelete={() => handleDeleteLocation(selectedLocation.locationId)}
-          onClose={() => setSelectedLocationId(null)}
+          onClose={handleClearSelection}
           locked={isSavingMap}
         />
       ) : (

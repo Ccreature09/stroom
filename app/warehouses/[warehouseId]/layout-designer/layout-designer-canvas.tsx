@@ -16,25 +16,51 @@ import type {
   FeatureDTO,
   FeatureKindDTO,
   HallDTO,
+  LabelCategoryKey,
   LocationDTO,
   NavGraphDTO,
   UnderlayDTO,
-  ZoneTypeDTO,
 } from "@/lib/warehouse-map/types";
 import {
+  bayFootprintKey,
+  colorForLocation,
   groupByBayFootprint,
-  groupKeyFor,
   locationIdsInAisle,
-  locationIdsInGroup,
-  resolveZoneColor,
   sortFeaturesForRender,
 } from "@/lib/warehouse-map/types";
 import {
+  centredPlacement,
+  computeEnvelope,
+  edgeMidpoint,
   footprintVertices,
   hitTestFeature,
+  normalizeRotation,
+  resizeRotatedBox,
+  resizeRotatedBoxAlongAxis,
+  rotateAboutOrigin,
   scaleGeometry,
+  unionEnvelopes,
+  worldCorner,
+  type Envelope,
+  type FeatureGeometry,
+  type GeometryKind,
   type Point,
+  type ResizeAxis,
+  type ResizeEnd,
 } from "@/lib/warehouse-map/geometry";
+import {
+  isRoomKind,
+  isRouteKind,
+  lockedResizeAxisFor,
+  pathWidthMmFor,
+} from "@/lib/warehouse-map/feature-kinds";
+import {
+  LOCATION_TYPE_DEFAULT_SIZE_MM,
+  LOCATION_TYPE_LABELS,
+  type LocationType,
+} from "@/lib/warehouse-map/naming";
+import { connectedComponents } from "@/lib/warehouse-map/graph-compiler";
+import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 
 import { Button } from "@/components/ui/button";
 import { ZoomIn, ZoomOut } from "lucide-react";
@@ -70,12 +96,10 @@ export type Geometry = {
   physicalLengthMm: number;
 };
 export type GeometryWithRotation = Geometry & { rotationDegrees: number };
-export type GeometryUpdate = Geometry & { locationId: number };
 
 type Props = {
   hall: HallDTO;
   locations: LocationDTO[];
-  zoneTypes: ZoneTypeDTO[];
   features: FeatureDTO[];
   featureKinds: FeatureKindDTO[];
   underlay: UnderlayDTO | null;
@@ -85,34 +109,105 @@ type Props = {
   routePoints: Point[] | null;
   /** Two clicks in Measure mode report the distance between them, in mm. */
   onMeasured: (distanceMm: number) => void;
-  selectedFeatureId: number | null;
-  onSelectFeature: (featureId: number | null) => void;
-  onFeatureDrawn: (geometry: {
-    originXMm: number;
-    originYMm: number;
+  selectedFeatureIds: number[];
+  /**
+   * The kind chosen from the Add feature menu, with the footprint it will be
+   * placed at. Non-null only while the feature tool is armed; drives the ghost
+   * preview that follows the cursor.
+   */
+  armedFeature: {
+    kind: string;
+    label: string;
+    color: string;
+    geometryKind: GeometryKind;
     widthMm: number;
     lengthMm: number;
-  }) => void;
+  } | null;
+  /** A single click in feature mode drops the armed kind centred on this point. */
+  onFeaturePlaced: (worldXMm: number, worldYMm: number) => void;
   onFeatureGeometryChange: (
     featureId: number,
     geometry: FeatureGeometryUpdate,
   ) => void;
-  selectedLocationId: number | null;
   selectedLocationIds: number[];
+  /**
+   * While true, a plain click (or marquee) adds to the current selection
+   * instead of replacing it -- the same union behaviour a shift-click already
+   * gets, just without needing to hold the key. Exists for picking several
+   * locations that are far apart on a large hall (building a multi-stop
+   * route, say): shift-clicking works there too, but keeping a modifier key
+   * held down while panning between clicks is easy to fumble.
+   */
+  multiSelectMode: boolean;
+  /** Escape exits multi-select mode while the canvas has focus. */
+  onToggleMultiSelect: () => void;
+  /** The type chosen from the Add location menu; drives its own ghost preview. */
+  armedLocationType: LocationType | null;
+  /** A single click in draw mode drops the armed type centred on this point. */
+  onLocationPlaced: (worldXMm: number, worldYMm: number) => void;
   activeLevel: number | null;
   availableLevels: number[];
-  onLevelChange: (level: number) => void;
+  /** null clears the pin -- clicking the already-active level button passes
+   *  null back, so the overlay is a genuine toggle rather than a one-way
+   *  switch with no way back to "every level". */
+  onLevelChange: (level: number | null) => void;
   tool: Tool;
+  /**
+   * Lets the canvas itself drive a tool switch -- middle-mouse-button pan and
+   * the S/M keyboard shortcuts change modes from inside the canvas rather
+   * than through the top bar's buttons.
+   */
+  onToolChange: (tool: Tool) => void;
+  /**
+   * The L/F keyboard shortcuts re-arm whatever location type/feature kind was
+   * last picked from the Add menus (or the first one, if nothing has been
+   * picked yet this session) -- the parent owns that "last picked" memory
+   * since it already owns armedFeatureKind/armedLocationType.
+   */
+  onQuickArmLocation: () => void;
+  onQuickArmFeature: () => void;
+  /**
+   * While true, the next click anywhere on the canvas reports its world
+   * position via onPointPicked instead of doing whatever the active tool
+   * would normally do -- this is what lets Bulk Generate ask "click where it
+   * should start from" rather than making the user type a coordinate. It
+   * pre-empts every tool because the request came from outside the canvas
+   * entirely (the bulk-generate dialog); whatever the user happened to have
+   * selected as their tool beforehand isn't relevant to this one click.
+   */
+  pickingPoint: boolean;
+  onPointPicked: (worldXMm: number, worldYMm: number) => void;
+  /** Escape while pickingPoint is true cancels back out to the dialog. */
+  onCancelPointPick: () => void;
   locked: boolean;
-  onSelect: (locationId: number | null) => void;
-  onMultiSelect: (locationIds: number[]) => void;
-  onDraftDrawn: (geometry: Geometry) => void;
+  /**
+   * One callback replaces the old onSelect/onMultiSelect/onSelectFeature trio:
+   * every gesture (click, shift-click, marquee) ends up producing one final
+   * {locations, features} selection, so there is no reason for the canvas to
+   * report it through three different channels that the caller would only
+   * have to reconcile again.
+   */
+  onSelectionChange: (locationIds: number[], featureIds: number[]) => void;
   onGeometryChange: (
     locationId: number,
     geometry: GeometryWithRotation,
   ) => void;
-  onGroupMove: (locationIds: number[], deltaX: number, deltaY: number) => void;
-  onGroupResize: (updates: GeometryUpdate[]) => void;
+  /**
+   * Fired when a mixed group (any combination of locations and features, 2 or
+   * more) is dragged together. There is deliberately no group-resize
+   * counterpart -- resizing a rigid mix of rectangles, polygons and polylines
+   * as one bounding box has no single correct meaning, so Move & Resize only
+   * ever offers move and (via the panel's rotate button) rotate for a
+   * multi-selection.
+   */
+  onGroupMove: (
+    locationIds: number[],
+    featureIds: number[],
+    deltaXMm: number,
+    deltaYMm: number,
+  ) => void;
+  showLabels: boolean;
+  labelCategoryVisibility: Record<LabelCategoryKey, boolean>;
 };
 
 type LocationNode = {
@@ -127,9 +222,52 @@ type LocationNode = {
 type FeatureNode = {
   container: Container;
   shape: Graphics;
+  /** Name plate drawn behind the label so room names stay readable over fill. */
+  labelPlate: Graphics;
   label: Text;
   feature: FeatureDTO;
 };
+
+/**
+ * Walks a polyline and emits dash segments into `g`. Pixi has no dashed-stroke
+ * primitive, and the dashed centre line is what makes a travel lane read as a
+ * road rather than a solid painted block.
+ */
+function dashPath(
+  g: Graphics,
+  points: Point[],
+  dashMm: number,
+  gapMm: number,
+) {
+  const period = dashMm + gapMm;
+  if (period <= 0) return;
+  let carry = 0;
+
+  for (let i = 1; i < points.length; i++) {
+    const from = points[i - 1];
+    const to = points[i];
+    const dx = to.x - from.x;
+    const dy = to.y - from.y;
+    const segment = Math.hypot(dx, dy);
+    if (segment <= 0) continue;
+    const ux = dx / segment;
+    const uy = dy / segment;
+
+    // `carry` keeps the dash rhythm continuous across corners instead of
+    // restarting the pattern at every vertex.
+    let cursor = -carry;
+    while (cursor < segment) {
+      const start = Math.max(cursor, 0);
+      const end = Math.min(cursor + dashMm, segment);
+      if (end > start) {
+        g.moveTo(from.x + ux * start, from.y + uy * start);
+        g.lineTo(from.x + ux * end, from.y + uy * end);
+      }
+      cursor += period;
+    }
+    carry = (carry + segment) % period;
+  }
+}
 
 function parseHexToInt(hex: string | null | undefined, fallback: number) {
   if (!hex) return fallback;
@@ -140,21 +278,91 @@ function parseHexToInt(hex: string | null | undefined, fallback: number) {
 const HANDLE_CORNERS = ["nw", "ne", "se", "sw"] as const;
 type Corner = (typeof HANDLE_CORNERS)[number];
 
-function clampLocation(
-  x: number,
-  y: number,
-  width: number,
-  height: number,
+/**
+ * Diagonal resize cursor for a corner, accounting for rotation. A "nw" corner
+ * on a box rotated 90° sits where "ne" visually is, so the unrotated cursor
+ * would point across the drag rather than along it.
+ */
+function resizeCursorFor(corner: Corner, rotationDegrees: number) {
+  const quarterTurns = Math.round(normalizeRotation(rotationDegrees) / 90) % 2;
+  const isPrimaryDiagonal = corner === "nw" || corner === "se";
+  const flipped = quarterTurns === 1 ? !isPrimaryDiagonal : isPrimaryDiagonal;
+  return flipped ? "nwse-resize" : "nesw-resize";
+}
+
+/**
+ * Resize cursor for a single-axis (edge midpoint) handle. Unlike a corner --
+ * which is diagonal in the local frame at every rotation, so only nwse/nesw
+ * ever apply -- an edge handle is axis-aligned locally and can land exactly
+ * horizontal or vertical on screen, so this also picks the plain ns/ew
+ * cursors when the rotation puts it there.
+ */
+function axisResizeCursorFor(axis: ResizeAxis, rotationDegrees: number) {
+  const AXIS_CURSORS = [
+    "ew-resize",
+    "nwse-resize",
+    "ns-resize",
+    "nesw-resize",
+  ] as const;
+  const local = axis === "length" ? { x: 0, y: 1 } : { x: 1, y: 0 };
+  const world = rotateAboutOrigin(local.x, local.y, rotationDegrees);
+  const angleDeg = ((Math.atan2(world.y, world.x) * 180) / Math.PI + 360) % 360;
+  // The cursor is undirected (dragging either way along the same line looks
+  // the same), so fold to a half-turn before snapping to the nearest of the
+  // 4 orientations 45 degrees apart.
+  const sector = Math.round((angleDeg % 180) / 45) % 4;
+  return AXIS_CURSORS[sector];
+}
+
+/**
+ * Clamps a proposed origin so the geometry's *rendered envelope* stays inside
+ * the hall.
+ *
+ * The envelope rather than (origin, width, length) is what has to fit:
+ * rotation is about the origin, so a rotated box occupies a different
+ * rectangle than its nominal one, and a polyline's local points can legally
+ * run outside its nominal box as well. Clamping the nominal box would let a
+ * rotated rack hang through the wall while its numbers still looked in range.
+ *
+ * A footprint larger than the hall pins to the near edge rather than jumping:
+ * when the upper bound falls below the lower one, the outer Math.max wins.
+ */
+function clampOriginToHall(
+  geometry: FeatureGeometry,
+  nextX: number,
+  nextY: number,
   hallWidth: number,
   hallHeight: number,
-) {
-  const clampedWidth = Math.min(width, hallWidth);
-  const clampedHeight = Math.min(height, hallHeight);
+): Point {
+  // Measured with the origin at (0, 0), the envelope is the set of offsets
+  // from the origin to each edge of the footprint -- which is exactly what the
+  // hall bounds have to be applied against.
+  const local = computeEnvelope({
+    ...geometry,
+    originXMm: 0,
+    originYMm: 0,
+  });
   return {
-    x: Math.max(0, Math.min(x, hallWidth - clampedWidth)),
-    y: Math.max(0, Math.min(y, hallHeight - clampedHeight)),
-    width: clampedWidth,
-    height: clampedHeight,
+    x: Math.max(-local.minX, Math.min(nextX, hallWidth - local.maxX)),
+    y: Math.max(-local.minY, Math.min(nextY, hallHeight - local.maxY)),
+  };
+}
+
+/**
+ * Pins a pointer position to the hall.
+ *
+ * Every resize gesture holds one corner fixed and follows the pointer with the
+ * opposite one, so confining the pointer is enough to confine the result --
+ * the anchor corner is already inside the hall by induction.
+ */
+function clampPointToHall(
+  world: Point,
+  hallWidth: number,
+  hallHeight: number,
+): Point {
+  return {
+    x: Math.max(0, Math.min(world.x, hallWidth)),
+    y: Math.max(0, Math.min(world.y, hallHeight)),
   };
 }
 
@@ -223,7 +431,6 @@ function formatFootprint(
 export default function LayoutDesignerCanvas({
   hall,
   locations,
-  zoneTypes,
   features,
   featureKinds,
   underlay,
@@ -231,23 +438,31 @@ export default function LayoutDesignerCanvas({
   showNavGraph,
   routePoints,
   onMeasured,
-  selectedFeatureId,
-  onSelectFeature,
-  onFeatureDrawn,
+  selectedFeatureIds,
+  armedFeature,
+  onFeaturePlaced,
   onFeatureGeometryChange,
-  selectedLocationId,
   selectedLocationIds,
+  multiSelectMode,
+  onToggleMultiSelect,
+  armedLocationType,
+  onLocationPlaced,
   activeLevel,
   availableLevels,
   onLevelChange,
   tool,
+  onToolChange,
+  onQuickArmLocation,
+  onQuickArmFeature,
+  pickingPoint,
+  onPointPicked,
+  onCancelPointPick,
   locked,
-  onSelect,
-  onMultiSelect,
-  onDraftDrawn,
+  onSelectionChange,
   onGeometryChange,
   onGroupMove,
-  onGroupResize,
+  showLabels,
+  labelCategoryVisibility,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const appRef = useRef<Application | null>(null);
@@ -258,7 +473,14 @@ export default function LayoutDesignerCanvas({
   const underlaySpriteRef = useRef<Sprite | null>(null);
   const underlayUrlRef = useRef<string | null>(null);
   const measureLayerRef = useRef<Graphics | null>(null);
+  const featureGhostRef = useRef<Graphics | null>(null);
+  const locationGhostRef = useRef<Graphics | null>(null);
   const navGraphLayerRef = useRef<Graphics | null>(null);
+  // Node ids outside the largest connected component -- recomputed only when
+  // navGraph itself changes (see the effect below `drawNavGraph`), not on
+  // every zoom tick, since drawNavGraph also runs on "zoomed" and redoing a
+  // union-find that often would be pure waste.
+  const disconnectedNodeIdsRef = useRef<Set<number>>(new Set());
   const routeLayerRef = useRef<Graphics | null>(null);
   const handleLayerRef = useRef<Container | null>(null);
   const featureHandlesRef = useRef<Graphics[]>([]);
@@ -271,6 +493,9 @@ export default function LayoutDesignerCanvas({
   const scaleBarRef = useRef<HTMLDivElement>(null);
   const coordOverlayRef = useRef<HTMLDivElement>(null);
   const minFitScaleRef = useRef<number>(0.05);
+  // Screen-space anchor for an in-progress middle-mouse-button pan; null
+  // whenever the middle button isn't currently held down.
+  const middlePanRef = useRef<{ x: number; y: number } | null>(null);
   const [isReady, setIsReady] = useState(false);
   const [initError, setInitError] = useState<string | null>(null);
 
@@ -291,6 +516,42 @@ export default function LayoutDesignerCanvas({
     updateScaleBar(vp);
   }
 
+  /**
+   * S/M/L/F switch tools while the canvas container has focus -- attached as
+   * a plain React onKeyDown on that div, so it only ever fires "while focused
+   * on the canvas" for free, rather than needing a global listener guarded by
+   * some separate "is the canvas active" flag.
+   */
+  function handleCanvasKeyDown(e: ReactKeyboardEvent<HTMLDivElement>) {
+    if (locked || e.ctrlKey || e.metaKey || e.altKey || e.repeat) return;
+    switch (e.key.toLowerCase()) {
+      case "s":
+        onToolChange("select");
+        break;
+      case "m":
+        onToolChange("transform");
+        break;
+      case "l":
+        onQuickArmLocation();
+        break;
+      case "f":
+        onQuickArmFeature();
+        break;
+      case "escape":
+        if (pickingPoint) {
+          onCancelPointPick();
+        } else if (multiSelectMode) {
+          onToggleMultiSelect();
+        } else {
+          return;
+        }
+        break;
+      default:
+        return;
+    }
+    e.preventDefault();
+  }
+
   function showCoordOverlay(screenX: number, screenY: number, text: string) {
     const el = coordOverlayRef.current;
     if (!el) return;
@@ -308,44 +569,51 @@ export default function LayoutDesignerCanvas({
 
   const stateRef = useRef({
     tool,
-    selectedLocationId,
+    onToolChange,
     selectedLocationIds,
-    onSelect,
-    onMultiSelect,
-    onDraftDrawn,
+    multiSelectMode,
+    onSelectionChange,
     onGeometryChange,
     onGroupMove,
-    onGroupResize,
     hall,
-    selectedFeatureId,
-    onSelectFeature,
-    onFeatureDrawn,
+    selectedFeatureIds,
+    armedFeature,
+    onFeaturePlaced,
     onFeatureGeometryChange,
+    armedLocationType,
+    onLocationPlaced,
     onMeasured,
+    pickingPoint,
+    onPointPicked,
+    onCancelPointPick,
+    showLabels,
+    labelCategoryVisibility,
   });
   stateRef.current = {
     tool,
-    selectedLocationId,
+    onToolChange,
     selectedLocationIds,
-    onSelect,
-    onMultiSelect,
-    onDraftDrawn,
+    multiSelectMode,
+    onSelectionChange,
     onGeometryChange,
     onGroupMove,
-    onGroupResize,
     hall,
-    selectedFeatureId,
-    onSelectFeature,
-    onFeatureDrawn,
+    selectedFeatureIds,
+    armedFeature,
+    onFeaturePlaced,
     onFeatureGeometryChange,
+    armedLocationType,
+    onLocationPlaced,
     onMeasured,
+    pickingPoint,
+    onPointPicked,
+    onCancelPointPick,
+    showLabels,
+    labelCategoryVisibility,
   };
 
   const locationsRef = useRef(locations);
   locationsRef.current = locations;
-
-  const zoneTypesRef = useRef(zoneTypes);
-  zoneTypesRef.current = zoneTypes;
 
   const featuresRef = useRef(features);
   featuresRef.current = features;
@@ -368,12 +636,6 @@ export default function LayoutDesignerCanvas({
     );
   }
 
-  function colorForLocation(zoneId: number | null): number {
-    if (zoneId == null) return resolveZoneColor(null);
-    const zone = zoneTypesRef.current.find((z) => z.zoneId === zoneId);
-    return resolveZoneColor(zone ?? { zoneId, color: null });
-  }
-
   const activeLevelRef = useRef(activeLevel);
   activeLevelRef.current = activeLevel;
 
@@ -383,11 +645,6 @@ export default function LayoutDesignerCanvas({
     startWorldY: number;
     originX: number;
     originY: number;
-  }>(null);
-  const drawRef = useRef<null | {
-    startWorldX: number;
-    startWorldY: number;
-    rect: Graphics;
   }>(null);
   const resizeRef = useRef<null | {
     locationId: number;
@@ -405,41 +662,54 @@ export default function LayoutDesignerCanvas({
     originX: number;
     originY: number;
   }>(null);
-  const featureResizeRef = useRef<null | {
-    featureId: number;
-    corner: Corner;
-    originX: number;
-    originY: number;
-    originW: number;
-    originH: number;
-    // Snapshotted at grab time: every move event rescales from *these*, not
-    // from the live points, otherwise each event would scale the already
-    // scaled result and the shape would run away from the cursor.
-    originPoints: Point[] | null;
-  }>(null);
+  // "corner" is the usual free 2-axis resize; "axis" is a single-axis resize
+  // for a feature kind whose other dimension is locked (see
+  // lockedResizeAxisFor) -- axis/end identify which edge was grabbed, the
+  // same way corner does for the free case.
+  type FeatureResizeGrab =
+    | { mode: "corner"; corner: Corner }
+    | { mode: "axis"; axis: ResizeAxis; end: ResizeEnd };
+  const featureResizeRef = useRef<
+    | null
+    | ({
+        featureId: number;
+        originX: number;
+        originY: number;
+        originW: number;
+        originH: number;
+        // Snapshotted at grab time: every move event rescales from *these*,
+        // not from the live points, otherwise each event would scale the
+        // already scaled result and the shape would run away from the cursor.
+        originPoints: Point[] | null;
+      } & FeatureResizeGrab)
+  >(null);
+  // null when the selected feature's handles are the usual 4 corners;
+  // otherwise the locked-axis mode currently on screen, so
+  // repositionFeatureHandles knows how to interpret its 2 handles without
+  // re-deriving lockedResizeAxisFor from a possibly-stale node lookup.
+  const featureHandleAxisRef = useRef<ResizeAxis | null>(null);
 
   const boxSelectRef = useRef<null | {
     startWorldX: number;
     startWorldY: number;
     rect: Graphics;
   }>(null);
+  // A mixed group drag: any combination of locations and features moved
+  // together as a rigid body. There is no group-resize counterpart -- see the
+  // note on Props.onGroupMove for why.
   const groupDragRef = useRef<null | {
-    memberNodeIds: number[];
-    fullLocationIds: number[];
+    locationIds: number[];
+    featureIds: number[];
     startWorldX: number;
     startWorldY: number;
-    origins: Map<number, { x: number; y: number }>;
+    locOrigins: Map<number, { x: number; y: number }>;
+    featOrigins: Map<number, { x: number; y: number }>;
     originBBox: { x: number; y: number; w: number; h: number };
-  }>(null);
-  // Aisle-level group resize: scaling the group's aggregate bounding box
-  // proportionally rescales every member location relative to the fixed
-  // opposite corner.
-  const groupResizeRef = useRef<null | {
-    aisle: number;
-    corner: Corner;
-    memberNodeIds: number[];
-    originBBox: { x: number; y: number; w: number; h: number };
-    originGeoms: Map<number, { x: number; y: number; w: number; h: number }>;
+    // Updated every pointermove tick with the same clamped delta already
+    // being applied to the canvas -- see the note on commitGroupDrag for why
+    // it, not a node lookup, is what commit reads back.
+    lastDx: number;
+    lastDy: number;
   }>(null);
 
   function fittedFontSize(widthMm: number, lengthMm: number) {
@@ -490,36 +760,162 @@ export default function LayoutDesignerCanvas({
     }
   }
 
+  /**
+   * Envelope of one location or feature in world mm, used to size the group
+   * drag's bounding box. Locations have no `points`, so they are described to
+   * computeEnvelope as a plain rotated RECT.
+   */
+  function envelopeOfLocation(loc: LocationDTO): Envelope {
+    return computeEnvelope({
+      geometryKind: "RECT",
+      originXMm: loc.physicalX,
+      originYMm: loc.physicalY,
+      widthMm: loc.physicalWidthMm,
+      lengthMm: loc.physicalLengthMm,
+      rotationDegrees: loc.rotationDegrees,
+      points: null,
+    });
+  }
+
+  /** Begins dragging every listed location and feature together as one rigid group. */
+  function startGroupDrag(
+    locationIds: number[],
+    featureIds: number[],
+    world: Point,
+  ) {
+    const locOrigins = new Map<number, { x: number; y: number }>();
+    const featOrigins = new Map<number, { x: number; y: number }>();
+    const envelopes: Envelope[] = [];
+
+    // Not nodesRef: that map holds only the one visible representative per
+    // aggregated bay group (resolveVisibleLocations picks a single level to
+    // actually draw), so a whole-aisle group -- which spans every level, not
+    // just the displayed one -- would silently lose every level but that one.
+    // locationsRef has every real location regardless of what got a Pixi node,
+    // which is what a group move needs to carry each one along.
+    const locationById = new Map(
+      locationsRef.current.map((l) => [l.locationId, l]),
+    );
+    for (const id of locationIds) {
+      const loc = locationById.get(id);
+      if (!loc) continue;
+      locOrigins.set(id, { x: loc.physicalX, y: loc.physicalY });
+      envelopes.push(envelopeOfLocation(loc));
+    }
+    for (const id of featureIds) {
+      const node = featureNodesRef.current.get(id);
+      if (!node) continue;
+      featOrigins.set(id, {
+        x: node.feature.originXMm,
+        y: node.feature.originYMm,
+      });
+      envelopes.push(computeEnvelope(node.feature));
+    }
+    if (locOrigins.size + featOrigins.size === 0) return;
+
+    const bbox = unionEnvelopes(envelopes);
+    groupDragRef.current = {
+      locationIds: Array.from(locOrigins.keys()),
+      featureIds: Array.from(featOrigins.keys()),
+      startWorldX: world.x,
+      startWorldY: world.y,
+      locOrigins,
+      featOrigins,
+      originBBox: {
+        x: bbox.minX,
+        y: bbox.minY,
+        w: bbox.maxX - bbox.minX,
+        h: bbox.maxY - bbox.minY,
+      },
+      lastDx: 0,
+      lastDy: 0,
+    };
+  }
+
   function commitGroupDrag() {
     const drag = groupDragRef.current;
     if (!drag) return;
     groupDragRef.current = null;
     hideCoordOverlay();
-    const firstId = drag.memberNodeIds[0];
-    if (firstId == null) return;
-    const node = nodesRef.current.get(firstId);
-    const origin = drag.origins.get(firstId);
-    if (!node || !origin) return;
-    const dx = node.loc.physicalX - origin.x;
-    const dy = node.loc.physicalY - origin.y;
-    if (dx !== 0 || dy !== 0) {
-      stateRef.current.onGroupMove(drag.fullLocationIds, dx, dy);
+
+    // Read the delta the pointermove handler already computed and clamped,
+    // rather than reconstructing it from some member's moved node position.
+    // The old approach picked drag.locationIds[0] and looked it up in
+    // nodesRef, which only has an entry for the one visible representative
+    // per aggregated bay group -- whenever that first id happened to be a
+    // level nodesRef doesn't track (any level but the displayed one in a
+    // whole-aisle drag), the lookup missed, found stayed false, and the
+    // entire move silently failed to commit for everyone, not just that one
+    // level. lastDx/lastDy has no such dependency: it's the same number
+    // every member is already being moved by on screen.
+    if (drag.lastDx !== 0 || drag.lastDy !== 0) {
+      stateRef.current.onGroupMove(
+        drag.locationIds,
+        drag.featureIds,
+        drag.lastDx,
+        drag.lastDy,
+      );
     }
   }
 
   // Grouping rule for click/marquee selection: racking locations expand to
-  // their full aisle (all bays/levels); shelf and floor storage locations
-  // expand to their zone+type group (the same grouping already used for
-  // move/delete elsewhere in the app). Anything else selects just itself.
+  // their full aisle (all bays, all levels) by default -- that's the physical
+  // structure, and moving one bay usually means moving the whole rack run.
+  // Pinning a level via the L1/L2/... overlay narrows this to just that
+  // level's row across the aisle instead: the overlay is asking "let me work
+  // with level 2 specifically", and a click while it's active should honour
+  // that rather than always dragging every level along with it.
+  //
+  // Shelving has no aisle to expand into, but resolveVisibleLocations
+  // aggregates it by footprint exactly like racking -- one canvas node stands
+  // in for every level stacked at that bay (groupByBayFootprint, in
+  // types.ts, includes both RACKING and SHELF). Treating shelf as "select
+  // just itself" left every level but the displayed one out of the group
+  // entirely: dragging the one visible node moved only that level, the
+  // other levels never got a delta applied, and they were left stranded at
+  // the old position -- re-aggregating there afterward makes them look like
+  // a leftover duplicate. Same bug as racking's, just via a type that this
+  // function had never been taught to treat as a group at all. The fix
+  // mirrors racking's level-pin behaviour, scoped to this one bay's stack
+  // (its footprint) rather than a whole aisle, since shelving has no aisle
+  // for it to be a fragment of.
+  //
+  // Floor is deliberately untouched: buildFloorLineLocations always writes
+  // level: null, so no floor footprint ever has more than one location on
+  // it -- there is nothing for this bug to leave behind, and "select just
+  // itself" is already correct for it.
   function resolveGroupIds(locationId: number): number[] {
     const loc = locationsRef.current.find((l) => l.locationId === locationId);
     if (!loc) return [locationId];
+    const activeLevel = activeLevelRef.current;
+
     if (loc.locationType === "RACKING" && loc.aisle != null) {
+      if (activeLevel != null) {
+        return locationsRef.current
+          .filter(
+            (l) =>
+              l.locationType === "RACKING" &&
+              l.aisle === loc.aisle &&
+              l.level === activeLevel,
+          )
+          .map((l) => l.locationId);
+      }
       return locationIdsInAisle(locationsRef.current, loc.aisle);
     }
-    if (loc.locationType === "SHELF" || loc.locationType === "FLOOR") {
-      return locationIdsInGroup(locationsRef.current, groupKeyFor(loc));
+
+    if (loc.locationType === "SHELF") {
+      const key = bayFootprintKey(loc);
+      const sameBay = locationsRef.current.filter(
+        (l) => l.locationType === "SHELF" && bayFootprintKey(l) === key,
+      );
+      if (activeLevel != null) {
+        return sameBay
+          .filter((l) => l.level === activeLevel)
+          .map((l) => l.locationId);
+      }
+      return sameBay.map((l) => l.locationId);
     }
+
     return [locationId];
   }
 
@@ -529,46 +925,6 @@ export default function LayoutDesignerCanvas({
       for (const gid of resolveGroupIds(id)) result.add(gid);
     }
     return Array.from(result);
-  }
-
-  function commitGroupResize() {
-    const resize = groupResizeRef.current;
-    if (!resize) return;
-    groupResizeRef.current = null;
-    hideCoordOverlay();
-
-    const geomByBay = new Map<
-      string,
-      { x: number; y: number; w: number; h: number }
-    >();
-    for (const id of resize.memberNodeIds) {
-      const node = nodesRef.current.get(id);
-      if (!node) continue;
-      const bayKey = `${node.loc.aisle ?? "x"}:${node.loc.bay ?? "x"}`;
-      geomByBay.set(bayKey, {
-        x: node.loc.physicalX,
-        y: node.loc.physicalY,
-        w: node.loc.physicalWidthMm,
-        h: node.loc.physicalLengthMm,
-      });
-    }
-
-    const updates: GeometryUpdate[] = [];
-    for (const loc of locationsRef.current) {
-      if (loc.locationType !== "RACKING" || loc.aisle !== resize.aisle) continue;
-      const bayKey = `${loc.aisle ?? "x"}:${loc.bay ?? "x"}`;
-      const geom = geomByBay.get(bayKey);
-      if (!geom) continue;
-      updates.push({
-        locationId: loc.locationId,
-        physicalX: geom.x,
-        physicalY: geom.y,
-        physicalWidthMm: geom.w,
-        physicalLengthMm: geom.h,
-      });
-    }
-
-    if (updates.length > 0) stateRef.current.onGroupResize(updates);
   }
 
   // ---------------------------------------------------------------------
@@ -585,7 +941,10 @@ export default function LayoutDesignerCanvas({
     const feature = node.feature;
     const color = colorForFeature(feature);
     const meta = kindMetaFor(feature.kind);
-    const strokeWidth = isSelected ? 45 : 20;
+    const room = isRoomKind(feature.kind);
+    // Rooms are built structures, so they carry a heavier wall-like border than
+    // an open painted area such as a staging zone.
+    const strokeWidth = isSelected ? 45 : room ? 90 : 20;
     const strokeColor = isSelected ? 0x0f172a : color;
     const pending = feature.featureId < 0;
     const outline = {
@@ -596,9 +955,11 @@ export default function LayoutDesignerCanvas({
     // eye can separate "this blocks travel" from "this is just labelled area".
     const fillAlpha = feature.isVisualOnly
       ? 0.08
-      : feature.isObstacle
-        ? 0.45
-        : 0.18;
+      : room
+        ? 0.3
+        : feature.isObstacle
+          ? 0.45
+          : 0.18;
 
     const g = node.shape.clear();
 
@@ -625,20 +986,65 @@ export default function LayoutDesignerCanvas({
       case "POLYLINE": {
         const pts = feature.points ?? [];
         if (pts.length >= 2) {
-          g.moveTo(pts[0].x, pts[0].y);
-          for (let i = 1; i < pts.length; i++) g.lineTo(pts[i].x, pts[i].y);
-          // Walls and conveyors have a real thickness; fall back to a visible
-          // hairline so a freshly drawn one is never invisible.
-          const thickness = Number(feature.attrs.thicknessMm);
-          g.stroke({
-            width: Number.isFinite(thickness) && thickness > 0 ? thickness : 200,
-            color: pending ? PENDING_CREATE_COLOR : color,
-            alpha: 0.95,
-          });
-          if (isSelected) {
+          // Drawn at true floor width rather than as a hairline: a 1200mm
+          // walkway is a surface people walk along, not a pencil line, and at
+          // warehouse scale the difference decides whether the map is legible.
+          const bandWidth = Math.max(
+            60,
+            pathWidthMmFor(feature.kind, feature.attrs),
+          );
+          const strokeColor = pending ? PENDING_CREATE_COLOR : color;
+          const route = isRouteKind(feature.kind);
+
+          const trace = () => {
             g.moveTo(pts[0].x, pts[0].y);
             for (let i = 1; i < pts.length; i++) g.lineTo(pts[i].x, pts[i].y);
-            g.stroke({ width: 60, color: 0x0f172a, alpha: 0.9 });
+          };
+
+          // Painted in back-to-front order: each stroke covers the one before,
+          // so the selection halo has to go down first to end up as a rim
+          // rather than a blanket over the band.
+          if (isSelected) {
+            trace();
+            g.stroke({
+              width: bandWidth + Math.max(160, bandWidth * 0.35),
+              color: 0x0f172a,
+              alpha: 0.9,
+              cap: "round",
+              join: "round",
+            });
+          }
+
+          // Routes read as open travel surfaces -- translucent enough to see
+          // the floor through. Walls and conveyors are solid built objects.
+          trace();
+          g.stroke({
+            width: bandWidth,
+            color: strokeColor,
+            alpha: route ? 0.38 : 0.95,
+            cap: route ? "butt" : "round",
+            join: "round",
+          });
+
+          if (route) {
+            // Dashed centre line: the single cue that turns a coloured band
+            // into something recognisable as a lane you travel along.
+            dashPath(g, pts, bandWidth * 0.9, bandWidth * 0.7);
+            g.stroke({
+              width: Math.max(25, bandWidth * 0.08),
+              color: 0xffffff,
+              alpha: 0.9,
+              cap: "butt",
+            });
+          } else if (feature.kind === "CONVEYOR_SEGMENT") {
+            // Roller ticks across the belt read as a conveyor at a glance.
+            dashPath(g, pts, bandWidth * 0.16, bandWidth * 0.45);
+            g.stroke({
+              width: bandWidth * 0.9,
+              color: 0x0f172a,
+              alpha: 0.4,
+              cap: "butt",
+            });
           }
         }
         break;
@@ -671,6 +1077,7 @@ export default function LayoutDesignerCanvas({
       if (!node) {
         const container = new Container();
         const shape = new Graphics();
+        const labelPlate = new Graphics();
         const label = new Text({
           text: "",
           style: new TextStyle({
@@ -680,7 +1087,8 @@ export default function LayoutDesignerCanvas({
           }),
         });
         label.anchor.set(0.5);
-        container.addChild(shape, label);
+        // Plate before label: it is a backdrop, not a decoration on top.
+        container.addChild(shape, labelPlate, label);
         layer.addChild(container);
 
         // Features never intercept pointer events. Pixi hit-tests a Graphics
@@ -691,7 +1099,7 @@ export default function LayoutDesignerCanvas({
         // exact geometry and a zoom-compensated tolerance.
         container.eventMode = "none";
 
-        node = { container, shape, label, feature };
+        node = { container, shape, labelPlate, label, feature };
         nodes.set(feature.featureId, node);
       }
 
@@ -701,7 +1109,7 @@ export default function LayoutDesignerCanvas({
       node.container.angle = feature.rotationDegrees;
       node.container.zIndex = feature.layerIndex;
 
-      drawFeatureShape(node, feature.featureId === selectedFeatureId);
+      drawFeatureShape(node, selectedFeatureIds.includes(feature.featureId));
 
       // Labels sit at the footprint centroid rather than the origin, which is
       // the only sensible anchor for polygons and polylines.
@@ -717,12 +1125,20 @@ export default function LayoutDesignerCanvas({
       if (local.length > 0) {
         const cx = local.reduce((sum, p) => sum + p.x, 0) / local.length;
         const cy = local.reduce((sum, p) => sum + p.y, 0) / local.length;
-        node.label.position.set(cx, cy);
+        // A point's centroid is the marker itself, so its name would print on
+        // top of the pin -- drop it clear underneath instead.
+        const labelOffsetY =
+          feature.geometryKind === "POINT" ? POINT_MARKER_MM * 2.2 : 0;
+        node.label.position.set(cx, cy + labelOffsetY);
       }
       node.label.style.fontSize = fittedFontSize(
         Math.max(feature.widthMm, POINT_MARKER_MM * 4),
         Math.max(feature.lengthMm, POINT_MARKER_MM * 4),
       );
+
+      // Plate depends on the text, font size and position just set above, so
+      // it is redrawn here rather than on every zoom change.
+      drawLabelPlate(node);
       node.container.sortableChildren = false;
     }
 
@@ -738,12 +1154,153 @@ export default function LayoutDesignerCanvas({
     rebuildFeatureHandles();
   }
 
+  /**
+   * Name plate behind a feature label. Rooms and areas are filled shapes, so
+   * bare dark text on a mid-tone fill is often unreadable -- the plate is what
+   * makes "Break room" legible without having to click the room to find out
+   * what it is.
+   */
+  function drawLabelPlate(node: FeatureNode) {
+    const g = node.labelPlate.clear();
+    if (!node.label.text) return;
+
+    // Point markers carry their label beside the pin, where there is no fill
+    // to fight with, so they do not need a plate.
+    if (node.feature.geometryKind === "POINT") return;
+
+    const padX = node.label.style.fontSize as number;
+    const padY = padX * 0.45;
+    const w = node.label.width + padX;
+    const h = node.label.height + padY;
+    const radius = Math.min(h / 2, padX * 0.5);
+
+    g.roundRect(
+      node.label.position.x - w / 2,
+      node.label.position.y - h / 2,
+      w,
+      h,
+      radius,
+    )
+      .fill({ color: 0xffffff, alpha: 0.82 })
+      .stroke({ width: Math.max(8, padX * 0.06), color: 0x0f172a, alpha: 0.18 });
+  }
+
+  /**
+   * Outline of the armed feature at its real size, centred on the cursor.
+   * Click-to-place is only trustworthy if you can see what you are about to
+   * drop and how big it is before committing.
+   */
+  function drawFeatureGhost(world: Point | null) {
+    const g = featureGhostRef.current;
+    if (!g) return;
+    g.clear();
+
+    const armed = stateRef.current.armedFeature;
+    if (!armed || !world || stateRef.current.tool !== "feature") return;
+
+    const color = parseHexToInt(armed.color, 0x0891b2);
+    // stateRef, not the prop: this runs from a pointermove listener registered
+    // once at init, so the captured `hall` would go stale the moment someone
+    // edits the hall's dimensions.
+    const liveHall = stateRef.current.hall;
+    const { x, y, width, height } = centredPlacement(
+      world.x,
+      world.y,
+      armed.widthMm,
+      armed.lengthMm,
+      liveHall.physicalWidthMm,
+      liveHall.physicalLengthMm,
+    );
+
+    if (armed.geometryKind === "POINT") {
+      g.circle(world.x, world.y, POINT_MARKER_MM)
+        .fill({ color, alpha: 0.35 })
+        .stroke({ width: 60, color, alpha: 0.9 });
+      return;
+    }
+
+    if (armed.geometryKind === "CIRCLE") {
+      const r = Math.min(width, height) / 2;
+      g.circle(x + width / 2, y + height / 2, r)
+        .fill({ color, alpha: 0.2 })
+        .stroke({ width: 60, color, alpha: 0.9 });
+      return;
+    }
+
+    if (armed.geometryKind === "POLYLINE") {
+      const midY = y + height / 2;
+      g.moveTo(x, midY).lineTo(x + width, midY);
+      g.stroke({
+        width: Math.max(60, height),
+        color,
+        alpha: 0.4,
+        cap: "round",
+      });
+      return;
+    }
+
+    g.rect(x, y, width, height)
+      .fill({ color, alpha: 0.2 })
+      .stroke({ width: 60, color, alpha: 0.9 });
+  }
+
+  const LOCATION_GHOST_COLOR = 0x0891b2;
+
+  /**
+   * Outline of the armed location type at its stock size, centred on the
+   * cursor -- the click-to-place counterpart of drawFeatureGhost above, same
+   * reasoning: you should see what you are about to drop before committing.
+   */
+  function drawLocationGhost(world: Point | null) {
+    const g = locationGhostRef.current;
+    if (!g) return;
+    g.clear();
+
+    const armed = stateRef.current.armedLocationType;
+    if (!armed || !world || stateRef.current.tool !== "draw") return;
+
+    const liveHall = stateRef.current.hall;
+    const size = LOCATION_TYPE_DEFAULT_SIZE_MM[armed];
+    const { x, y, width, height } = centredPlacement(
+      world.x,
+      world.y,
+      size.widthMm,
+      size.lengthMm,
+      liveHall.physicalWidthMm,
+      liveHall.physicalLengthMm,
+    );
+
+    g.rect(x, y, width, height)
+      .fill({ color: LOCATION_GHOST_COLOR, alpha: 0.2 })
+      .stroke({ width: 60, color: LOCATION_GHOST_COLOR, alpha: 0.9 });
+  }
+
   function updateFeatureLabelVisibility() {
     const viewport = viewportRef.current;
     if (!viewport) return;
-    const visible = viewport.scale.x >= LABEL_ZOOM_THRESHOLD;
+    const scale = viewport.scale.x;
+    const { showLabels, labelCategoryVisibility } = stateRef.current;
+
     for (const node of featureNodesRef.current.values()) {
-      node.label.visible = visible;
+      // A fixed zoom threshold hid the name of a 7m break room at the very
+      // zoom level where the room was still perfectly visible. Decide per
+      // feature instead: show the name whenever the label would render large
+      // enough on screen to actually be read.
+      //
+      // Visibility only -- the plate itself is redrawn in syncFeatureNodes,
+      // because this runs on every zoom tick and re-emitting a rounded rect
+      // per feature per wheel event is exactly the kind of churn that made
+      // dragging large aisles expensive.
+      const category = kindMetaFor(node.feature.kind)?.category;
+      const categoryAllowed =
+        showLabels && (category == null || labelCategoryVisibility[category] !== false);
+      const onScreenFontPx = (node.label.style.fontSize as number) * scale;
+      const areaLike = node.feature.geometryKind !== "POINT";
+      const zoomAllowed = areaLike
+        ? onScreenFontPx >= 7
+        : scale >= LABEL_ZOOM_THRESHOLD;
+      node.label.visible = categoryAllowed && zoomAllowed;
+      node.labelPlate.visible = node.label.visible;
     }
   }
 
@@ -782,6 +1339,28 @@ export default function LayoutDesignerCanvas({
       if (hit) return feature.featureId;
     }
     return null;
+  }
+
+  /**
+   * Features whose (rotated) bounding box touches a marquee rectangle, using
+   * the same "touches any part of the box" AABB rule the location marquee
+   * already uses -- so a marquee that grazes a rotated wall's corner selects
+   * it, consistent with what a location marquee does in the same situation.
+   */
+  function featureIdsInMarquee(
+    x0: number,
+    y0: number,
+    x1: number,
+    y1: number,
+  ): number[] {
+    const hits: number[] = [];
+    for (const feature of featuresRef.current) {
+      const env = computeEnvelope(feature);
+      const intersects =
+        env.minX < x1 && env.maxX > x0 && env.minY < y1 && env.maxY > y0;
+      if (intersects) hits.push(feature.featureId);
+    }
+    return hits;
   }
 
   function commitFeatureDrag() {
@@ -825,9 +1404,11 @@ export default function LayoutDesignerCanvas({
 
   /**
    * Resize handles for the selected feature. They sit on the shared handle
-   * layer in world coordinates (not as children of the rotated feature
-   * container) so the grab points stay axis-aligned and predictable even for
-   * a rotated wall.
+   * layer rather than inside the feature's container, because that container
+   * is eventMode "none" and would swallow their interactivity -- so each
+   * handle's rotated world position is computed explicitly here. They must
+   * track the rotation: handles left axis-aligned on a rotated feature sit
+   * away from the corners they claim to resize.
    */
   function rebuildFeatureHandles() {
     const handleLayer = handleLayerRef.current;
@@ -836,39 +1417,103 @@ export default function LayoutDesignerCanvas({
 
     for (const h of featureHandlesRef.current) h.destroy();
     featureHandlesRef.current = [];
+    featureHandleAxisRef.current = null;
 
-    if (tool !== "transform" || selectedFeatureId == null) return;
-    const node = featureNodesRef.current.get(selectedFeatureId);
+    // Resize only ever applies to exactly one selected object. A mixed or
+    // same-type multi-selection gets an outline (drawn by rebuildHandles)
+    // but no corner handles -- see the note on Props.onGroupMove.
+    if (
+      tool !== "transform" ||
+      selectedFeatureIds.length !== 1 ||
+      selectedLocationIds.length !== 0
+    )
+      return;
+    const node = featureNodesRef.current.get(selectedFeatureIds[0]);
     if (!node) return;
     // A point has no extent to drag; it is repositioned by dragging the
     // marker itself.
     if (node.feature.geometryKind === "POINT") return;
 
     const worldSize = HANDLE_SCREEN_SIZE / viewport.scale.x;
+    const rotation = node.feature.rotationDegrees;
     const { originXMm: x, originYMm: y, widthMm: w, lengthMm: h } = node.feature;
-    const corners: Record<Corner, [number, number]> = {
-      nw: [x, y],
-      ne: [x + w, y],
-      se: [x + w, y + h],
-      sw: [x, y + h],
-    };
+
+    // Some kinds have one dimension that is a fixed physical spec (a door's
+    // opening width) or that never actually renders (a polyline's lengthMm --
+    // its band width is drawn from an attribute, not this field). Those get 2
+    // edge handles on the adjustable axis only, instead of the usual 4
+    // corners that would let a drag change either dimension.
+    const lockedAxis = lockedResizeAxisFor(
+      node.feature.kind,
+      node.feature.geometryKind,
+    );
+    featureHandleAxisRef.current = lockedAxis;
+
+    if (lockedAxis) {
+      const adjustableAxis: ResizeAxis =
+        lockedAxis === "width" ? "length" : "width";
+      const cursor = axisResizeCursorFor(adjustableAxis, rotation);
+
+      for (const end of ["start", "end"] as const) {
+        const { x: cx, y: cy } = edgeMidpoint(x, y, w, h, rotation, adjustableAxis, end);
+        const handle = new Graphics()
+          .rect(-worldSize, -worldSize, worldSize * 2, worldSize * 2)
+          .fill({ color: 0xffffff })
+          .stroke({ width: worldSize * 0.3, color: 0x7c3aed });
+        handle.position.set(cx, cy);
+        handle.angle = rotation;
+        handle.eventMode = "static";
+        handle.cursor = cursor;
+
+        handle.on("pointerdown", (e: FederatedPointerEvent) => {
+          e.stopPropagation();
+          featureResizeRef.current = {
+            mode: "axis",
+            axis: adjustableAxis,
+            end,
+            featureId: node.feature.featureId,
+            originX: node.feature.originXMm,
+            originY: node.feature.originYMm,
+            originW: node.feature.widthMm,
+            originH: node.feature.lengthMm,
+            originPoints: node.feature.points,
+          };
+        });
+
+        const up = (e: FederatedPointerEvent) => {
+          e.stopPropagation();
+          commitFeatureResize();
+        };
+        handle.on("pointerup", up);
+        handle.on("pointerupoutside", up);
+
+        handleLayer.addChild(handle);
+        featureHandlesRef.current.push(handle);
+      }
+      return;
+    }
 
     for (const corner of HANDLE_CORNERS) {
-      const [cx, cy] = corners[corner];
+      // Feature handles live on the (unrotated) handle layer rather than the
+      // feature's own container, because that container is eventMode "none" --
+      // so their world positions have to be rotated explicitly, or they sit
+      // detached from the shape they resize.
+      const { x: cx, y: cy } = worldCorner(x, y, w, h, rotation, corner);
       const handle = new Graphics()
         .rect(-worldSize, -worldSize, worldSize * 2, worldSize * 2)
         .fill({ color: 0xffffff })
         .stroke({ width: worldSize * 0.3, color: 0x7c3aed });
       handle.position.set(cx, cy);
+      handle.angle = rotation;
       handle.eventMode = "static";
-      handle.cursor =
-        corner === "nw" || corner === "se" ? "nwse-resize" : "nesw-resize";
+      handle.cursor = resizeCursorFor(corner, rotation);
 
       handle.on("pointerdown", (e: FederatedPointerEvent) => {
         e.stopPropagation();
         featureResizeRef.current = {
-          featureId: node.feature.featureId,
+          mode: "corner",
           corner,
+          featureId: node.feature.featureId,
           originX: node.feature.originXMm,
           originY: node.feature.originYMm,
           originW: node.feature.widthMm,
@@ -894,24 +1539,31 @@ export default function LayoutDesignerCanvas({
     y: number,
     w: number,
     h: number,
+    rotationDegrees: number,
   ) {
+    const lockedAxis = featureHandleAxisRef.current;
+    if (lockedAxis) {
+      const adjustableAxis: ResizeAxis =
+        lockedAxis === "width" ? "length" : "width";
+      const order = ["start", "end"] as const;
+      featureHandlesRef.current.forEach((handle, index) => {
+        const end = order[index];
+        if (!end) return;
+        const p = edgeMidpoint(x, y, w, h, rotationDegrees, adjustableAxis, end);
+        handle.position.set(p.x, p.y);
+      });
+      return;
+    }
     const order: Corner[] = [...HANDLE_CORNERS];
-    const corners: Record<Corner, [number, number]> = {
-      nw: [x, y],
-      ne: [x + w, y],
-      se: [x + w, y + h],
-      sw: [x, y + h],
-    };
     featureHandlesRef.current.forEach((handle, index) => {
       const corner = order[index];
-      if (corner) handle.position.set(...corners[corner]);
+      if (!corner) return;
+      const p = worldCorner(x, y, w, h, rotationDegrees, corner);
+      handle.position.set(p.x, p.y);
     });
   }
 
-  function syncLocationNodes(
-    allLocs: LocationDTO[],
-    selectedId: number | null,
-  ) {
+  function syncLocationNodes(allLocs: LocationDTO[]) {
     const layer = locationLayerRef.current;
     if (!layer) return;
 
@@ -964,42 +1616,28 @@ export default function LayoutDesignerCanvas({
           const current = nodesRef.current.get(loc.locationId);
           if (!current) return;
 
+          const existingLocIds = stateRef.current.selectedLocationIds;
+          const existingFeatIds = stateRef.current.selectedFeatureIds;
+          const isPartOfActiveMultiSelection =
+            existingLocIds.length + existingFeatIds.length > 1 &&
+            existingLocIds.includes(loc.locationId);
+
+          // Grabbing a member of the CURRENT multi-selection drags everything
+          // in it together, mixed locations and features alike. Grabbing
+          // anything else starts fresh from that one location's own implicit
+          // group (its whole racking aisle, or its shelf/floor group).
+          if (isPartOfActiveMultiSelection) {
+            startGroupDrag(existingLocIds, existingFeatIds, world);
+            return;
+          }
+
           const fullLocationIds = resolveGroupIds(current.loc.locationId);
 
           if (fullLocationIds.length > 1) {
-            const groupIdSet = new Set(fullLocationIds);
-            const memberNodeIds: number[] = [];
-            const origins = new Map<number, { x: number; y: number }>();
-            let minX = Infinity,
-              minY = Infinity,
-              maxX = -Infinity,
-              maxY = -Infinity;
-            for (const [id, n] of nodesRef.current) {
-              if (groupIdSet.has(id)) {
-                memberNodeIds.push(id);
-                origins.set(id, { x: n.loc.physicalX, y: n.loc.physicalY });
-                minX = Math.min(minX, n.loc.physicalX);
-                minY = Math.min(minY, n.loc.physicalY);
-                maxX = Math.max(maxX, n.loc.physicalX + n.loc.physicalWidthMm);
-                maxY = Math.max(maxY, n.loc.physicalY + n.loc.physicalLengthMm);
-              }
-            }
-            stateRef.current.onMultiSelect(fullLocationIds);
-            groupDragRef.current = {
-              memberNodeIds,
-              fullLocationIds,
-              startWorldX: world.x,
-              startWorldY: world.y,
-              origins,
-              originBBox: {
-                x: minX,
-                y: minY,
-                w: maxX - minX,
-                h: maxY - minY,
-              },
-            };
+            stateRef.current.onSelectionChange(fullLocationIds, []);
+            startGroupDrag(fullLocationIds, [], world);
           } else {
-            stateRef.current.onSelect(loc.locationId);
+            stateRef.current.onSelectionChange([loc.locationId], []);
             dragRef.current = {
               locationId: loc.locationId,
               startWorldX: world.x,
@@ -1037,10 +1675,10 @@ export default function LayoutDesignerCanvas({
       node.loc = loc;
       node.memberCount = memberCountByLocationId.get(loc.locationId) ?? 1;
 
-      const isSelected =
-        loc.locationId === selectedId ||
-        stateRef.current.selectedLocationIds.includes(loc.locationId);
-      const color = colorForLocation(loc.zoneId);
+      const isSelected = stateRef.current.selectedLocationIds.includes(
+        loc.locationId,
+      );
+      const color = colorForLocation(loc);
       node.box
         .clear()
         .rect(0, 0, loc.physicalWidthMm, loc.physicalLengthMm)
@@ -1089,6 +1727,7 @@ export default function LayoutDesignerCanvas({
     let destroyed = false;
     let forceCancelInteractions: (() => void) | null = null;
     let cancelBoxSelectOnLeave: (() => void) | null = null;
+    let removeMiddleClickGuards: (() => void) | null = null;
     const app = new Application();
 
     (async () => {
@@ -1115,12 +1754,38 @@ export default function LayoutDesignerCanvas({
       el.appendChild(app.canvas);
       appRef.current = app;
 
+      // Middle-click starts a manual pan (below) rather than the browser's
+      // native autoscroll -- Firefox/Chrome on Windows arm that on the
+      // 'mousedown', so it has to be preempted there, not just on the
+      // wheel/pointer events that follow.
+      const preventMiddleClickDefault = (evt: MouseEvent) => {
+        if (evt.button === 1) evt.preventDefault();
+      };
+      app.canvas.addEventListener("mousedown", preventMiddleClickDefault);
+      app.canvas.addEventListener("auxclick", preventMiddleClickDefault);
+
+      // The canvas element itself (a child of containerRef) is what actually
+      // receives clicks, and clicking it doesn't hand focus to an ancestor on
+      // its own -- without this, the S/M/L/F shortcuts would need an explicit
+      // Tab keypress to reach the canvas first.
+      const focusContainer = () => containerRef.current?.focus();
+      app.canvas.addEventListener("pointerdown", focusContainer);
+
+      removeMiddleClickGuards = () => {
+        app.canvas.removeEventListener("mousedown", preventMiddleClickDefault);
+        app.canvas.removeEventListener("auxclick", preventMiddleClickDefault);
+        app.canvas.removeEventListener("pointerdown", focusContainer);
+      };
+
       const viewport = new Viewport({
         screenWidth: el.clientWidth,
         screenHeight: el.clientHeight,
         worldWidth: hall.physicalWidthMm,
         worldHeight: hall.physicalLengthMm,
         events: app.renderer.events,
+        // Passive listeners can't preventDefault, so the page would scroll
+        // right along with the canvas zooming under the cursor.
+        passiveWheel: false,
       });
       app.stage.addChild(viewport);
       viewportRef.current = viewport;
@@ -1232,6 +1897,16 @@ export default function LayoutDesignerCanvas({
       viewport.addChild(measureLayer);
       measureLayerRef.current = measureLayer;
 
+      const featureGhost = new Graphics();
+      featureGhost.eventMode = "none";
+      viewport.addChild(featureGhost);
+      featureGhostRef.current = featureGhost;
+
+      const locationGhost = new Graphics();
+      locationGhost.eventMode = "none";
+      viewport.addChild(locationGhost);
+      locationGhostRef.current = locationGhost;
+
       viewport.fit(true);
       viewport.moveCenter(hall.physicalWidthMm / 2, hall.physicalLengthMm / 2);
 
@@ -1246,8 +1921,28 @@ export default function LayoutDesignerCanvas({
       // Marquee applies anywhere within the canvas/viewport bounds, even
       // outside the drawn hall floor rect.
       viewport.on("pointerdown", (e: FederatedPointerEvent) => {
+        // Middle-click always starts a pan, regardless of the active tool --
+        // switching tool state here (rather than relying on pixi-viewport's
+        // own drag plugin, which is paused/resumed by the [tool] effect below)
+        // means this same gesture doesn't miss its first pointerdown while
+        // that effect is still catching up to the tool-state change.
+        if (e.button === 1) {
+          stateRef.current.onToolChange("pan");
+          middlePanRef.current = { x: e.global.x, y: e.global.y };
+          return;
+        }
         if (e.button !== 0) return;
         const world = viewport.toWorld(e.global);
+
+        // Pre-empts every tool: the request to pick a point came from outside
+        // the canvas (Bulk Generate asking where to start), so whatever the
+        // user had selected as their tool before that is not relevant to
+        // this one click.
+        if (stateRef.current.pickingPoint) {
+          hideCoordOverlay();
+          stateRef.current.onPointPicked(world.x, world.y);
+          return;
+        }
 
         // Measure is a two-click gesture rather than a drag: on a large
         // floorplan the two ends of a known dimension are often further
@@ -1268,17 +1963,25 @@ export default function LayoutDesignerCanvas({
           return;
         }
 
-        if (
-          stateRef.current.tool === "draw" ||
-          stateRef.current.tool === "feature"
-        ) {
-          const rect = new Graphics();
-          viewport.addChild(rect);
-          drawRef.current = {
-            startWorldX: world.x,
-            startWorldY: world.y,
-            rect,
-          };
+        // Features are placed with a single click at their kind's real-world
+        // size, not dragged out. Dragging a box only to then be asked what the
+        // box *was* made the size arbitrary and the gesture easy to fumble;
+        // the kind is already chosen in the Add feature menu, and it knows how
+        // big a dock door or a break room actually is.
+        if (stateRef.current.tool === "feature") {
+          if (stateRef.current.armedFeature) {
+            stateRef.current.onFeaturePlaced(world.x, world.y);
+          }
+          return;
+        }
+
+        // Locations are placed with a single click at their type's stock
+        // size, mirroring the feature tool above -- same reasoning, and it
+        // replaces the old drag-a-box gesture that made the size arbitrary.
+        if (stateRef.current.tool === "draw") {
+          if (stateRef.current.armedLocationType) {
+            stateRef.current.onLocationPlaced(world.x, world.y);
+          }
           return;
         }
 
@@ -1291,7 +1994,18 @@ export default function LayoutDesignerCanvas({
           if (featureId != null) {
             const node = featureNodesRef.current.get(featureId);
             if (node) {
-              stateRef.current.onSelectFeature(featureId);
+              const existingLocIds = stateRef.current.selectedLocationIds;
+              const existingFeatIds = stateRef.current.selectedFeatureIds;
+              const isPartOfActiveMultiSelection =
+                existingLocIds.length + existingFeatIds.length > 1 &&
+                existingFeatIds.includes(featureId);
+
+              if (isPartOfActiveMultiSelection) {
+                startGroupDrag(existingLocIds, existingFeatIds, world);
+                return;
+              }
+
+              stateRef.current.onSelectionChange([], [featureId]);
               featureDragRef.current = {
                 featureId,
                 startWorldX: world.x,
@@ -1319,6 +2033,32 @@ export default function LayoutDesignerCanvas({
       });
 
       viewport.on("pointermove", (e: FederatedPointerEvent) => {
+        if (stateRef.current.pickingPoint) {
+          const world = viewport.toWorld(e.global);
+          showCoordOverlay(
+            e.global.x,
+            e.global.y,
+            `Click to set the start point · (${Math.round(world.x)}, ${Math.round(world.y)})`,
+          );
+          return;
+        }
+
+        if (stateRef.current.tool === "feature") {
+          const world = viewport.toWorld(e.global);
+          drawFeatureGhost(world);
+          const armed = stateRef.current.armedFeature;
+          if (armed) {
+            showCoordOverlay(
+              e.global.x,
+              e.global.y,
+              armed.geometryKind === "POINT"
+                ? `Place ${armed.label}`
+                : `${armed.label} · ${armed.widthMm}×${armed.lengthMm}mm`,
+            );
+          }
+          return;
+        }
+
         if (stateRef.current.tool === "measure") {
           const world = viewport.toWorld(e.global);
           if (measureAnchorRef.current) {
@@ -1337,23 +2077,18 @@ export default function LayoutDesignerCanvas({
           return;
         }
 
-        const draw = drawRef.current;
-        if (draw) {
+        if (stateRef.current.tool === "draw") {
           const world = viewport.toWorld(e.global);
-          const x = Math.min(draw.startWorldX, world.x);
-          const y = Math.min(draw.startWorldY, world.y);
-          const w = Math.abs(world.x - draw.startWorldX);
-          const h = Math.abs(world.y - draw.startWorldY);
-          draw.rect
-            .clear()
-            .rect(x, y, w, h)
-            .fill({ color: 0x0891b2, alpha: 0.2 })
-            .stroke({ width: 15, color: 0x0891b2 });
-          showCoordOverlay(
-            e.global.x,
-            e.global.y,
-            formatFootprint(w, h, x, y, 0),
-          );
+          drawLocationGhost(world);
+          const armed = stateRef.current.armedLocationType;
+          if (armed) {
+            const size = LOCATION_TYPE_DEFAULT_SIZE_MM[armed];
+            showCoordOverlay(
+              e.global.x,
+              e.global.y,
+              `${LOCATION_TYPE_LABELS[armed]} · ${size.widthMm}×${size.lengthMm}mm`,
+            );
+          }
           return;
         }
 
@@ -1372,13 +2107,6 @@ export default function LayoutDesignerCanvas({
         }
       });
 
-      const cancelDraw = () => {
-        const draw = drawRef.current;
-        drawRef.current = null;
-        if (draw) draw.rect.destroy();
-        hideCoordOverlay();
-      };
-
       // Leaving the canvas viewport entirely mid-marquee cancels it outright
       // (rather than letting it linger/commit on eventual release).
       cancelBoxSelectOnLeave = () => {
@@ -1390,48 +2118,55 @@ export default function LayoutDesignerCanvas({
       };
       app.canvas.addEventListener("pointerleave", cancelBoxSelectOnLeave);
 
-      viewport.on("pointerup", (e: FederatedPointerEvent) => {
-        const draw = drawRef.current;
-        if (draw) {
-          const world = viewport.toWorld(e.global);
-          const x = Math.min(draw.startWorldX, world.x);
-          const y = Math.min(draw.startWorldY, world.y);
-          const w = Math.abs(world.x - draw.startWorldX);
-          const h = Math.abs(world.y - draw.startWorldY);
-          const wasFeatureDraw = stateRef.current.tool === "feature";
-          draw.rect.destroy();
-          drawRef.current = null;
-          hideCoordOverlay();
-          if (w >= MIN_LOCATION_MM && h >= MIN_LOCATION_MM) {
-            const snap = (v: number) => Math.round(v / 100) * 100;
-            const clamped = clampLocation(
-              snap(x),
-              snap(y),
-              snap(w),
-              snap(h),
-              hall.physicalWidthMm,
-              hall.physicalLengthMm,
-            );
-
-            if (wasFeatureDraw) {
-              stateRef.current.onFeatureDrawn({
-                originXMm: clamped.x,
-                originYMm: clamped.y,
-                widthMm: clamped.width,
-                lengthMm: clamped.height,
-              });
-            } else {
-              stateRef.current.onDraftDrawn({
-                physicalX: clamped.x,
-                physicalY: clamped.y,
-                physicalWidthMm: clamped.width,
-                physicalLengthMm: clamped.height,
-              });
-            }
-          }
+      // Applies a newly-hit set of locations/features to the current
+      // selection: shift merges (toggling anything already selected back
+      // off) or unions in a fresh hit's group; a plain click/marquee replaces
+      // the selection outright. `additive` is shift-click OR multi-select
+      // mode -- the two are interchangeable from here down.
+      function applySelectionHits(
+        hitLocationIds: number[],
+        hitFeatureIds: number[],
+        additive: boolean,
+        toggle: boolean,
+      ) {
+        if (!additive) {
+          stateRef.current.onSelectionChange(hitLocationIds, hitFeatureIds);
           return;
         }
+        const locSet = new Set(stateRef.current.selectedLocationIds);
+        const featSet = new Set(stateRef.current.selectedFeatureIds);
+        if (toggle && hitLocationIds.length + hitFeatureIds.length > 0) {
+          // A single clicked group toggles as one unit: if every one of its
+          // members is already selected, the click removes the whole group;
+          // otherwise it adds whatever part is missing. This keeps a repeat
+          // click on a partially-selected racking aisle predictable instead
+          // of splitting the aisle across two clicks.
+          const allPresent =
+            hitLocationIds.every((id) => locSet.has(id)) &&
+            hitFeatureIds.every((id) => featSet.has(id));
+          for (const id of hitLocationIds) {
+            if (allPresent) locSet.delete(id);
+            else locSet.add(id);
+          }
+          for (const id of hitFeatureIds) {
+            if (allPresent) featSet.delete(id);
+            else featSet.add(id);
+          }
+        } else {
+          for (const id of hitLocationIds) locSet.add(id);
+          for (const id of hitFeatureIds) featSet.add(id);
+        }
+        stateRef.current.onSelectionChange(
+          Array.from(locSet),
+          Array.from(featSet),
+        );
+      }
 
+      viewport.on("pointerup", (e: FederatedPointerEvent) => {
+        if (e.button === 1) {
+          middlePanRef.current = null;
+          return;
+        }
         const box = boxSelectRef.current;
         if (box) {
           const world = viewport.toWorld(e.global);
@@ -1441,6 +2176,10 @@ export default function LayoutDesignerCanvas({
           const y1 = Math.max(box.startWorldY, world.y);
           box.rect.destroy();
           boxSelectRef.current = null;
+
+          // multiSelectMode makes a plain click behave like a shift-click --
+          // additive rather than replacing -- without needing the key held.
+          const additive = e.shiftKey || stateRef.current.multiSelectMode;
 
           // Near-zero-movement release: a genuine single click. Point-in-box
           // hit test against the click location instead of an area
@@ -1459,25 +2198,27 @@ export default function LayoutDesignerCanvas({
                 break;
               }
             }
-            if (hitId == null) {
-              // No location under the click -- a feature is the next
-              // candidate, and only genuinely empty canvas clears everything.
-              const featureId = pickFeatureAt({ x: x0, y: y0 });
-              if (featureId != null) {
-                stateRef.current.onSelectFeature(featureId);
-                return;
-              }
-              stateRef.current.onSelect(null);
-              stateRef.current.onSelectFeature(null);
+            // Locations render above features, so a location under the click
+            // is what the user perceives as clicked even if a feature also
+            // sits at that point.
+            if (hitId != null) {
+              const group = resolveSelectionForHits([hitId]);
+              applySelectionHits(group, [], additive, true);
               return;
             }
-            const group = resolveSelectionForHits([hitId]);
-            if (group.length > 1) stateRef.current.onMultiSelect(group);
-            else stateRef.current.onSelect(hitId);
+            const featureId = pickFeatureAt({ x: x0, y: y0 });
+            if (featureId != null) {
+              applySelectionHits([], [featureId], additive, true);
+              return;
+            }
+            // Nothing under the click: a plain click clears the selection;
+            // shift-click (or multi-select mode) on empty space leaves an
+            // existing selection alone, which is the usual expectation.
+            if (!additive) stateRef.current.onSelectionChange([], []);
             return;
           }
 
-          const hits: number[] = [];
+          const locationHits: number[] = [];
           for (const [id, node] of nodesRef.current) {
             const {
               physicalX: lx,
@@ -1489,21 +2230,23 @@ export default function LayoutDesignerCanvas({
             // any part of its bounding box, not only when it fully encloses it.
             const intersects =
               lx < x1 && lx + lw > x0 && ly < y1 && ly + lh > y0;
-            if (intersects) hits.push(id);
+            if (intersects) locationHits.push(id);
           }
+          const featureHits = featureIdsInMarquee(x0, y0, x1, y1);
 
-          const group = resolveSelectionForHits(hits);
-          if (group.length > 1) stateRef.current.onMultiSelect(group);
-          else if (group.length === 1) stateRef.current.onSelect(group[0]);
-          else stateRef.current.onSelect(null);
+          applySelectionHits(
+            resolveSelectionForHits(locationHits),
+            featureHits,
+            additive,
+            false,
+          );
           return;
         }
 
         if (stateRef.current.tool === "select") {
-          stateRef.current.onSelect(null);
+          stateRef.current.onSelectionChange([], []);
         }
       });
-      viewport.on("pointerupoutside", cancelDraw);
 
       // Global safety net: guarantees any in-flight marquee/draw/drag/resize
       // interaction is torn down even if the pointerup lands outside the
@@ -1517,17 +2260,12 @@ export default function LayoutDesignerCanvas({
           box.rect.destroy();
           boxSelectRef.current = null;
         }
-        const draw = drawRef.current;
-        if (draw) {
-          draw.rect.destroy();
-          drawRef.current = null;
-        }
         dragRef.current = null;
         resizeRef.current = null;
         groupDragRef.current = null;
-        groupResizeRef.current = null;
         featureDragRef.current = null;
         featureResizeRef.current = null;
+        middlePanRef.current = null;
         hideCoordOverlay();
       };
       window.addEventListener("pointerup", forceCancelInteractions);
@@ -1536,10 +2274,7 @@ export default function LayoutDesignerCanvas({
       setIsReady(true);
 
       syncFeatureNodes(featuresRef.current);
-      syncLocationNodes(
-        locationsRef.current,
-        stateRef.current.selectedLocationId,
-      );
+      syncLocationNodes(locationsRef.current);
     })();
 
     return () => {
@@ -1561,6 +2296,8 @@ export default function LayoutDesignerCanvas({
       underlayUrlRef.current = null;
       measureLayerRef.current = null;
       measureAnchorRef.current = null;
+      featureGhostRef.current = null;
+      locationGhostRef.current = null;
       navGraphLayerRef.current = null;
       routeLayerRef.current = null;
       handleLayerRef.current = null;
@@ -1571,6 +2308,8 @@ export default function LayoutDesignerCanvas({
       if (app && cancelBoxSelectOnLeave) {
         app.canvas.removeEventListener("pointerleave", cancelBoxSelectOnLeave);
       }
+      if (removeMiddleClickGuards) removeMiddleClickGuards();
+      middlePanRef.current = null;
       if (viewport) {
         try {
           viewport.destroy();
@@ -1597,9 +2336,37 @@ export default function LayoutDesignerCanvas({
     else viewport.plugins.pause("drag");
   }, [tool]);
 
+  // Crosshair cursor while a point pick is pending, so the canvas itself
+  // signals "click here" independent of whatever tool was active before the
+  // pick was requested.
+  useEffect(() => {
+    const app = appRef.current;
+    if (!app) return;
+    app.canvas.style.cursor = pickingPoint ? "crosshair" : "";
+  }, [pickingPoint]);
+
+  // Leaving feature mode (or disarming the kind) must take the ghost with it,
+  // otherwise a stale outline sits on the map with nothing to place.
   useEffect(() => {
     if (!isReady) return;
-    syncLocationNodes(locations, selectedLocationId);
+    if (tool !== "feature" || !armedFeature) {
+      featureGhostRef.current?.clear();
+      hideCoordOverlay();
+    }
+  }, [tool, armedFeature, isReady]);
+
+  // Same reasoning as the feature ghost above, for the location-placement ghost.
+  useEffect(() => {
+    if (!isReady) return;
+    if (tool !== "draw" || !armedLocationType) {
+      locationGhostRef.current?.clear();
+      hideCoordOverlay();
+    }
+  }, [tool, armedLocationType, isReady]);
+
+  useEffect(() => {
+    if (!isReady) return;
+    syncLocationNodes(locations);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [locations, isReady, activeLevel]);
 
@@ -1608,6 +2375,15 @@ export default function LayoutDesignerCanvas({
     syncFeatureNodes(features);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [features, isReady]);
+
+  // The master toggle or a per-category toggle changed -- re-apply visibility
+  // without a full node rebuild.
+  useEffect(() => {
+    if (!isReady) return;
+    updateLabelVisibility();
+    updateFeatureLabelVisibility();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showLabels, labelCategoryVisibility, isReady]);
 
   // Underlay sprite. The texture is only re-fetched when the URL changes;
   // placement (scale/offset/rotation/opacity) is applied every render, so
@@ -1666,6 +2442,56 @@ export default function LayoutDesignerCanvas({
   // Navigation graph overlay. Drawn into a single Graphics rather than one
   // object per node: a compiled hall is hundreds of nodes and edges, and this
   // is a read-only overlay with no per-element interaction to preserve.
+  // Flat warning red for anything outside the largest connected piece --
+  // deliberately ignoring edge/node kind entirely here, so a disconnected
+  // stretch reads as unmistakably broken rather than blending into the
+  // normal palette. The whole point is that you shouldn't have to cross-
+  // reference the compile warning's feature names against the canvas to
+  // find it.
+  const DISCONNECTED_COLOR = 0xdc2626;
+
+  /**
+   * Same union-find the compiler uses for its "N separate pieces" warning
+   * (`connectedComponents`, graph-compiler.ts), run again here so the canvas
+   * can show it rather than just report it. Recomputed from the fetched
+   * nodes/edges rather than trusting anything persisted, since the whole
+   * reason this exists is that the dashed centerline on a lane feature is
+   * drawn unconditionally and was never a reliable signal of what's actually
+   * reachable. Stores into disconnectedNodeIdsRef rather than returning,
+   * so drawNavGraph's per-zoom-tick redraws stay a cheap Set lookup.
+   */
+  function recomputeDisconnectedNodes() {
+    const nodeKeys = navGraph.nodes.map((n) => String(n.nodeId));
+    const edgeKeys = navGraph.edges.map((e) => ({
+      fromKey: String(e.fromNodeId),
+      toKey: String(e.toNodeId),
+    }));
+    const roots = connectedComponents(nodeKeys, edgeKeys);
+
+    const sizes = new Map<string, number>();
+    for (const root of roots.values()) {
+      sizes.set(root, (sizes.get(root) ?? 0) + 1);
+    }
+    let largestRoot: string | null = null;
+    let largestSize = 0;
+    for (const [root, size] of sizes) {
+      if (size > largestSize) {
+        largestSize = size;
+        largestRoot = root;
+      }
+    }
+
+    const disconnected = new Set<number>();
+    if (largestRoot !== null) {
+      for (const node of navGraph.nodes) {
+        if (roots.get(String(node.nodeId)) !== largestRoot) {
+          disconnected.add(node.nodeId);
+        }
+      }
+    }
+    disconnectedNodeIdsRef.current = disconnected;
+  }
+
   function drawNavGraph() {
     const g = navGraphLayerRef.current;
     const viewport = viewportRef.current;
@@ -1675,6 +2501,8 @@ export default function LayoutDesignerCanvas({
 
     const scale = viewport.scale.x;
     const nodeById = new Map(navGraph.nodes.map((n) => [n.nodeId, n]));
+    const isDisconnected = (nodeId: number) =>
+      disconnectedNodeIdsRef.current.has(nodeId);
 
     // Edge colour carries the edge kind, which is the thing a supervisor
     // actually needs to check: is this an inferred aisle, a cross-aisle, a
@@ -1686,7 +2514,14 @@ export default function LayoutDesignerCanvas({
       WALKWAY: { color: 0x65a30d, width: 2.5 },
       PORTAL: { color: 0x7c3aed, width: 3 },
       ACCESS: { color: 0x94a3b8, width: 1.5 },
+      ZONE: { color: 0x0891b2, width: 1 },
     };
+
+    // A free-roam area compiles to hundreds of lattice edges, so drawing them
+    // at lane weight would bury the lanes underneath a solid block of colour.
+    // They are drawn hairline and faint: what you need from them at a glance
+    // is "this floor is covered and connected", not each individual hop.
+    const ZONE_ALPHA = 0.28;
 
     for (const edge of navGraph.edges) {
       const from = nodeById.get(edge.fromNodeId);
@@ -1696,14 +2531,35 @@ export default function LayoutDesignerCanvas({
         color: 0x64748b,
         width: 2,
       };
+      const disconnected = isDisconnected(edge.fromNodeId);
+      const isZone = edge.edgeKind === "ZONE";
       g.moveTo(from.xMm, from.yMm)
         .lineTo(to.xMm, to.yMm)
         .stroke({
-          width: style.width / scale,
-          color: style.color,
-          alpha: edge.isGenerated ? 0.85 : 1,
+          width: (disconnected ? style.width + 1 : style.width) / scale,
+          color: disconnected ? DISCONNECTED_COLOR : style.color,
+          alpha: disconnected
+            ? 1
+            : isZone
+              ? ZONE_ALPHA
+              : edge.isGenerated
+                ? 0.85
+                : 1,
         });
     }
+
+    // Lattice interiors are drawn as edges only. A dot at every one of them
+    // would be several hundred filled circles that say nothing the mesh does
+    // not already show -- but a node where a lane meets the lattice, or one
+    // the compiler could not connect, still has to be visible.
+    const zoneOnlyNodes = new Set<number>();
+    const nonZoneTouched = new Set<number>();
+    for (const edge of navGraph.edges) {
+      const target = edge.edgeKind === "ZONE" ? zoneOnlyNodes : nonZoneTouched;
+      target.add(edge.fromNodeId);
+      target.add(edge.toNodeId);
+    }
+    for (const id of nonZoneTouched) zoneOnlyNodes.delete(id);
 
     const NODE_STYLE: Record<string, { color: number; radius: number }> = {
       ACCESS: { color: 0x94a3b8, radius: 2.5 },
@@ -1718,8 +2574,18 @@ export default function LayoutDesignerCanvas({
         color: 0x0d9488,
         radius: 3,
       };
+      const disconnected = isDisconnected(node.nodeId);
+      // Plain lattice interior: the mesh already shows it. Anything stranded
+      // still gets its red dot, which is the whole point of the overlay.
+      if (
+        zoneOnlyNodes.has(node.nodeId) &&
+        node.nodeKind === "WAYPOINT" &&
+        !disconnected
+      ) {
+        continue;
+      }
       g.circle(node.xMm, node.yMm, style.radius / scale).fill({
-        color: style.color,
+        color: disconnected ? DISCONNECTED_COLOR : style.color,
         alpha: 0.95,
       });
       // Hand-placed nodes get a ring so a correction is visibly distinct from
@@ -1735,6 +2601,7 @@ export default function LayoutDesignerCanvas({
 
   useEffect(() => {
     if (!isReady) return;
+    recomputeDisconnectedNodes();
     drawNavGraph();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [navGraph, showNavGraph, isReady]);
@@ -1814,18 +2681,18 @@ export default function LayoutDesignerCanvas({
   useEffect(() => {
     if (!isReady) return;
     for (const [id, node] of featureNodesRef.current) {
-      drawFeatureShape(node, id === selectedFeatureId);
+      drawFeatureShape(node, selectedFeatureIds.includes(id));
     }
     rebuildFeatureHandles();
+    rebuildHandles();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedFeatureId, tool, isReady]);
+  }, [selectedFeatureIds, selectedLocationIds, tool, isReady]);
 
   useEffect(() => {
     rebuildHandles();
     for (const [id, node] of nodesRef.current) {
-      const isSelected =
-        id === selectedLocationId || selectedLocationIds.includes(id);
-      const color = colorForLocation(node.loc.zoneId);
+      const isSelected = selectedLocationIds.includes(id);
+      const color = colorForLocation(node.loc);
       node.box
         .clear()
         .rect(0, 0, node.loc.physicalWidthMm, node.loc.physicalLengthMm)
@@ -1833,12 +2700,16 @@ export default function LayoutDesignerCanvas({
         .stroke(strokeForNode(id, isSelected));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedLocationId, selectedLocationIds, tool]);
+  }, [selectedLocationIds, selectedFeatureIds, tool]);
 
   function updateLabelVisibility() {
     const viewport = viewportRef.current;
     if (!viewport) return;
-    const visible = viewport.scale.x >= LABEL_ZOOM_THRESHOLD;
+    const { showLabels, labelCategoryVisibility } = stateRef.current;
+    const visible =
+      showLabels &&
+      labelCategoryVisibility.LOCATION !== false &&
+      viewport.scale.x >= LABEL_ZOOM_THRESHOLD;
     for (const node of nodesRef.current.values()) {
       node.label.visible = visible;
       node.badge.visible = visible && node.memberCount > 1;
@@ -1860,93 +2731,38 @@ export default function LayoutDesignerCanvas({
     if (tool !== "transform") return;
 
     const worldSize = HANDLE_SCREEN_SIZE / viewport.scale.x;
+    const totalSelected = selectedLocationIds.length + selectedFeatureIds.length;
 
-    if (selectedLocationIds.length > 1) {
-      // Aisle-level group bounding box + handles.
-      const memberNodes = selectedLocationIds
-        .map((id) => nodesRef.current.get(id))
-        .filter((n): n is LocationNode => Boolean(n));
-      if (memberNodes.length === 0) return;
-
-      let minX = Infinity,
-        minY = Infinity,
-        maxX = -Infinity,
-        maxY = -Infinity;
-      for (const node of memberNodes) {
-        minX = Math.min(minX, node.loc.physicalX);
-        minY = Math.min(minY, node.loc.physicalY);
-        maxX = Math.max(maxX, node.loc.physicalX + node.loc.physicalWidthMm);
-        maxY = Math.max(maxY, node.loc.physicalY + node.loc.physicalLengthMm);
+    if (totalSelected > 1) {
+      // A mixed (or same-type) multi-selection gets an outline showing what
+      // is selected, and nothing else -- no corner handles. Resizing a rigid
+      // mix of rectangles, polygons and polylines as one bounding box has no
+      // single correct meaning once features are mixed in, so Move & Resize
+      // only offers move (drag any member) and rotate (the panel's button)
+      // for a multi-selection; see the note on Props.onGroupMove.
+      const envelopes: Envelope[] = [];
+      for (const id of selectedLocationIds) {
+        const node = nodesRef.current.get(id);
+        if (node) envelopes.push(envelopeOfLocation(node.loc));
       }
+      for (const id of selectedFeatureIds) {
+        const node = featureNodesRef.current.get(id);
+        if (node) envelopes.push(computeEnvelope(node.feature));
+      }
+      if (envelopes.length === 0) return;
 
-      const aisle = memberNodes[0].loc.aisle;
-      if (aisle == null) return;
-
+      const bbox = unionEnvelopes(envelopes);
       const outline = new Graphics()
-        .rect(minX, minY, maxX - minX, maxY - minY)
+        .rect(bbox.minX, bbox.minY, bbox.maxX - bbox.minX, bbox.maxY - bbox.minY)
         .stroke({ width: worldSize * 0.4, color: 0x0891b2 });
       handleLayer.addChild(outline);
       handlesRef.current.push(outline);
       handleOutlineRef.current = outline;
-
-      const corners: Record<Corner, [number, number]> = {
-        nw: [minX, minY],
-        ne: [maxX, minY],
-        se: [maxX, maxY],
-        sw: [minX, maxY],
-      };
-
-      for (const corner of HANDLE_CORNERS) {
-        const [cx, cy] = corners[corner];
-        const handle = new Graphics()
-          .rect(-worldSize, -worldSize, worldSize * 2, worldSize * 2)
-          .fill({ color: 0xffffff })
-          .stroke({ width: worldSize * 0.3, color: 0x0891b2 });
-        handle.position.set(cx, cy);
-        handle.eventMode = "static";
-        handle.cursor =
-          corner === "nw" || corner === "se" ? "nwse-resize" : "nesw-resize";
-
-        handle.on("pointerdown", (e: FederatedPointerEvent) => {
-          e.stopPropagation();
-          const originGeoms = new Map<
-            number,
-            { x: number; y: number; w: number; h: number }
-          >();
-          for (const node of memberNodes) {
-            originGeoms.set(node.loc.locationId, {
-              x: node.loc.physicalX,
-              y: node.loc.physicalY,
-              w: node.loc.physicalWidthMm,
-              h: node.loc.physicalLengthMm,
-            });
-          }
-          groupResizeRef.current = {
-            aisle,
-            corner,
-            memberNodeIds: memberNodes.map((n) => n.loc.locationId),
-            originBBox: { x: minX, y: minY, w: maxX - minX, h: maxY - minY },
-            originGeoms,
-          };
-        });
-
-        const handleGroupResizeUp = (e: FederatedPointerEvent) => {
-          e.stopPropagation();
-          commitGroupResize();
-        };
-        handle.on("pointerup", handleGroupResizeUp);
-        handle.on("pointerupoutside", handleGroupResizeUp);
-
-        handleLayer.addChild(handle);
-        handlesRef.current.push(handle);
-        handleCornerGraphicsRef.current[corner] = handle;
-      }
       return;
     }
 
-    const node = selectedLocationId
-      ? nodesRef.current.get(selectedLocationId)
-      : undefined;
+    if (selectedLocationIds.length !== 1) return;
+    const node = nodesRef.current.get(selectedLocationIds[0]);
     if (!node) return;
 
     const { physicalWidthMm: w, physicalLengthMm: h } = node.loc;
@@ -1965,8 +2781,9 @@ export default function LayoutDesignerCanvas({
         .stroke({ width: worldSize * 0.3, color: 0x0f172a });
       handle.position.set(cx, cy);
       handle.eventMode = "static";
-      handle.cursor =
-        corner === "nw" || corner === "se" ? "nwse-resize" : "nesw-resize";
+      // These handles are children of the location's own rotated container, so
+      // they already follow the box -- only the cursor needs the rotation.
+      handle.cursor = resizeCursorFor(corner, node.loc.rotationDegrees);
 
       handle.on("pointerdown", (e: FederatedPointerEvent) => {
         e.stopPropagation();
@@ -2086,7 +2903,28 @@ export default function LayoutDesignerCanvas({
     if (!app || !viewport) return;
 
     function handleMove(e: FederatedPointerEvent) {
+      const middlePan = middlePanRef.current;
+      if (middlePan) {
+        // Raw screen-pixel delta, exactly what pixi-viewport's own Drag
+        // plugin adds to viewport.x/y -- the viewport's position is a screen
+        // offset, not a world one, so this is correct at any zoom level.
+        const dx = e.global.x - middlePan.x;
+        const dy = e.global.y - middlePan.y;
+        viewport!.x += dx;
+        viewport!.y += dy;
+        viewport!.emit("moved", { viewport: viewport!, type: "drag" });
+        middlePanRef.current = { x: e.global.x, y: e.global.y };
+        return;
+      }
+
       const world = viewport!.toWorld(e.global);
+      // Every resize branch below drags one corner to the pointer, so pinning
+      // the pointer to the hall is what keeps a resize inside it.
+      const pinned = clampPointToHall(
+        world,
+        hall.physicalWidthMm,
+        hall.physicalLengthMm,
+      );
 
       const drag = dragRef.current;
       if (drag) {
@@ -2094,13 +2932,18 @@ export default function LayoutDesignerCanvas({
         if (node) {
           const dx = world.x - drag.startWorldX;
           const dy = world.y - drag.startWorldY;
-          const nextX = Math.max(0, drag.originX + dx);
-          const nextY = Math.max(0, drag.originY + dy);
-          const clamped = clampLocation(
-            nextX,
-            nextY,
-            node.loc.physicalWidthMm,
-            node.loc.physicalLengthMm,
+          const clamped = clampOriginToHall(
+            {
+              geometryKind: "RECT",
+              originXMm: node.loc.physicalX,
+              originYMm: node.loc.physicalY,
+              widthMm: node.loc.physicalWidthMm,
+              lengthMm: node.loc.physicalLengthMm,
+              rotationDegrees: node.loc.rotationDegrees,
+              points: null,
+            },
+            drag.originX + dx,
+            drag.originY + dy,
             hall.physicalWidthMm,
             hall.physicalLengthMm,
           );
@@ -2132,8 +2975,15 @@ export default function LayoutDesignerCanvas({
         if (node) {
           const dx = world.x - featureDrag.startWorldX;
           const dy = world.y - featureDrag.startWorldY;
-          const nextX = Math.round(featureDrag.originX + dx);
-          const nextY = Math.round(featureDrag.originY + dy);
+          const clamped = clampOriginToHall(
+            node.feature,
+            featureDrag.originX + dx,
+            featureDrag.originY + dy,
+            hall.physicalWidthMm,
+            hall.physicalLengthMm,
+          );
+          const nextX = Math.round(clamped.x);
+          const nextY = Math.round(clamped.y);
           node.feature = {
             ...node.feature,
             originXMm: nextX,
@@ -2145,6 +2995,7 @@ export default function LayoutDesignerCanvas({
             nextY,
             node.feature.widthMm,
             node.feature.lengthMm,
+            node.feature.rotationDegrees,
           );
           showCoordOverlay(
             e.global.x,
@@ -2165,31 +3016,38 @@ export default function LayoutDesignerCanvas({
       if (featureResize) {
         const node = featureNodesRef.current.get(featureResize.featureId);
         if (node) {
-          let {
-            originX: x,
-            originY: y,
-            originW: w,
-            originH: h,
-          } = featureResize;
-          const farX = featureResize.originX + featureResize.originW;
-          const farY = featureResize.originY + featureResize.originH;
-          if (featureResize.corner === "nw") {
-            w = Math.max(MIN_LOCATION_MM, farX - world.x);
-            h = Math.max(MIN_LOCATION_MM, farY - world.y);
-            x = farX - w;
-            y = farY - h;
-          } else if (featureResize.corner === "ne") {
-            w = Math.max(MIN_LOCATION_MM, world.x - featureResize.originX);
-            h = Math.max(MIN_LOCATION_MM, farY - world.y);
-            y = farY - h;
-          } else if (featureResize.corner === "se") {
-            w = Math.max(MIN_LOCATION_MM, world.x - featureResize.originX);
-            h = Math.max(MIN_LOCATION_MM, world.y - featureResize.originY);
-          } else if (featureResize.corner === "sw") {
-            w = Math.max(MIN_LOCATION_MM, farX - world.x);
-            h = Math.max(MIN_LOCATION_MM, world.y - featureResize.originY);
-            x = farX - w;
-          }
+          // Resolved in the feature's own rotated frame, so dragging along a
+          // rotated feature's visible long edge grows its length rather than
+          // its width. Axis-locked kinds (a door, a walkway) go through the
+          // single-axis variant instead, which never lets the pointer move
+          // the locked dimension no matter where it lands.
+          const resized =
+            featureResize.mode === "axis"
+              ? resizeRotatedBoxAlongAxis(
+                  featureResize.originX,
+                  featureResize.originY,
+                  featureResize.originW,
+                  featureResize.originH,
+                  node.feature.rotationDegrees,
+                  featureResize.axis,
+                  featureResize.end,
+                  pinned,
+                  MIN_LOCATION_MM,
+                )
+              : resizeRotatedBox(
+                  featureResize.originX,
+                  featureResize.originY,
+                  featureResize.originW,
+                  featureResize.originH,
+                  node.feature.rotationDegrees,
+                  featureResize.corner,
+                  pinned,
+                  MIN_LOCATION_MM,
+                );
+          const x = resized.originXMm;
+          const y = resized.originYMm;
+          const w = resized.widthMm;
+          const h = resized.lengthMm;
 
           // Polygon/polyline vertices scale with the box; rect-like geometry
           // just takes the new extent. scaleGeometry keeps both consistent.
@@ -2222,6 +3080,7 @@ export default function LayoutDesignerCanvas({
             node.feature.originYMm,
             scaled.widthMm,
             scaled.lengthMm,
+            node.feature.rotationDegrees,
           );
           showCoordOverlay(
             e.global.x,
@@ -2242,26 +3101,22 @@ export default function LayoutDesignerCanvas({
       if (resize) {
         const node = nodesRef.current.get(resize.locationId);
         if (node) {
-          let { originX: x, originY: y, originW: w, originH: h } = resize;
-          const farX = resize.originX + resize.originW;
-          const farY = resize.originY + resize.originH;
-          if (resize.corner === "nw") {
-            w = Math.max(MIN_LOCATION_MM, farX - world.x);
-            h = Math.max(MIN_LOCATION_MM, farY - world.y);
-            x = farX - w;
-            y = farY - h;
-          } else if (resize.corner === "ne") {
-            w = Math.max(MIN_LOCATION_MM, world.x - resize.originX);
-            h = Math.max(MIN_LOCATION_MM, farY - world.y);
-            y = farY - h;
-          } else if (resize.corner === "se") {
-            w = Math.max(MIN_LOCATION_MM, world.x - resize.originX);
-            h = Math.max(MIN_LOCATION_MM, world.y - resize.originY);
-          } else if (resize.corner === "sw") {
-            w = Math.max(MIN_LOCATION_MM, farX - world.x);
-            h = Math.max(MIN_LOCATION_MM, world.y - resize.originY);
-            x = farX - w;
-          }
+          // Same rotated-frame resolution as features: a rotated rack resizes
+          // along its own axes, not the screen's.
+          const resized = resizeRotatedBox(
+            resize.originX,
+            resize.originY,
+            resize.originW,
+            resize.originH,
+            node.loc.rotationDegrees,
+            resize.corner,
+            pinned,
+            MIN_LOCATION_MM,
+          );
+          const x = resized.originXMm;
+          const y = resized.originYMm;
+          const w = resized.widthMm;
+          const h = resized.lengthMm;
           node.loc = {
             ...node.loc,
             physicalX: x,
@@ -2273,7 +3128,7 @@ export default function LayoutDesignerCanvas({
           node.box
             .clear()
             .rect(0, 0, w, h)
-            .fill({ color: colorForLocation(node.loc.zoneId), alpha: 0.55 })
+            .fill({ color: colorForLocation(node.loc), alpha: 0.55 })
             .stroke(strokeForNode(resize.locationId, true));
           node.label.style.fontSize = fittedFontSize(w, h);
           node.label.position.set(w / 2, h / 2);
@@ -2309,102 +3164,49 @@ export default function LayoutDesignerCanvas({
               (groupDrag.originBBox.y + groupDrag.originBBox.h),
           ),
         );
+        // Recorded so commitGroupDrag can read the delta back directly
+        // instead of reconstructing it from a moved node's position.
+        groupDrag.lastDx = dx;
+        groupDrag.lastDy = dy;
 
-        for (const id of groupDrag.memberNodeIds) {
+        for (const id of groupDrag.locationIds) {
           const node = nodesRef.current.get(id);
-          const origin = groupDrag.origins.get(id);
+          const origin = groupDrag.locOrigins.get(id);
           if (!node || !origin) continue;
           const nextX = origin.x + dx;
           const nextY = origin.y + dy;
           node.loc = { ...node.loc, physicalX: nextX, physicalY: nextY };
           node.container.position.set(nextX, nextY);
         }
-        // The group bbox outline/handles are separate Graphics positioned at
-        // fixed absolute coordinates (unlike single-location handles, which
-        // are children of the dragged container and move for free) -- they
-        // need repositioning every move to track the drag in real time, but
-        // (unlike a full rebuildHandles()) this only updates their
-        // position/size in place, not their identity or listeners.
+        for (const id of groupDrag.featureIds) {
+          const node = featureNodesRef.current.get(id);
+          const origin = groupDrag.featOrigins.get(id);
+          if (!node || !origin) continue;
+          const nextX = origin.x + dx;
+          const nextY = origin.y + dy;
+          node.feature = { ...node.feature, originXMm: nextX, originYMm: nextY };
+          node.container.position.set(nextX, nextY);
+        }
+        // The group bbox outline is a separate Graphics positioned at fixed
+        // absolute coordinates (unlike single-location handles, which are
+        // children of the dragged container and move for free) -- it needs
+        // repositioning every move to track the drag in real time, but
+        // (unlike a full rebuildHandles()) this only updates its
+        // position/size in place, not its identity or listeners.
         repositionGroupHandles({
           x: groupDrag.originBBox.x + dx,
           y: groupDrag.originBBox.y + dy,
           w: groupDrag.originBBox.w,
           h: groupDrag.originBBox.h,
         });
+        const memberCount =
+          groupDrag.locationIds.length + groupDrag.featureIds.length;
         showCoordOverlay(
           e.global.x,
           e.global.y,
-          `${Math.round(groupDrag.originBBox.w)}mm × ${Math.round(groupDrag.originBBox.h)}mm at (${Math.round(groupDrag.originBBox.x + dx)}, ${Math.round(groupDrag.originBBox.y + dy)}) · ${groupDrag.memberNodeIds.length} locations`,
+          `${Math.round(groupDrag.originBBox.w)}mm × ${Math.round(groupDrag.originBBox.h)}mm at (${Math.round(groupDrag.originBBox.x + dx)}, ${Math.round(groupDrag.originBBox.y + dy)}) · ${memberCount} objects`,
         );
         return;
-      }
-
-      const groupResize = groupResizeRef.current;
-      if (groupResize) {
-        const { originBBox } = groupResize;
-        let { x, y, w, h } = originBBox;
-        const farX = originBBox.x + originBBox.w;
-        const farY = originBBox.y + originBBox.h;
-        if (groupResize.corner === "nw") {
-          w = Math.max(MIN_LOCATION_MM, farX - world.x);
-          h = Math.max(MIN_LOCATION_MM, farY - world.y);
-          x = farX - w;
-          y = farY - h;
-        } else if (groupResize.corner === "ne") {
-          w = Math.max(MIN_LOCATION_MM, world.x - originBBox.x);
-          h = Math.max(MIN_LOCATION_MM, farY - world.y);
-          y = farY - h;
-        } else if (groupResize.corner === "se") {
-          w = Math.max(MIN_LOCATION_MM, world.x - originBBox.x);
-          h = Math.max(MIN_LOCATION_MM, world.y - originBBox.y);
-        } else if (groupResize.corner === "sw") {
-          w = Math.max(MIN_LOCATION_MM, farX - world.x);
-          h = Math.max(MIN_LOCATION_MM, world.y - originBBox.y);
-          x = farX - w;
-        }
-
-        const sx = w / originBBox.w;
-        const sy = h / originBBox.h;
-        // Fixed anchor corner (opposite the one being dragged) -- matches
-        // the single-location resize anchor logic above.
-        const anchorX =
-          groupResize.corner === "ne" || groupResize.corner === "se"
-            ? originBBox.x
-            : farX;
-        const anchorY =
-          groupResize.corner === "sw" || groupResize.corner === "se"
-            ? originBBox.y
-            : farY;
-
-        for (const [id, geom] of groupResize.originGeoms) {
-          const node = nodesRef.current.get(id);
-          if (!node) continue;
-          const nextX = anchorX + (geom.x - anchorX) * sx;
-          const nextY = anchorY + (geom.y - anchorY) * sy;
-          const nextW = geom.w * sx;
-          const nextH = geom.h * sy;
-          node.loc = {
-            ...node.loc,
-            physicalX: nextX,
-            physicalY: nextY,
-            physicalWidthMm: nextW,
-            physicalLengthMm: nextH,
-          };
-          node.container.position.set(nextX, nextY);
-          node.box
-            .clear()
-            .rect(0, 0, nextW, nextH)
-            .fill({ color: colorForLocation(node.loc.zoneId), alpha: 0.55 })
-            .stroke(strokeForNode(id, true));
-          node.label.style.fontSize = fittedFontSize(nextW, nextH);
-          node.label.position.set(nextW / 2, nextH / 2);
-        }
-        repositionGroupHandles({ x, y, w, h });
-        showCoordOverlay(
-          e.global.x,
-          e.global.y,
-          `${Math.round(w)}mm × ${Math.round(h)}mm at (${Math.round(x)}, ${Math.round(y)}) · ${groupResize.memberNodeIds.length} locations`,
-        );
       }
     }
 
@@ -2412,7 +3214,6 @@ export default function LayoutDesignerCanvas({
       commitSingleDrag();
       commitSingleResize();
       commitGroupDrag();
-      commitGroupResize();
       commitFeatureDrag();
       commitFeatureResize();
     }
@@ -2453,16 +3254,24 @@ export default function LayoutDesignerCanvas({
   }, [
     locations,
     features,
-    selectedLocationId,
     selectedLocationIds,
-    selectedFeatureId,
+    selectedFeatureIds,
     isReady,
   ]);
 
   return (
     <div className="relative flex h-full w-full overflow-hidden rounded-xl border bg-background/60">
-      {/* CANVAS LAYER */}
-      <div ref={containerRef} className="relative z-0 h-full w-full" />
+      {/* CANVAS LAYER -- tabIndex makes it focusable (the pointerdown listener
+          set up in the mount effect calls .focus() on it), and onKeyDown is
+          what scopes the S/M/L/F shortcuts to "while focused on the canvas"
+          rather than needing a global listener. outline-none drops the
+          default focus ring; focus-visible restores one for Tab-key focus. */}
+      <div
+        ref={containerRef}
+        tabIndex={0}
+        onKeyDown={handleCanvasKeyDown}
+        className="relative z-0 h-full w-full outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary/50"
+      />
 
       {initError && (
         <div className="absolute inset-0 z-40 flex items-center justify-center bg-background/90 p-4 text-center text-sm font-medium text-destructive">
@@ -2490,10 +3299,13 @@ export default function LayoutDesignerCanvas({
         style={{ display: "none" }}
       />
 
-      {/* UI OVERLAY */}
-      <div className="pointer-events-none absolute right-4 top-4 z-50 flex flex-col items-end gap-3">
+      {/* UI OVERLAY -- same glassmorphism treatment (translucent background +
+          backdrop-blur) across every HUD piece for visual consistency with
+          the top bar/sidebar redesign; positions and pointer-events logic
+          unchanged. */}
+      <div className="pointer-events-none absolute right-3 top-3 z-50 flex flex-col items-end gap-2">
         {/* Dynamic Map Scale */}
-        <div className="flex flex-col items-end gap-1 rounded-md bg-background/90 p-1.5 shadow-sm backdrop-blur-md border">
+        <div className="flex flex-col items-end gap-1 rounded-md border bg-background/90 p-1.5 shadow-sm backdrop-blur-md">
           <span
             ref={scaleTextRef}
             className="text-[10px] font-bold leading-none text-foreground"
@@ -2508,7 +3320,7 @@ export default function LayoutDesignerCanvas({
         </div>
 
         {/* Zoom Controls */}
-        <div className="pointer-events-auto flex flex-col rounded-lg border bg-background shadow-md overflow-hidden">
+        <div className="pointer-events-auto flex flex-col overflow-hidden rounded-lg border bg-background/90 shadow-md backdrop-blur-md">
           <Button
             variant="ghost"
             size="icon"
@@ -2533,14 +3345,19 @@ export default function LayoutDesignerCanvas({
             scale indicator and zoom controls above, instead of a separately
             positioned overlay. */}
         {availableLevels.length > 0 && (
-          <div className="pointer-events-auto flex gap-1 rounded-lg border bg-background p-1 shadow-md">
+          <div className="pointer-events-auto flex gap-1 rounded-lg border bg-background/90 p-1 shadow-md backdrop-blur-md">
             {availableLevels.map((lvl) => (
               <Button
                 key={lvl}
                 size="sm"
                 variant={lvl === activeLevel ? "default" : "ghost"}
-                onClick={() => onLevelChange(lvl)}
+                onClick={() => onLevelChange(lvl === activeLevel ? null : lvl)}
                 className="h-8 px-2 text-xs"
+                title={
+                  lvl === activeLevel
+                    ? "Click again to show and select every level"
+                    : `Show and select only level ${lvl}`
+                }
               >
                 L{lvl}
               </Button>

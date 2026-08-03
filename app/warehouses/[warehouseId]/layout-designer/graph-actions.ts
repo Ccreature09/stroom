@@ -34,6 +34,8 @@ export type CompileGraphResult = {
     inferredCorridors: number;
     authoredLanes: number;
     connectors: number;
+    navigableZones: number;
+    zoneNodes: number;
     componentCount: number;
     reachableLocationCount: number;
     unreachableLocationCount: number;
@@ -85,7 +87,6 @@ export async function compileHallGraph(
         .select({
           locationId: locations.locationId,
           locationCode: locations.locationCode,
-          zoneId: locations.zoneId,
           aisle: locations.aisle,
           bay: locations.bay,
           level: locations.level,
@@ -94,6 +95,7 @@ export async function compileHallGraph(
           heightMm: locations.heightMm,
           maxWeightKg: locations.maxWeightKg,
           isBlocked: locations.isBlocked,
+          isTemporary: locations.isTemporary,
           physicalX: locations.physicalX,
           physicalY: locations.physicalY,
           physicalWidthMm: locations.physicalWidthMm,
@@ -125,7 +127,6 @@ export async function compileHallGraph(
           layerIndex: layoutFeatures.layerIndex,
           isObstacle: layoutFeatures.isObstacle,
           isVisualOnly: layoutFeatures.isVisualOnly,
-          zoneId: layoutFeatures.zoneId,
           label: layoutFeatures.label,
           color: layoutFeatures.color,
           attrs: layoutFeatures.attrs,
@@ -273,6 +274,9 @@ export async function compileHallGraph(
             maxSpeedMms: edge.maxSpeedMms,
             minClearanceMm: edge.minClearanceMm,
             allowedVehicleMask: edge.allowedVehicleMask,
+            // numeric(5,2) -- drizzle takes it as a string, and sending a raw
+            // JS number here would round-trip through the driver as one.
+            impedance: edge.impedance.toFixed(2),
             sourceFeatureId: edge.sourceFeatureId,
             isGenerated: true,
             layoutVersion,

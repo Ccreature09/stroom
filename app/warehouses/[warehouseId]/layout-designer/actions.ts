@@ -10,14 +10,12 @@ import {
   layoutVersions,
   locations,
   halls,
-  zoneTypes,
 } from "@/drizzle/schema";
 import {
   LayoutVersionConflictError,
   hallBelongsToWarehouse,
   requireLayoutContext,
   revalidateLayout,
-  zoneBelongsToWarehouse,
 } from "@/lib/warehouse-map/context";
 import {
   parseLocationType,
@@ -30,6 +28,7 @@ import {
   computeEnvelope,
   normalizeRotation,
   sanitizePoints,
+  type FeatureGeometry,
   type GeometryKind,
 } from "@/lib/warehouse-map/geometry";
 import { hallStateChangeCount } from "@/lib/warehouse-map/types";
@@ -91,6 +90,42 @@ export async function createHall(formData: FormData) {
   );
 }
 
+// Immediate (not draft-staged) like createHall -- provisioning/removing a
+// hall is a distinct, deliberate action, not a routine property edit.
+// `locations_hall_id_fkey` is ON DELETE RESTRICT, so this fails with a clear
+// error while the hall still has locations; every other hall-scoped table
+// (features, nav graph, routes, blockages, underlay, drafts) cascades,
+// which the caller should warn about before invoking this.
+export async function deleteHall(
+  warehouseId: number,
+  hallId: number,
+): Promise<{ error?: string; success?: true }> {
+  try {
+    await requireLayoutContext(warehouseId);
+  } catch (err) {
+    return { error: (err as Error).message };
+  }
+
+  try {
+    const deleted = await db
+      .delete(halls)
+      .where(and(eq(halls.hallId, hallId), eq(halls.warehouseId, warehouseId)))
+      .returning({ hallId: halls.hallId });
+
+    if (deleted.length === 0) {
+      return { error: "Hall not found." };
+    }
+  } catch {
+    return {
+      error:
+        "This hall still has locations assigned to it -- remove or move them first.",
+    };
+  }
+
+  revalidateLayout(warehouseId);
+  return { success: true };
+}
+
 const GEOMETRY_KINDS: readonly GeometryKind[] = [
   "RECT",
   "POLYGON",
@@ -98,6 +133,66 @@ const GEOMETRY_KINDS: readonly GeometryKind[] = [
   "POINT",
   "CIRCLE",
 ];
+
+export type HallBounds = { widthMm: number; lengthMm: number };
+
+/**
+ * Clamps an origin so the footprint's envelope lands inside the hall.
+ *
+ * The canvas clamps as you drag, but that is interaction polish -- this is the
+ * copy that decides what gets stored. A draft authored before someone shrank
+ * the hall, an older client, or a hand-made payload would all otherwise write
+ * geometry straight through the wall, and the compiler would then infer aisles
+ * from racking that does not exist in the building.
+ *
+ * Clamped on the *envelope* rather than (origin, width, length): rotation is
+ * about the origin, so a rotated footprint occupies a different rectangle than
+ * its nominal one. A footprint bigger than the hall pins to the near edge --
+ * the outer Math.max wins when the upper bound falls below the lower one.
+ */
+function clampOriginToHall(
+  geometry: FeatureGeometry,
+  bounds: HallBounds,
+): { x: number; y: number } {
+  const local = computeEnvelope({
+    ...geometry,
+    originXMm: 0,
+    originYMm: 0,
+  });
+  return {
+    x: Math.round(
+      Math.max(
+        -local.minX,
+        Math.min(geometry.originXMm, bounds.widthMm - local.maxX),
+      ),
+    ),
+    y: Math.round(
+      Math.max(
+        -local.minY,
+        Math.min(geometry.originYMm, bounds.lengthMm - local.maxY),
+      ),
+    ),
+  };
+}
+
+/** Location geometry in the shape the shared envelope maths expects. */
+function locationGeometry(loc: {
+  physicalX: number;
+  physicalY: number;
+  physicalWidthMm: number;
+  physicalLengthMm: number;
+  rotationDegrees: number;
+}): FeatureGeometry {
+  return {
+    geometryKind: "RECT",
+    originXMm: loc.physicalX,
+    originYMm: loc.physicalY,
+    widthMm: loc.physicalWidthMm,
+    lengthMm: loc.physicalLengthMm,
+    rotationDegrees: loc.rotationDegrees,
+    points: null,
+  };
+}
 
 /**
  * Turns a client-side new-feature draft into a row. Everything derived --
@@ -110,7 +205,7 @@ function buildFeatureInsert(
   organizationId: number,
   warehouseId: number,
   hallId: number,
-  remapZoneId: (zoneId: number | null | undefined) => number | null,
+  bounds: HallBounds,
 ) {
   const kind = String(draft.kind ?? "").trim();
   if (!kind) throw new Error("A new map feature is missing its kind.");
@@ -140,6 +235,10 @@ function buildFeatureInsert(
   const validated = validateAttrs(kind, draft.attrs);
   if (!validated.ok) throw new Error(validated.error);
 
+  const origin = clampOriginToHall(geometry, bounds);
+  geometry.originXMm = origin.x;
+  geometry.originYMm = origin.y;
+
   const envelope = computeEnvelope(geometry);
 
   return {
@@ -165,7 +264,6 @@ function buildFeatureInsert(
     layerIndex: Math.round(draft.layerIndex ?? 0),
     isObstacle: draft.isObstacle ?? true,
     isVisualOnly: draft.isVisualOnly ?? false,
-    zoneId: remapZoneId(draft.zoneId),
     label: draft.label?.trim() || null,
     color: draft.color ?? null,
     attrs: validated.value,
@@ -174,9 +272,9 @@ function buildFeatureInsert(
 
 // ---------------------------------------------------------------------------
 // Draft engine commit ("Save Map") -- the only place client-staged hall,
-// location, and zone drafts ever turn into database mutations. Everything
+// location, and feature drafts ever turn into database mutations. Everything
 // else in the layout designer (dragging, resizing, editing fields, creating
-// or deleting locations/zones) only touches the in-memory draft store in
+// or deleting locations/features) only touches the in-memory draft store in
 // layout-designer.tsx until this runs.
 // ---------------------------------------------------------------------------
 
@@ -202,15 +300,21 @@ export async function commitHallStates(
   const hallIds = Object.keys(states).map(Number);
   if (hallIds.length === 0) return { success: true };
 
+  // Dimensions come back with the ownership check rather than in a second
+  // query: every write below has to be clamped against them.
   const owned = await db
-    .select({ hallId: halls.hallId })
+    .select({
+      hallId: halls.hallId,
+      physicalWidthMm: halls.physicalWidthMm,
+      physicalLengthMm: halls.physicalLengthMm,
+    })
     .from(halls)
     .where(
       and(inArray(halls.hallId, hallIds), eq(halls.warehouseId, warehouseId)),
     );
-  const ownedHallIds = new Set(owned.map((h) => h.hallId));
+  const ownedHalls = new Map(owned.map((h) => [h.hallId, h]));
   for (const hallId of hallIds) {
-    if (!ownedHallIds.has(hallId)) {
+    if (!ownedHalls.has(hallId)) {
       return { error: "One of the halls being saved does not exist." };
     }
   }
@@ -259,82 +363,27 @@ export async function commitHallStates(
       for (const [hallIdStr, state] of Object.entries(states)) {
         const hallId = Number(hallIdStr);
 
-        // 1. New zones first -- locations created/edited in this same batch
-        // may reference one of them by temp id.
-        const tempZoneIdToReal = new Map<number, number>();
-        for (const zoneDraft of state.newZones) {
-          const { tempId, ...patch } = zoneDraft;
-          const name = patch.name?.trim();
-          if (!name) throw new Error("A new zone is missing a name.");
-          const [inserted] = await tx
-            .insert(zoneTypes)
-            .values({
-              warehouseId,
-              name,
-              isPickable: patch.isPickable ?? true,
-              isTemperatureControlled: patch.isTemperatureControlled ?? false,
-              requiresHazmatClearance: patch.requiresHazmatClearance ?? false,
-              requiresBarcodeScan: patch.requiresBarcodeScan ?? true,
-              storagePermanence: patch.storagePermanence ?? "PERMANENT",
-              color: patch.color ?? null,
-            })
-            .returning({ zoneId: zoneTypes.zoneId });
-          tempZoneIdToReal.set(tempId, inserted.zoneId);
-        }
-
-        const remapZoneId = (
-          zoneId: number | null | undefined,
-        ): number | null => {
-          if (zoneId == null) return null;
-          if (zoneId < 0) return tempZoneIdToReal.get(zoneId) ?? null;
-          return zoneId;
+        // Bounds everything in this hall is clamped against. The hall patch is
+        // applied last (step 7) but its dimensions are read first, because
+        // shrinking a hall and moving a rack in the same save must clamp
+        // against the size the hall ends up, not the one it started at.
+        const hallRow = ownedHalls.get(hallId)!;
+        const bounds: HallBounds = {
+          widthMm: Math.max(
+            1,
+            Math.round(
+              state.hallPatch.physicalWidthMm ?? hallRow.physicalWidthMm,
+            ),
+          ),
+          lengthMm: Math.max(
+            1,
+            Math.round(
+              state.hallPatch.physicalLengthMm ?? hallRow.physicalLengthMm,
+            ),
+          ),
         };
 
-        // 2. Zone patches (existing rows).
-        for (const [zoneIdStr, patch] of Object.entries(state.zonePatches)) {
-          const zoneId = Number(zoneIdStr);
-          await tx
-            .update(zoneTypes)
-            .set({
-              ...(patch.name !== undefined && { name: patch.name }),
-              ...(patch.isPickable !== undefined && {
-                isPickable: patch.isPickable,
-              }),
-              ...(patch.isTemperatureControlled !== undefined && {
-                isTemperatureControlled: patch.isTemperatureControlled,
-              }),
-              ...(patch.requiresHazmatClearance !== undefined && {
-                requiresHazmatClearance: patch.requiresHazmatClearance,
-              }),
-              ...(patch.requiresBarcodeScan !== undefined && {
-                requiresBarcodeScan: patch.requiresBarcodeScan,
-              }),
-              ...(patch.storagePermanence !== undefined && {
-                storagePermanence: patch.storagePermanence,
-              }),
-              ...(patch.color !== undefined && { color: patch.color }),
-            })
-            .where(
-              and(
-                eq(zoneTypes.zoneId, zoneId),
-                eq(zoneTypes.warehouseId, warehouseId),
-              ),
-            );
-        }
-
-        // 3. Zone deletes.
-        if (state.deletedZoneIds.length > 0) {
-          await tx
-            .delete(zoneTypes)
-            .where(
-              and(
-                inArray(zoneTypes.zoneId, state.deletedZoneIds),
-                eq(zoneTypes.warehouseId, warehouseId),
-              ),
-            );
-        }
-
-        // 4. New locations (zoneId remapped through the temp-zone map above).
+        // 1. New locations.
         for (const locDraft of state.newLocations) {
           const locationCode = locDraft.locationCode?.trim();
           if (!locationCode) {
@@ -350,10 +399,22 @@ export async function commitHallStates(
               `Location "${locationCode}" is missing geometry.`,
             );
           }
+          const geometry = locationGeometry({
+            physicalX: Math.round(locDraft.physicalX),
+            physicalY: Math.round(locDraft.physicalY),
+            physicalWidthMm: Math.max(1, Math.round(locDraft.physicalWidthMm)),
+            physicalLengthMm: Math.max(
+              1,
+              Math.round(locDraft.physicalLengthMm),
+            ),
+            rotationDegrees:
+              ((Math.round(locDraft.rotationDegrees ?? 0) % 360) + 360) % 360,
+          });
+          const origin = clampOriginToHall(geometry, bounds);
+
           await tx.insert(locations).values({
             warehouseId,
             hallId,
-            zoneId: remapZoneId(locDraft.zoneId),
             locationCode,
             aisle: locDraft.aisle ?? null,
             bay: locDraft.bay ?? null,
@@ -363,20 +424,57 @@ export async function commitHallStates(
             heightMm: locDraft.heightMm ?? null,
             maxWeightKg: locDraft.maxWeightKg ?? null,
             isBlocked: locDraft.isBlocked ?? false,
+            isTemporary: locDraft.isTemporary ?? false,
             floorLevel: locDraft.floorLevel ?? 1,
-            physicalX: Math.max(0, Math.round(locDraft.physicalX)),
-            physicalY: Math.max(0, Math.round(locDraft.physicalY)),
-            physicalWidthMm: Math.max(1, Math.round(locDraft.physicalWidthMm)),
-            physicalLengthMm: Math.max(
-              1,
-              Math.round(locDraft.physicalLengthMm),
-            ),
-            rotationDegrees:
-              ((Math.round(locDraft.rotationDegrees ?? 0) % 360) + 360) % 360,
+            physicalX: origin.x,
+            physicalY: origin.y,
+            physicalWidthMm: geometry.widthMm,
+            physicalLengthMm: geometry.lengthMm,
+            rotationDegrees: geometry.rotationDegrees,
           });
         }
 
-        // 5. Location patches (existing rows).
+        // 2. Location patches (existing rows).
+        //
+        // A patch is partial but the bounds check needs the whole footprint --
+        // a pure move carries no width, a pure rotate carries no origin. One
+        // batched read gets every patched row's current geometry, rather than
+        // a round trip per location (a group drag patches hundreds).
+        const patchedLocationIds = Object.keys(state.locationPatches).map(
+          Number,
+        );
+        const currentLocationGeometry = new Map<
+          number,
+          {
+            physicalX: number;
+            physicalY: number;
+            physicalWidthMm: number;
+            physicalLengthMm: number;
+            rotationDegrees: number;
+          }
+        >();
+        if (patchedLocationIds.length > 0) {
+          const rows = await tx
+            .select({
+              locationId: locations.locationId,
+              physicalX: locations.physicalX,
+              physicalY: locations.physicalY,
+              physicalWidthMm: locations.physicalWidthMm,
+              physicalLengthMm: locations.physicalLengthMm,
+              rotationDegrees: locations.rotationDegrees,
+            })
+            .from(locations)
+            .where(
+              and(
+                inArray(locations.locationId, patchedLocationIds),
+                eq(locations.warehouseId, warehouseId),
+              ),
+            );
+          for (const row of rows) {
+            currentLocationGeometry.set(row.locationId, row);
+          }
+        }
+
         for (const [locationIdStr, patch] of Object.entries(
           state.locationPatches,
         )) {
@@ -385,14 +483,43 @@ export async function commitHallStates(
             patch.rotationDegrees !== undefined
               ? ((Math.round(patch.rotationDegrees) % 360) + 360) % 360
               : undefined;
+
+          // Growing or rotating a box can push an origin out of bounds that
+          // the patch never mentioned, so any geometry edit re-clamps both.
+          const geometryTouched =
+            patch.physicalX !== undefined ||
+            patch.physicalY !== undefined ||
+            patch.physicalWidthMm !== undefined ||
+            patch.physicalLengthMm !== undefined ||
+            rotationUpdate !== undefined;
+
+          // Merge the patch over the stored row, then clamp the result. Skips
+          // the clamp entirely for a row that no longer exists -- the UPDATE
+          // below will match nothing anyway.
+          const existing = currentLocationGeometry.get(locationId);
+          let clampedOrigin: { x: number; y: number } | null = null;
+          if (existing) {
+            const merged = locationGeometry({
+              physicalX: Math.round(patch.physicalX ?? existing.physicalX),
+              physicalY: Math.round(patch.physicalY ?? existing.physicalY),
+              physicalWidthMm: Math.max(
+                1,
+                Math.round(patch.physicalWidthMm ?? existing.physicalWidthMm),
+              ),
+              physicalLengthMm: Math.max(
+                1,
+                Math.round(patch.physicalLengthMm ?? existing.physicalLengthMm),
+              ),
+              rotationDegrees: rotationUpdate ?? existing.rotationDegrees,
+            });
+            clampedOrigin = clampOriginToHall(merged, bounds);
+          }
+
           await tx
             .update(locations)
             .set({
               ...(patch.locationCode !== undefined && {
                 locationCode: patch.locationCode,
-              }),
-              ...(patch.zoneId !== undefined && {
-                zoneId: remapZoneId(patch.zoneId),
               }),
               ...(patch.aisle !== undefined && { aisle: patch.aisle }),
               ...(patch.bay !== undefined && { bay: patch.bay }),
@@ -408,15 +535,22 @@ export async function commitHallStates(
               ...(patch.isBlocked !== undefined && {
                 isBlocked: patch.isBlocked,
               }),
+              ...(patch.isTemporary !== undefined && {
+                isTemporary: patch.isTemporary,
+              }),
               ...(patch.floorLevel !== undefined && {
                 floorLevel: patch.floorLevel,
               }),
-              ...(patch.physicalX !== undefined && {
-                physicalX: Math.max(0, Math.round(patch.physicalX)),
-              }),
-              ...(patch.physicalY !== undefined && {
-                physicalY: Math.max(0, Math.round(patch.physicalY)),
-              }),
+              ...(clampedOrigin && geometryTouched
+                ? { physicalX: clampedOrigin.x, physicalY: clampedOrigin.y }
+                : {
+                    ...(patch.physicalX !== undefined && {
+                      physicalX: Math.max(0, Math.round(patch.physicalX)),
+                    }),
+                    ...(patch.physicalY !== undefined && {
+                      physicalY: Math.max(0, Math.round(patch.physicalY)),
+                    }),
+                  }),
               ...(patch.physicalWidthMm !== undefined && {
                 physicalWidthMm: Math.max(
                   1,
@@ -442,7 +576,7 @@ export async function commitHallStates(
             );
         }
 
-        // 6. Location deletes.
+        // 3. Location deletes.
         if (state.deletedLocationIds.length > 0) {
           await tx
             .delete(locations)
@@ -454,7 +588,7 @@ export async function commitHallStates(
             );
         }
 
-        // 7. New layout features. Geometry is re-derived server-side: the
+        // 4. New layout features. Geometry is re-derived server-side: the
         // envelope is never taken from the client, since it is what spatial
         // queries index and a wrong one silently breaks containment tests.
         for (const featureDraft of state.newFeatures ?? []) {
@@ -463,12 +597,12 @@ export async function commitHallStates(
             organizationId,
             warehouseId,
             hallId,
-            remapZoneId,
+            bounds,
           );
           await tx.insert(layoutFeatures).values(values);
         }
 
-        // 8. Feature patches. A patch is partial, but the envelope depends on
+        // 5. Feature patches. A patch is partial, but the envelope depends on
         // every geometry field at once, so the current row is read back and
         // merged before recomputing it.
         for (const [featureIdStr, patch] of Object.entries(
@@ -511,6 +645,13 @@ export async function commitHallStates(
                 ? sanitizePoints(patch.points)
                 : sanitizePoints(existing.points),
           };
+
+          // Same clamp as a new feature, on the merged result -- a patch that
+          // only widens a wall can still push its far edge past the hall.
+          const clamped = clampOriginToHall(geometry, bounds);
+          geometry.originXMm = clamped.x;
+          geometry.originYMm = clamped.y;
+
           const envelope = computeEnvelope(geometry);
 
           let attrs: FeaturePatch["attrs"];
@@ -554,9 +695,6 @@ export async function commitHallStates(
               ...(patch.isVisualOnly !== undefined && {
                 isVisualOnly: patch.isVisualOnly,
               }),
-              ...(patch.zoneId !== undefined && {
-                zoneId: remapZoneId(patch.zoneId),
-              }),
               ...(patch.label !== undefined && {
                 label: patch.label?.trim() || null,
               }),
@@ -572,7 +710,7 @@ export async function commitHallStates(
             );
         }
 
-        // 9. Feature deletes. Features are not referenced by inventory or
+        // 6. Feature deletes. Features are not referenced by inventory or
         // movement history yet, so a hard delete is still safe here -- once
         // nav edges reference them this must become a soft delete
         // (is_active = false) instead.
@@ -588,12 +726,14 @@ export async function commitHallStates(
             );
         }
 
-        // 10. Hall patch.
+        // 7. Hall patch.
         if (Object.keys(state.hallPatch).length > 0) {
           const patch = state.hallPatch;
           await tx
             .update(halls)
             .set({
+              ...(patch.name !== undefined &&
+                patch.name.trim() && { name: patch.name.trim() }),
               ...(patch.physicalWidthMm !== undefined && {
                 physicalWidthMm: Math.max(1, Math.round(patch.physicalWidthMm)),
               }),
@@ -655,16 +795,38 @@ export async function commitHallStates(
         },
       };
     }
-    // A unique violation on (warehouse_id, version_number) is the same
-    // conflict, just lost at commit time instead of at read time.
-    if ((err as { code?: string }).code === "23505") {
-      return {
-        conflict: {
-          currentVersion: baseVersionNumber + 1,
-          publishedByName: null,
-          publishedAt: null,
-        },
-      };
+    // 23505 is Postgres's generic unique_violation SQLSTATE -- shared by
+    // every unique constraint in the database, not just the version-race one
+    // below. Branching on it alone previously reported a colliding location
+    // code as "someone else published a newer version", which sent the user
+    // looking for a publish race that was never there. constraint_name (a
+    // real field on postgres.js's thrown error, not something bolted on)
+    // is what tells these apart.
+    const pgErr = err as { code?: string; constraint_name?: string };
+    if (pgErr.code === "23505") {
+      // A unique violation on (warehouse_id, version_number) is the same
+      // conflict as above, just lost at commit time instead of at read time.
+      if (pgErr.constraint_name === "uq_layout_versions_wh_number") {
+        return {
+          conflict: {
+            currentVersion: baseVersionNumber + 1,
+            publishedByName: null,
+            publishedAt: null,
+          },
+        };
+      }
+      if (pgErr.constraint_name === "uq_locations_wh_code") {
+        return {
+          error:
+            "One of your locations has a code that's already used elsewhere in this warehouse -- often an unrenamed \"NEW-...\" placeholder left over from an earlier session. Rename it in the property panel and save again.",
+        };
+      }
+      if (pgErr.constraint_name === "uq_warehouse_hall_name") {
+        return {
+          error:
+            "Another hall in this warehouse already has that name. Rename it and save again.",
+        };
+      }
     }
     return { error: (err as Error).message || "Failed to save changes." };
   }
@@ -684,6 +846,148 @@ export async function commitHallStates(
 type BulkGeneratorType = "racking" | "floor_line" | "shelving";
 type Orientation = "horizontal" | "vertical";
 type Axis1DDirection = "forward" | "reverse";
+
+// ---------------------------------------------------------------------------
+// Layout patterns -- a repeating rhythm of occupied/empty runs along a
+// generator's primary axis (aisles for racking, slots for a floor line, bays
+// for shelving), e.g. "1, empty, 2, empty, 2" for a block of single aisles
+// followed by wider double blocks, each separated by a cross-aisle gap. This
+// is the one thing the plain "N aisles, uniform gap" generator cannot express
+// on its own: real racking is laid out in blocks, not one undifferentiated run.
+// ---------------------------------------------------------------------------
+
+type PatternPhase = { occupied: boolean; length: number };
+
+const PATTERN_EMPTY_WORDS = new Set(["empty", "gap", "skip", "none"]);
+
+/**
+ * Parses "1, empty, 2, empty, 2" into alternating occupied/empty runs. Each
+ * comma-separated token is either a positive whole number (an occupied run of
+ * that length) or one of empty/gap/skip/none (one empty slot) -- write the
+ * word twice for a two-slot gap rather than inventing a count syntax for it.
+ */
+function parsePattern(input: string): PatternPhase[] | { error: string } {
+  const tokens = input
+    .split(",")
+    .map((t) => t.trim())
+    .filter((t) => t.length > 0);
+  if (tokens.length === 0) return { error: "The pattern is empty." };
+
+  const phases: PatternPhase[] = [];
+  for (const token of tokens) {
+    if (PATTERN_EMPTY_WORDS.has(token.toLowerCase())) {
+      phases.push({ occupied: false, length: 1 });
+      continue;
+    }
+    const n = Number(token);
+    if (!Number.isInteger(n) || n <= 0) {
+      return {
+        error: `"${token}" in the pattern isn't a positive whole number or "empty".`,
+      };
+    }
+    phases.push({ occupied: true, length: n });
+  }
+  if (!phases.some((p) => p.occupied)) {
+    return {
+      error: "The pattern needs at least one occupied run, not just gaps.",
+    };
+  }
+  return phases;
+}
+
+/**
+ * Rough worst-case slot count for laying out `targetOccupied` occupied
+ * positions under a pattern -- not exact, since the final cycle is usually
+ * cut short, but enough to catch a degenerate pattern (mostly gaps) before it
+ * tries to walk tens of thousands of empty slots to place a modest count.
+ */
+const MAX_PATTERN_SLOTS = 20_000;
+function estimatePatternSlots(
+  phases: PatternPhase[],
+  targetOccupied: number,
+): number {
+  const perCycle = phases.reduce((sum, p) => sum + p.length, 0);
+  const occupiedPerCycle = phases.reduce(
+    (sum, p) => sum + (p.occupied ? p.length : 0),
+    0,
+  );
+  const cycles = Math.ceil(targetOccupied / occupiedPerCycle);
+  return cycles * perCycle;
+}
+
+/**
+ * Expands a pattern into a flat sequence of occupied/empty slots, cycling
+ * until exactly `targetOccupied` occupied slots have been emitted. Stops
+ * immediately once that's reached -- even mid-run -- so the last requested
+ * position is never followed by a dangling trailing gap.
+ */
+function expandPattern(
+  phases: PatternPhase[],
+  targetOccupied: number,
+): boolean[] {
+  const slots: boolean[] = [];
+  let occupied = 0;
+  let phaseIndex = 0;
+  while (occupied < targetOccupied) {
+    const phase = phases[phaseIndex % phases.length];
+    for (let i = 0; i < phase.length && occupied < targetOccupied; i++) {
+      slots.push(phase.occupied);
+      if (phase.occupied) occupied++;
+    }
+    phaseIndex++;
+  }
+  return slots;
+}
+
+/**
+ * Walks one repeating axis under an optional pattern, calling `place` once
+ * per occupied position with two indices that deliberately diverge under a
+ * pattern: `occupiedIndex` (0-based count of placements so far) is what
+ * numbering keys off, so a gap never leaves a hole in the sequence;
+ * `slotIndex` (0-based physical position, gaps included) is what spacing
+ * keys off, so a gap still consumes its share of floor. With no pattern,
+ * every slot is occupied and the two indices are identical -- today's plain
+ * contiguous layout, unchanged.
+ */
+function forEachPatternSlot(
+  targetOccupied: number,
+  pattern: PatternPhase[] | null,
+  place: (occupiedIndex: number, slotIndex: number) => void,
+): void {
+  const slots = pattern
+    ? expandPattern(pattern, targetOccupied)
+    : new Array(targetOccupied).fill(true);
+  let occupiedIndex = 0;
+  for (let slotIndex = 0; slotIndex < slots.length; slotIndex++) {
+    if (!slots[slotIndex]) continue;
+    place(occupiedIndex, slotIndex);
+    occupiedIndex++;
+  }
+}
+
+/**
+ * Reads an optional pattern field: blank means no pattern (plain contiguous
+ * layout, identical to before this feature existed). `axisCount` is only used
+ * to reject a pattern that would need an absurd number of physical slots.
+ */
+function readOptionalPattern(
+  formData: FormData,
+  key: string,
+  axisCount: number,
+): { pattern: PatternPhase[] | null; error?: string } {
+  const raw = String(formData.get(key) ?? "").trim();
+  if (!raw) return { pattern: null };
+  const parsed = parsePattern(raw);
+  if ("error" in parsed) return { pattern: null, error: parsed.error };
+  const estimatedSlots = estimatePatternSlots(parsed, axisCount);
+  if (estimatedSlots > MAX_PATTERN_SLOTS) {
+    return {
+      pattern: null,
+      error: `That pattern needs roughly ${estimatedSlots} physical positions to place ${axisCount} -- mostly gaps. Use a smaller gap ratio or a lower count.`,
+    };
+  }
+  return { pattern: parsed };
+}
 
 const GENERATOR_TO_LOCATION_TYPE: Record<BulkGeneratorType, LocationType> = {
   racking: "RACKING",
@@ -710,7 +1014,6 @@ function rowForBayIndex(
 
 type BulkLocationDraft = {
   locationCode: string;
-  zoneId: number | null;
   aisle: number | null;
   bay: number | null;
   level: number | null;
@@ -765,6 +1068,10 @@ function buildRackingLocations(params: {
   template: string;
   aisleCount: number;
   aisleStart: number;
+  /** Optional rhythm along the aisle axis -- see the "Layout patterns"
+   *  section above. Null lays out aisleCount aisles contiguously, exactly as
+   *  before this existed. */
+  aislePattern: PatternPhase[] | null;
   bayCount: number;
   bayStart: number;
   levelCount: number;
@@ -778,47 +1085,55 @@ function buildRackingLocations(params: {
   horizontalDirection: "ltr" | "rtl";
   verticalDirection: "utd" | "dtu";
   useRows: boolean;
-  zoneId: number | null;
 }): BulkLocationDraft[] {
   const drafts: BulkLocationDraft[] = [];
 
-  for (let i = 0; i < params.aisleCount; i++) {
-    const aisleIndexForNumber =
-      params.verticalDirection === "utd" ? i : params.aisleCount - 1 - i;
-    const aisleNum = params.aisleStart + aisleIndexForNumber;
+  forEachPatternSlot(
+    params.aisleCount,
+    params.aislePattern,
+    (occupiedIndex, slotIndex) => {
+      const aisleIndexForNumber =
+        params.verticalDirection === "utd"
+          ? occupiedIndex
+          : params.aisleCount - 1 - occupiedIndex;
+      const aisleNum = params.aisleStart + aisleIndexForNumber;
 
-    const y = params.startY + i * (params.bayDepthMm + params.aisleGapMm);
+      // slotIndex, not occupiedIndex: an empty slot in the pattern still
+      // consumes one aisle-pitch of Y, which is the entire point of it --
+      // that's the cross-aisle gap, not a discount on physical space.
+      const y =
+        params.startY + slotIndex * (params.bayDepthMm + params.aisleGapMm);
 
-    for (let j = 0; j < params.bayCount; j++) {
-      const bayIndexForNumber =
-        params.horizontalDirection === "ltr" ? j : params.bayCount - 1 - j;
-      const bayNum = params.bayStart + bayIndexForNumber;
-      const rowNum = rowForBayIndex(bayIndexForNumber, params.useRows);
+      for (let j = 0; j < params.bayCount; j++) {
+        const bayIndexForNumber =
+          params.horizontalDirection === "ltr" ? j : params.bayCount - 1 - j;
+        const bayNum = params.bayStart + bayIndexForNumber;
+        const rowNum = rowForBayIndex(bayIndexForNumber, params.useRows);
 
-      const x = params.startX + j * (params.bayWidthMm + params.bayGapMm);
+        const x = params.startX + j * (params.bayWidthMm + params.bayGapMm);
 
-      for (let k = 0; k < params.levelCount; k++) {
-        const levelNum = params.levelStart + k;
-        drafts.push({
-          locationCode: renderLocationTemplate(params.template, {
+        for (let k = 0; k < params.levelCount; k++) {
+          const levelNum = params.levelStart + k;
+          drafts.push({
+            locationCode: renderLocationTemplate(params.template, {
+              aisle: aisleNum,
+              row: rowNum,
+              bay: bayNum,
+              level: levelNum,
+            }),
             aisle: aisleNum,
-            row: rowNum,
             bay: bayNum,
             level: levelNum,
-          }),
-          zoneId: params.zoneId,
-          aisle: aisleNum,
-          bay: bayNum,
-          level: levelNum,
-          row: rowNum,
-          physicalX: Math.round(x),
-          physicalY: Math.round(y),
-          physicalWidthMm: Math.round(params.bayWidthMm),
-          physicalLengthMm: Math.round(params.bayDepthMm),
-        });
+            row: rowNum,
+            physicalX: Math.round(x),
+            physicalY: Math.round(y),
+            physicalWidthMm: Math.round(params.bayWidthMm),
+            physicalLengthMm: Math.round(params.bayDepthMm),
+          });
+        }
       }
-    }
-  }
+    },
+  );
   return drafts;
 }
 
@@ -833,6 +1148,8 @@ function buildFloorLineLocations(params: {
   template: string;
   slotCount: number;
   slotStart: number;
+  /** Optional rhythm along the slot axis -- see "Layout patterns" above. */
+  slotPattern: PatternPhase[] | null;
   slotWidthMm: number;
   slotDepthMm: number;
   gapMm: number;
@@ -840,41 +1157,45 @@ function buildFloorLineLocations(params: {
   startY: number;
   orientation: Orientation;
   sequenceDirection: Axis1DDirection;
-  zoneId: number | null;
 }): BulkLocationDraft[] {
   const drafts: BulkLocationDraft[] = [];
-  for (let s = 0; s < params.slotCount; s++) {
-    const slotIndexForNumber =
-      params.sequenceDirection === "forward" ? s : params.slotCount - 1 - s;
-    const slotNum = params.slotStart + slotIndexForNumber;
+  forEachPatternSlot(
+    params.slotCount,
+    params.slotPattern,
+    (occupiedIndex, slotIndex) => {
+      const slotIndexForNumber =
+        params.sequenceDirection === "forward"
+          ? occupiedIndex
+          : params.slotCount - 1 - occupiedIndex;
+      const slotNum = params.slotStart + slotIndexForNumber;
 
-    const x =
-      params.orientation === "horizontal"
-        ? params.startX + s * (params.slotWidthMm + params.gapMm)
-        : params.startX;
-    const y =
-      params.orientation === "horizontal"
-        ? params.startY
-        : params.startY + s * (params.slotDepthMm + params.gapMm);
+      const x =
+        params.orientation === "horizontal"
+          ? params.startX + slotIndex * (params.slotWidthMm + params.gapMm)
+          : params.startX;
+      const y =
+        params.orientation === "horizontal"
+          ? params.startY
+          : params.startY + slotIndex * (params.slotDepthMm + params.gapMm);
 
-    drafts.push({
-      locationCode: renderLocationTemplate(params.template, {
+      drafts.push({
+        locationCode: renderLocationTemplate(params.template, {
+          aisle: null,
+          row: null,
+          bay: slotNum,
+          level: null,
+        }),
         aisle: null,
-        row: null,
         bay: slotNum,
         level: null,
-      }),
-      zoneId: params.zoneId,
-      aisle: null,
-      bay: slotNum,
-      level: null,
-      row: null,
-      physicalX: Math.round(x),
-      physicalY: Math.round(y),
-      physicalWidthMm: Math.round(params.slotWidthMm),
-      physicalLengthMm: Math.round(params.slotDepthMm),
-    });
-  }
+        row: null,
+        physicalX: Math.round(x),
+        physicalY: Math.round(y),
+        physicalWidthMm: Math.round(params.slotWidthMm),
+        physicalLengthMm: Math.round(params.slotDepthMm),
+      });
+    },
+  );
   return drafts;
 }
 
@@ -882,6 +1203,8 @@ function buildShelvingLocations(params: {
   template: string;
   bayCount: number;
   bayStart: number;
+  /** Optional rhythm along the bay axis -- see "Layout patterns" above. */
+  bayPattern: PatternPhase[] | null;
   levelCount: number;
   levelStart: number;
   bayWidthMm: number;
@@ -891,48 +1214,52 @@ function buildShelvingLocations(params: {
   startY: number;
   orientation: Orientation;
   sequenceDirection: Axis1DDirection;
-  zoneId: number | null;
 }): BulkLocationDraft[] {
   const drafts: BulkLocationDraft[] = [];
-  for (let j = 0; j < params.bayCount; j++) {
-    const bayIndexForNumber =
-      params.sequenceDirection === "forward" ? j : params.bayCount - 1 - j;
-    const bayNum = params.bayStart + bayIndexForNumber;
+  forEachPatternSlot(
+    params.bayCount,
+    params.bayPattern,
+    (occupiedIndex, slotIndex) => {
+      const bayIndexForNumber =
+        params.sequenceDirection === "forward"
+          ? occupiedIndex
+          : params.bayCount - 1 - occupiedIndex;
+      const bayNum = params.bayStart + bayIndexForNumber;
 
-    let x: number, y: number, width: number, length: number;
-    if (params.orientation === "horizontal") {
-      x = params.startX + j * (params.bayWidthMm + params.bayGapMm);
-      y = params.startY;
-      width = params.bayWidthMm;
-      length = params.bayDepthMm;
-    } else {
-      x = params.startX;
-      y = params.startY + j * (params.bayWidthMm + params.bayGapMm);
-      width = params.bayDepthMm;
-      length = params.bayWidthMm;
-    }
+      let x: number, y: number, width: number, length: number;
+      if (params.orientation === "horizontal") {
+        x = params.startX + slotIndex * (params.bayWidthMm + params.bayGapMm);
+        y = params.startY;
+        width = params.bayWidthMm;
+        length = params.bayDepthMm;
+      } else {
+        x = params.startX;
+        y = params.startY + slotIndex * (params.bayWidthMm + params.bayGapMm);
+        width = params.bayDepthMm;
+        length = params.bayWidthMm;
+      }
 
-    for (let k = 0; k < params.levelCount; k++) {
-      const levelNum = params.levelStart + k;
-      drafts.push({
-        locationCode: renderLocationTemplate(params.template, {
+      for (let k = 0; k < params.levelCount; k++) {
+        const levelNum = params.levelStart + k;
+        drafts.push({
+          locationCode: renderLocationTemplate(params.template, {
+            aisle: null,
+            row: null,
+            bay: bayNum,
+            level: levelNum,
+          }),
           aisle: null,
-          row: null,
           bay: bayNum,
           level: levelNum,
-        }),
-        zoneId: params.zoneId,
-        aisle: null,
-        bay: bayNum,
-        level: levelNum,
-        row: null,
-        physicalX: Math.round(x),
-        physicalY: Math.round(y),
-        physicalWidthMm: Math.round(width),
-        physicalLengthMm: Math.round(length),
-      });
-    }
-  }
+          row: null,
+          physicalX: Math.round(x),
+          physicalY: Math.round(y),
+          physicalWidthMm: Math.round(width),
+          physicalLengthMm: Math.round(length),
+        });
+      }
+    },
+  );
   return drafts;
 }
 
@@ -971,11 +1298,6 @@ export async function bulkGenerateLocations(
   const template = templateInput || DEFAULT_TEMPLATES[generatorType];
   const templateError = validateTemplate(template);
   if (templateError) return { error: templateError };
-
-  const zoneId = parsePositiveInt(formData.get("zoneId"));
-  if (zoneId !== null && !(await zoneBelongsToWarehouse(zoneId, warehouseId))) {
-    return { error: "Selected zone does not belong to this warehouse." };
-  }
 
   const orientation: Orientation =
     formData.get("orientation") === "vertical" ? "vertical" : "horizontal";
@@ -1018,10 +1340,18 @@ export async function bulkGenerateLocations(
       formData.get("verticalDirection") === "dtu" ? "dtu" : "utd";
     const useRows = formData.get("useRows") === "on";
 
+    const { pattern: aislePattern, error: patternError } = readOptionalPattern(
+      formData,
+      "aislePattern",
+      aisleCount,
+    );
+    if (patternError) return { error: patternError };
+
     drafts = buildRackingLocations({
       template,
       aisleCount,
       aisleStart,
+      aislePattern,
       bayCount,
       bayStart,
       levelCount,
@@ -1035,7 +1365,6 @@ export async function bulkGenerateLocations(
       horizontalDirection,
       verticalDirection,
       useRows,
-      zoneId,
     });
   } else if (generatorType === "floor_line") {
     const slotCount = readRequiredPositiveInt(formData, "slotCount");
@@ -1055,10 +1384,18 @@ export async function bulkGenerateLocations(
     const sequenceDirection: Axis1DDirection =
       formData.get("sequenceDirection") === "reverse" ? "reverse" : "forward";
 
+    const { pattern: slotPattern, error: patternError } = readOptionalPattern(
+      formData,
+      "slotPattern",
+      slotCount,
+    );
+    if (patternError) return { error: patternError };
+
     drafts = buildFloorLineLocations({
       template,
       slotCount,
       slotStart,
+      slotPattern,
       slotWidthMm,
       slotDepthMm,
       gapMm,
@@ -1066,7 +1403,6 @@ export async function bulkGenerateLocations(
       startY,
       orientation,
       sequenceDirection,
-      zoneId,
     });
   } else if (generatorType === "shelving") {
     const bayCount = readRequiredPositiveInt(formData, "bayCount");
@@ -1090,10 +1426,18 @@ export async function bulkGenerateLocations(
     const sequenceDirection: Axis1DDirection =
       formData.get("sequenceDirection") === "reverse" ? "reverse" : "forward";
 
+    const { pattern: bayPattern, error: patternError } = readOptionalPattern(
+      formData,
+      "bayPattern",
+      bayCount,
+    );
+    if (patternError) return { error: patternError };
+
     drafts = buildShelvingLocations({
       template,
       bayCount,
       bayStart,
+      bayPattern,
       levelCount,
       levelStart,
       bayWidthMm,
@@ -1103,7 +1447,6 @@ export async function bulkGenerateLocations(
       startY,
       orientation,
       sequenceDirection,
-      zoneId,
     });
   } else {
     return { error: "Unknown generator type." };
@@ -1146,7 +1489,6 @@ export async function bulkGenerateLocations(
       drafts.map((draft) => ({
         warehouseId,
         hallId,
-        zoneId: draft.zoneId,
         locationCode: draft.locationCode,
         aisle: draft.aisle,
         bay: draft.bay,
