@@ -7,7 +7,12 @@ import {
 } from "@/lib/warehouse-map/routing-server";
 import { getCongestionMultipliers } from "./traffic-actions";
 
-export type { RoutePreview };
+// NOTE: do not re-export the RoutePreview type from this file, even as a
+// type-only export -- a "use server" file may only export async functions,
+// and the Next.js server-actions compiler does not reliably erase a
+// re-exported type here, producing a runtime `ReferenceError: RoutePreview
+// is not defined` when the actions-loader chunk evaluates. Import the type
+// from "@/lib/warehouse-map/routing-server" directly instead.
 
 /**
  * Congestion-aware route preview for the live map.
