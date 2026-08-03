@@ -1174,7 +1174,6 @@ export const locations = pgTable(
   {
     locationId: serial("location_id").primaryKey().notNull(),
     warehouseId: integer("warehouse_id"),
-    zoneId: integer("zone_id"),
     locationCode: varchar("location_code", { length: 50 }).notNull(),
     aisle: integer(),
     bay: integer(),
@@ -1188,6 +1187,11 @@ export const locations = pgTable(
     locationType: varchar("location_type", { length: 20 })
       .default("NONE")
       .notNull(),
+    // Marks a staging/buffer slot (pallets waiting to move or load) as
+    // distinct from permanent storage. Replaces the zone-based
+    // storage_permanence scheme -- zones turned out to model nothing no code
+    // ever read, where this is the one bit that actually mattered.
+    isTemporary: boolean("is_temporary").default(false).notNull(),
     updatedAt: timestamp("updated_at", { mode: "string" }).default(
       sql`CURRENT_TIMESTAMP`,
     ),
@@ -1210,12 +1214,6 @@ export const locations = pgTable(
         table.physicalY.asc().nullsLast().op("int4_ops"),
       )
       .where(sql`(is_blocked = false)`),
-    index("idx_locations_zone_lookup").using(
-      "btree",
-      table.warehouseId.asc().nullsLast().op("int4_ops"),
-      table.hallId.asc().nullsLast().op("int4_ops"),
-      table.zoneId.asc().nullsLast().op("int4_ops"),
-    ),
     foreignKey({
       columns: [table.hallId],
       foreignColumns: [halls.hallId],
@@ -1226,11 +1224,6 @@ export const locations = pgTable(
       foreignColumns: [warehouses.warehouseId],
       name: "locations_warehouse_id_fkey",
     }).onDelete("cascade"),
-    foreignKey({
-      columns: [table.zoneId],
-      foreignColumns: [zoneTypes.zoneId],
-      name: "locations_zone_id_fkey",
-    }).onDelete("restrict"),
     // Location codes are unique per warehouse, not globally -- two tenants
     // (or two warehouses in one org) can legitimately both use "A01-01-1".
     unique("uq_locations_wh_code").on(table.warehouseId, table.locationCode),
@@ -1241,41 +1234,6 @@ export const locations = pgTable(
     check(
       "chk_location_type",
       sql`(location_type)::text = ANY ((ARRAY['RACKING'::character varying, 'SHELF'::character varying, 'FLOOR'::character varying, 'NONE'::character varying])::text[])`,
-    ),
-  ],
-);
-
-export const zoneTypes = pgTable(
-  "zone_types",
-  {
-    zoneId: serial("zone_id").primaryKey().notNull(),
-    warehouseId: integer("warehouse_id"),
-    name: varchar({ length: 50 }).notNull(),
-    isPickable: boolean("is_pickable").default(true),
-    isTemperatureControlled: boolean("is_temperature_controlled").default(
-      false,
-    ),
-    requiresHazmatClearance: boolean("requires_hazmat_clearance").default(
-      false,
-    ),
-    requiresBarcodeScan: boolean("requires_barcode_scan")
-      .default(true)
-      .notNull(),
-    storagePermanence: varchar("storage_permanence", { length: 20 })
-      .default("PERMANENT")
-      .notNull(),
-    color: varchar({ length: 7 }),
-  },
-  (table) => [
-    foreignKey({
-      columns: [table.warehouseId],
-      foreignColumns: [warehouses.warehouseId],
-      name: "zones_warehouse_id_fkey",
-    }).onDelete("cascade"),
-    unique("uq_zones_wh_name").on(table.warehouseId, table.name),
-    check(
-      "chk_storage_permanence",
-      sql`(storage_permanence)::text = ANY ((ARRAY['PERMANENT'::character varying, 'TEMPORARY'::character varying, 'FLUID_BUFFER'::character varying])::text[])`,
     ),
   ],
 );
@@ -1467,7 +1425,6 @@ export const layoutFeatures = pgTable(
       .default("1.00")
       .notNull(),
 
-    zoneId: integer("zone_id"),
     label: varchar({ length: 100 }),
     color: varchar({ length: 7 }),
 
@@ -1519,11 +1476,6 @@ export const layoutFeatures = pgTable(
       foreignColumns: [featureKinds.kind],
       name: "layout_features_kind_fkey",
     }).onDelete("restrict"),
-    foreignKey({
-      columns: [table.zoneId],
-      foreignColumns: [zoneTypes.zoneId],
-      name: "layout_features_zone_id_fkey",
-    }).onDelete("set null"),
     check(
       "chk_feature_rotation_range",
       sql`(rotation_degrees >= 0) AND (rotation_degrees < 360)`,
@@ -1640,7 +1592,6 @@ export const navEdges = pgTable(
     // Lift cycle, door open, stop sign -- cost that does not scale with length.
     fixedDelayMs: integer("fixed_delay_ms").default(0).notNull(),
 
-    zoneId: integer("zone_id"),
     sourceFeatureId: integer("source_feature_id"),
     isGenerated: boolean("is_generated").default(true).notNull(),
     layoutVersion: integer("layout_version").default(0).notNull(),
@@ -1680,11 +1631,6 @@ export const navEdges = pgTable(
       name: "nav_edges_warehouse_id_fkey",
     }).onDelete("cascade"),
     foreignKey({
-      columns: [table.zoneId],
-      foreignColumns: [zoneTypes.zoneId],
-      name: "nav_edges_zone_id_fkey",
-    }).onDelete("set null"),
-    foreignKey({
       columns: [table.sourceFeatureId],
       foreignColumns: [layoutFeatures.featureId],
       name: "nav_edges_source_feature_id_fkey",
@@ -1695,7 +1641,7 @@ export const navEdges = pgTable(
     ),
     check(
       "chk_nav_edge_kind",
-      sql`(edge_kind)::text = ANY ((ARRAY['LANE'::character varying, 'AISLE'::character varying, 'CROSS_AISLE'::character varying, 'WALKWAY'::character varying, 'PORTAL'::character varying, 'ACCESS'::character varying, 'YARD'::character varying])::text[])`,
+      sql`(edge_kind)::text = ANY ((ARRAY['LANE'::character varying, 'AISLE'::character varying, 'CROSS_AISLE'::character varying, 'WALKWAY'::character varying, 'PORTAL'::character varying, 'ACCESS'::character varying, 'YARD'::character varying, 'ZONE'::character varying])::text[])`,
     ),
     check("chk_nav_edge_length", sql`length_mm >= 0`),
     check("chk_nav_edge_endpoints", sql`from_node_id <> to_node_id`),
@@ -2391,39 +2337,7 @@ export const hallUnderlays = pgTable(
   ],
 );
 
-// Zones were attributes-only (zone_types), which meant nothing could answer
-// "which zone is this worker standing in". A zone can be several disjoint
-// polygons, so geometry lives here rather than on zone_types itself.
-export const zoneAreas = pgTable(
-  "zone_areas",
-  {
-    zoneAreaId: serial("zone_area_id").primaryKey().notNull(),
-    zoneId: integer("zone_id").notNull(),
-    hallId: integer("hall_id").notNull(),
-    floorLevel: integer("floor_level").default(1).notNull(),
-    points: jsonb().notNull(),
-    envelopeMinXMm: integer("envelope_min_x_mm").default(0).notNull(),
-    envelopeMinYMm: integer("envelope_min_y_mm").default(0).notNull(),
-    envelopeMaxXMm: integer("envelope_max_x_mm").default(0).notNull(),
-    envelopeMaxYMm: integer("envelope_max_y_mm").default(0).notNull(),
-    // Higher priority wins where two zone areas overlap.
-    priority: integer().default(0).notNull(),
-  },
-  (table) => [
-    index("idx_zone_areas_hall").using(
-      "btree",
-      table.hallId.asc().nullsLast().op("int4_ops"),
-      table.floorLevel.asc().nullsLast().op("int4_ops"),
-    ),
-    foreignKey({
-      columns: [table.zoneId],
-      foreignColumns: [zoneTypes.zoneId],
-      name: "zone_areas_zone_id_fkey",
-    }).onDelete("cascade"),
-    foreignKey({
-      columns: [table.hallId],
-      foreignColumns: [halls.hallId],
-      name: "zone_areas_hall_id_fkey",
-    }).onDelete("cascade"),
-  ],
-);
+// zone_areas dropped alongside zone_types (see migration 0010): 0 rows, and
+// no code ever read from it or zone_types -- the zone-polygon geometry this
+// table was meant to hold for "which zone is this worker standing in" was
+// never actually built.

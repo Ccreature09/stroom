@@ -1,5 +1,5 @@
 import { relations } from "drizzle-orm/relations";
-import { warehouseConfigs, warehouses, organizations, users, employees, positionTypes, items, customers, suppliers, carriers, purchaseOrders, salesOrders, shipments, inventoryStatuses, departments, inventory, locations, pallets, purchaseOrderLines, salesOrderLines, stockMovements, tasks, mheTypes, taskStatuses, taskTypes, bookingTasks, putawayTasks, unloadingTasks, pickingTasks, loadingTasks, replenishmentTasks, cycleCountTasks, timeClockEntries, halls, zoneTypes, shipmentSalesOrders, taskEligibleDepartments, employeeDepartments, employeeLicenses } from "./schema";
+import { warehouseConfigs, warehouses, organizations, users, employees, positionTypes, items, customers, suppliers, carriers, purchaseOrders, salesOrders, shipments, inventoryStatuses, departments, inventory, locations, pallets, purchaseOrderLines, salesOrderLines, stockMovements, tasks, mheTypes, taskStatuses, taskTypes, bookingTasks, putawayTasks, unloadingTasks, pickingTasks, loadingTasks, replenishmentTasks, cycleCountTasks, timeClockEntries, halls, shipmentSalesOrders, taskEligibleDepartments, employeeDepartments, employeeLicenses } from "./schema";
 
 export const warehousesRelations = relations(warehouses, ({one, many}) => ({
 	warehouseConfig: one(warehouseConfigs, {
@@ -44,7 +44,6 @@ export const warehousesRelations = relations(warehouses, ({one, many}) => ({
 	positionTypes: many(positionTypes),
 	halls: many(halls),
 	locations: many(locations),
-	zoneTypes: many(zoneTypes),
 }));
 
 export const warehouseConfigsRelations = relations(warehouseConfigs, ({many}) => ({
@@ -342,10 +341,6 @@ export const locationsRelations = relations(locations, ({one, many}) => ({
 		fields: [locations.warehouseId],
 		references: [warehouses.warehouseId]
 	}),
-	zoneType: one(zoneTypes, {
-		fields: [locations.zoneId],
-		references: [zoneTypes.zoneId]
-	}),
 }));
 
 export const palletsRelations = relations(pallets, ({one, many}) => ({
@@ -602,14 +597,6 @@ export const hallsRelations = relations(halls, ({one, many}) => ({
 		references: [warehouses.warehouseId]
 	}),
 	locations: many(locations),
-}));
-
-export const zoneTypesRelations = relations(zoneTypes, ({one, many}) => ({
-	locations: many(locations),
-	warehouse: one(warehouses, {
-		fields: [zoneTypes.warehouseId],
-		references: [warehouses.warehouseId]
-	}),
 }));
 
 export const shipmentSalesOrdersRelations = relations(shipmentSalesOrders, ({one}) => ({
