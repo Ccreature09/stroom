@@ -57,6 +57,16 @@ export const RUN_BREAK_MM = 1500;
 export const PERIMETER_OFFSET_MM = 1500;
 /** Longest cross-aisle the compiler will invent between corridor ends. */
 export const MAX_CONNECTOR_MM = 20000;
+/**
+ * Cell size of the spatial index used to find the nearest network segment to a
+ * pick face or a door.
+ *
+ * Sized against the query radii it serves (MAX_CORRIDOR_MM for a pick face,
+ * MAX_CONNECTOR_MM for a portal) so an ordinary lookup sweeps a handful of
+ * cells rather than hundreds. Smaller would file long lanes into more buckets
+ * for no gain; larger would put too much of the network in each one.
+ */
+export const SEGMENT_INDEX_CELL_MM = 4000;
 /** Lattice spacing for a free-roam zone that does not state its own. */
 export const ZONE_DEFAULT_PITCH_MM = 2000;
 /**
@@ -1577,6 +1587,34 @@ export function compileNavigationGraph(input: CompilerInput): CompileResult {
   //    materialised so each attachment becomes a genuine junction.
   const attachmentCuts = new Map<number, Point[]>();
 
+  // Spatial index over the working network, built once.
+  //
+  // This used to be a full scan of `working` per call, and it is called once
+  // per portal and once per bay footprint. A DC with 25k footprints against a
+  // 10k-segment network (which is ordinary once zone lattices contribute) is
+  // 250M segment projections in a single synchronous pass -- the compile does
+  // not finish, it times out.
+  //
+  // Each segment is filed under every cell its bounding box touches. That is a
+  // superset of the cells it actually crosses, which costs a few redundant
+  // candidates and buys a much simpler build.
+  const segmentIndex = new Map<string, number[]>();
+  const indexCell = (v: number) => Math.floor(v / SEGMENT_INDEX_CELL_MM);
+  working.forEach((segment, index) => {
+    const cx0 = indexCell(Math.min(segment.a.x, segment.b.x));
+    const cx1 = indexCell(Math.max(segment.a.x, segment.b.x));
+    const cy0 = indexCell(Math.min(segment.a.y, segment.b.y));
+    const cy1 = indexCell(Math.max(segment.a.y, segment.b.y));
+    for (let cx = cx0; cx <= cx1; cx++) {
+      for (let cy = cy0; cy <= cy1; cy++) {
+        const key = `${cx}:${cy}`;
+        const bucket = segmentIndex.get(key);
+        if (bucket) bucket.push(index);
+        else segmentIndex.set(key, [index]);
+      }
+    }
+  });
+
   function projectOntoNetwork(
     target: Point,
     maxDistance: number,
@@ -1585,14 +1623,36 @@ export function compileNavigationGraph(input: CompilerInput): CompileResult {
     let bestDistance = Infinity;
     let bestIndex = -1;
 
-    working.forEach((segment, index) => {
-      const projection = projectOntoSegment(target, segment);
-      if (projection.distance < bestDistance) {
-        bestDistance = projection.distance;
-        bestPoint = projection.point;
-        bestIndex = index;
+    // Sweeping every cell overlapping the disc of radius `maxDistance` is what
+    // makes this exact rather than approximate: if a segment lies within that
+    // radius, the closest point on it does too, that point falls in a swept
+    // cell, and the segment's bounding box covers that point -- so it is in
+    // that cell's bucket. Anything the sweep misses was further away than
+    // `maxDistance` and would have been rejected below regardless.
+    const cx0 = indexCell(target.x - maxDistance);
+    const cx1 = indexCell(target.x + maxDistance);
+    const cy0 = indexCell(target.y - maxDistance);
+    const cy1 = indexCell(target.y + maxDistance);
+
+    const considered = new Set<number>();
+    for (let cx = cx0; cx <= cx1; cx++) {
+      for (let cy = cy0; cy <= cy1; cy++) {
+        const bucket = segmentIndex.get(`${cx}:${cy}`);
+        if (!bucket) continue;
+        for (const index of bucket) {
+          // A segment spanning several swept cells appears in each of them.
+          if (considered.has(index)) continue;
+          considered.add(index);
+
+          const projection = projectOntoSegment(target, working[index]);
+          if (projection.distance < bestDistance) {
+            bestDistance = projection.distance;
+            bestPoint = projection.point;
+            bestIndex = index;
+          }
+        }
       }
-    });
+    }
 
     if (!bestPoint || bestDistance > maxDistance) return null;
     const list = attachmentCuts.get(bestIndex) ?? [];
