@@ -14,6 +14,7 @@
 import type { Point } from "./geometry";
 import {
   MAP_MATCH_TOLERANCE_MM,
+  congestionImpedance,
   matchToEdge,
   type MatchableEdge,
 } from "./live-map";
@@ -412,13 +413,16 @@ export function advanceCongestionState(
   };
 }
 
-/** Same curve as live-map.ts's congestionImpedance -- capped, so a busy
- *  aisle is discouraged, never treated as impassable. */
-function congestionMultiplierFor(ratio: number): number {
-  const threshold = 0.75;
-  if (ratio <= threshold) return 1;
-  return Math.min(3, 1 + (ratio - threshold) * 2);
-}
+/**
+ * The impedance curve, imported rather than restated.
+ *
+ * This was a second copy with its own hardcoded 0.75 threshold. Two
+ * implementations of the same curve is a slow-motion bug: tuning one leaves
+ * the live map's congestion colouring and the router's actual impedance
+ * disagreeing about what "congested" means, and nothing fails loudly when
+ * they diverge.
+ */
+const congestionMultiplierFor = congestionImpedance;
 
 // --- Heatmap ----------------------------------------------------------
 

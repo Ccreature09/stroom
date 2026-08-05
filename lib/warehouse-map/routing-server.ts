@@ -61,6 +61,34 @@ export type RoutePreview = {
 type CacheEntry = { key: string; graph: CompiledRoutingGraph };
 const graphCache = new Map<number, CacheEntry>();
 
+/**
+ * How many halls' graphs to keep resident.
+ *
+ * Each entry is a compiled CSR graph -- a few hundred KB of typed arrays for a
+ * normal hall, and it never shrinks once built. The map was unbounded and
+ * keyed by hall, so a long-lived process touching many halls (an org with
+ * dozens of sites, or a warmed serverless instance) accumulated every one of
+ * them for the lifetime of the process. Routing is strongly local in practice:
+ * a few halls are active at a time, so a small cache keeps the hit rate while
+ * bounding the footprint.
+ */
+const GRAPH_CACHE_MAX_HALLS = 8;
+
+/**
+ * Least-recently-used eviction, riding on Map's insertion ordering: deleting
+ * and re-setting a key moves it to the end, so the first key is always the
+ * coldest.
+ */
+function rememberGraph(hallId: number, entry: CacheEntry) {
+  graphCache.delete(hallId);
+  graphCache.set(hallId, entry);
+  while (graphCache.size > GRAPH_CACHE_MAX_HALLS) {
+    const coldest = graphCache.keys().next();
+    if (coldest.done) break;
+    graphCache.delete(coldest.value);
+  }
+}
+
 async function loadRoutingGraph(
   warehouseId: number,
   hallId: number,
@@ -69,7 +97,11 @@ async function loadRoutingGraph(
 ): Promise<CompiledRoutingGraph> {
   const key = `${layoutVersion}:${graphEpoch}`;
   const cached = graphCache.get(hallId);
-  if (cached && cached.key === key) return cached.graph;
+  if (cached && cached.key === key) {
+    // Re-record so a hall in active use does not age out from under itself.
+    rememberGraph(hallId, cached);
+    return cached.graph;
+  }
 
   // Scoped by warehouse as well as hall. Callers gate on hall ownership before
   // reaching here, but that is a check-then-use; keeping the predicate on the
@@ -121,7 +153,7 @@ async function loadRoutingGraph(
     })),
   );
 
-  graphCache.set(hallId, { key, graph });
+  rememberGraph(hallId, { key, graph });
   return graph;
 }
 
