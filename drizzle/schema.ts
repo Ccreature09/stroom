@@ -1924,6 +1924,15 @@ export const assetPositionHistory = pgTable(
       table.assetRefId.asc().nullsLast().op("int4_ops"),
       table.observedAt.desc().nullsLast().op("timestamptz_ops"),
     ),
+    // The traffic rollup and the heatmap both read
+    // `WHERE hall_id = ? AND observed_at > ?`, and neither index above leads
+    // with hall_id -- so the highest-volume table in the schema was being
+    // scanned on every rollup.
+    index("idx_asset_position_history_hall_time").using(
+      "btree",
+      table.hallId.asc().nullsLast().op("int4_ops"),
+      table.observedAt.desc().nullsLast().op("timestamptz_ops"),
+    ),
     foreignKey({
       columns: [table.warehouseId],
       foreignColumns: [warehouses.warehouseId],
@@ -2042,6 +2051,15 @@ export const edgeTraversals = pgTable(
       table.warehouseId.asc().nullsLast().op("int4_ops"),
       table.enteredAt.desc().nullsLast().op("timestamptz_ops"),
     ),
+    // The rollup's high-water-mark probe is
+    // `WHERE hall_id = ? ORDER BY exited_at DESC LIMIT 1`, and its
+    // re-aggregation read filters `hall_id` + `entered_at`. Neither index
+    // above leads with hall_id, so both were scanning the table.
+    index("idx_edge_traversals_hall_time").using(
+      "btree",
+      table.hallId.asc().nullsLast().op("int4_ops"),
+      table.exitedAt.desc().nullsLast().op("timestamptz_ops"),
+    ),
     foreignKey({
       columns: [table.edgeId],
       foreignColumns: [navEdges.edgeId],
@@ -2054,6 +2072,18 @@ export const edgeTraversals = pgTable(
     }).onDelete("cascade"),
     check("chk_edge_traversal_duration", sql`duration_ms >= 0`),
     check("chk_edge_traversal_order", sql`exited_at >= entered_at`),
+    // One asset can only enter one edge once at a given instant, so this
+    // identifies a traversal event uniquely. It exists to make the rollup
+    // genuinely idempotent: two concurrent runs read the same high-water mark
+    // and recompute the same traversals, and without this both inserted them,
+    // permanently inflating every count and percentile downstream with no way
+    // to tell the duplicates apart afterwards.
+    unique("uq_edge_traversal_event").on(
+      table.edgeId,
+      table.assetKind,
+      table.assetRefId,
+      table.enteredAt,
+    ),
   ],
 );
 
