@@ -109,6 +109,7 @@ export async function runTrafficRollup(
         tx
           .select({
             edgeId: navEdges.edgeId,
+            edgeKey: navEdges.edgeKey,
             fromNodeId: navEdges.fromNodeId,
             toNodeId: navEdges.toNodeId,
             lengthMm: navEdges.lengthMm,
@@ -144,6 +145,16 @@ export async function runTrafficRollup(
       }
 
       const nodeById = new Map(nodeRows.map((n) => [n.nodeId, n]));
+      // Map-matching and aggregation work in live numeric edge ids -- they are
+      // valid for the length of one run. Only persistence uses edge_key, so
+      // the translation happens at the database boundary and the pure traffic
+      // layer stays unaware of it.
+      const keyByEdgeId = new Map<number, string>();
+      const edgeIdByKey = new Map<string, number>();
+      for (const edge of edgeRows) {
+        keyByEdgeId.set(edge.edgeId, edge.edgeKey);
+        edgeIdByKey.set(edge.edgeKey, edge.edgeId);
+      }
       const matchableEdges: MatchableEdge[] = [];
       for (const edge of edgeRows) {
         const from = nodeById.get(edge.fromNodeId);
@@ -199,7 +210,7 @@ export async function runTrafficRollup(
               organizationId,
               warehouseId,
               hallId,
-              edgeId: t.edgeId,
+              edgeKey: keyByEdgeId.get(t.edgeId)!,
               assetKind: t.assetKind,
               assetRefId: t.assetRefId,
               enteredAt: new Date(t.enteredAt).toISOString(),
@@ -209,7 +220,8 @@ export async function runTrafficRollup(
           )
           .onConflictDoNothing({
             target: [
-              edgeTraversals.edgeId,
+              edgeTraversals.hallId,
+              edgeTraversals.edgeKey,
               edgeTraversals.assetKind,
               edgeTraversals.assetRefId,
               edgeTraversals.enteredAt,
@@ -240,7 +252,7 @@ export async function runTrafficRollup(
 
         const existing = await tx
           .select({
-            edgeId: edgeTraversals.edgeId,
+            edgeKey: edgeTraversals.edgeKey,
             assetKind: edgeTraversals.assetKind,
             assetRefId: edgeTraversals.assetRefId,
             enteredAt: edgeTraversals.enteredAt,
@@ -252,7 +264,10 @@ export async function runTrafficRollup(
             and(
               eq(edgeTraversals.warehouseId, warehouseId),
               eq(edgeTraversals.hallId, hallId),
-              inArray(edgeTraversals.edgeId, Array.from(touchedEdgeIds)),
+              inArray(
+              edgeTraversals.edgeKey,
+              Array.from(touchedEdgeIds, (id) => keyByEdgeId.get(id)!),
+            ),
               gte(edgeTraversals.enteredAt, new Date(earliest).toISOString()),
             ),
           );
@@ -260,7 +275,9 @@ export async function runTrafficRollup(
         const forAggregation = existing
           .filter((t) => new Date(t.enteredAt).getTime() < latestEnd)
           .map((t) => ({
-            edgeId: t.edgeId,
+            // Back to a live id for aggregation. The filter above only asked
+            // for keys we just matched, so every row here resolves.
+            edgeId: edgeIdByKey.get(t.edgeKey)!,
             assetKind: t.assetKind,
             assetRefId: t.assetRefId,
             enteredAt: new Date(t.enteredAt).getTime(),
@@ -291,7 +308,7 @@ export async function runTrafficRollup(
                 organizationId,
                 warehouseId,
                 hallId,
-                edgeId: stat.edgeId,
+                edgeKey: keyByEdgeId.get(stat.edgeId)!,
                 bucketStart: new Date(stat.bucketStartMs).toISOString(),
                 bucketMinutes,
                 traversalCount: stat.traversalCount,
@@ -302,7 +319,11 @@ export async function runTrafficRollup(
               })),
             )
             .onConflictDoUpdate({
-              target: [edgeTrafficStats.edgeId, edgeTrafficStats.bucketStart],
+              target: [
+            edgeTrafficStats.hallId,
+            edgeTrafficStats.edgeKey,
+            edgeTrafficStats.bucketStart,
+          ],
               set: {
                 traversalCount: sql`excluded.traversal_count`,
                 p50DurationMs: sql`excluded.p50_duration_ms`,
@@ -332,17 +353,25 @@ export async function runTrafficRollup(
         if (latestStatByEdge.size > 0) {
           const priorStates = await tx
             .select({
-              edgeId: edgeCongestionState.edgeId,
+              edgeKey: edgeCongestionState.edgeKey,
               smoothedRatio: edgeCongestionState.smoothedRatio,
               activeMultiplier: edgeCongestionState.activeMultiplier,
             })
             .from(edgeCongestionState)
             .where(
-              inArray(edgeCongestionState.edgeId, Array.from(latestStatByEdge.keys())),
+              and(
+                eq(edgeCongestionState.hallId, hallId),
+                inArray(
+                  edgeCongestionState.edgeKey,
+                  Array.from(latestStatByEdge.keys(), (id) => keyByEdgeId.get(id)!),
+                ),
+              ),
             );
-          const priorByEdge = new Map(priorStates.map((s) => [s.edgeId, s]));
+          const priorByEdge = new Map(
+            priorStates.map((s) => [edgeIdByKey.get(s.edgeKey)!, s]),
+          );
           const nextStates: Array<{
-            edgeId: number;
+            edgeKey: string;
             warehouseId: number;
             hallId: number;
             smoothedRatio: string;
@@ -371,7 +400,7 @@ export async function runTrafficRollup(
             );
 
             nextStates.push({
-              edgeId,
+              edgeKey: keyByEdgeId.get(edgeId)!,
               warehouseId,
               hallId,
               smoothedRatio: next.smoothedRatio.toFixed(3),
@@ -385,7 +414,10 @@ export async function runTrafficRollup(
               .insert(edgeCongestionState)
               .values(nextStates)
               .onConflictDoUpdate({
-                target: edgeCongestionState.edgeId,
+                target: [
+                  edgeCongestionState.hallId,
+                  edgeCongestionState.edgeKey,
+                ],
                 set: {
                   smoothedRatio: sql`excluded.smoothed_ratio`,
                   activeMultiplier: sql`excluded.active_multiplier`,
@@ -431,9 +463,25 @@ export async function getBottlenecks(
   await requireLiveMapHall(warehouseId, hallId);
 
   const since = new Date(Date.now() - lookbackMinutes * 60_000).toISOString();
+
+  // Stats persist against the stable key, so resolving live ids means going
+  // through the current graph. A key with no row here belongs to an edge that
+  // no longer exists -- its history is retained but there is nothing on the
+  // map to point at, so it drops out below.
+  const liveEdges = await db
+    .select({
+      edgeId: navEdges.edgeId,
+      edgeKey: navEdges.edgeKey,
+      fromNodeId: navEdges.fromNodeId,
+      toNodeId: navEdges.toNodeId,
+    })
+    .from(navEdges)
+    .where(and(eq(navEdges.warehouseId, warehouseId), eq(navEdges.hallId, hallId)));
+  const edgeIdByKey = new Map(liveEdges.map((e) => [e.edgeKey, e.edgeId]));
+
   const statRows = await db
     .select({
-      edgeId: edgeTrafficStats.edgeId,
+      edgeKey: edgeTrafficStats.edgeKey,
       bucketStartMs: sql<string>`extract(epoch from ${edgeTrafficStats.bucketStart}) * 1000`,
       traversalCount: edgeTrafficStats.traversalCount,
       p50DurationMs: edgeTrafficStats.p50DurationMs,
@@ -450,28 +498,25 @@ export async function getBottlenecks(
       ),
     );
 
-  const stats = statRows.map((row) => ({
-    edgeId: row.edgeId,
-    bucketStartMs: Math.round(Number(row.bucketStartMs)),
-    traversalCount: row.traversalCount,
-    p50DurationMs: row.p50DurationMs ?? 0,
-    p95DurationMs: row.p95DurationMs ?? 0,
-    meanOccupancy: Number(row.meanOccupancy ?? 0),
-    observedSpeedMms: row.observedSpeedMms,
-  }));
+  const stats = statRows.flatMap((row) => {
+    const edgeId = edgeIdByKey.get(row.edgeKey);
+    if (edgeId === undefined) return [];
+    return [{
+      edgeId,
+      bucketStartMs: Math.round(Number(row.bucketStartMs)),
+      traversalCount: row.traversalCount,
+      p50DurationMs: row.p50DurationMs ?? 0,
+      p95DurationMs: row.p95DurationMs ?? 0,
+      meanOccupancy: Number(row.meanOccupancy ?? 0),
+      observedSpeedMms: row.observedSpeedMms,
+    }];
+  });
 
   const bottlenecks = detectBottlenecks(stats);
   if (bottlenecks.length === 0) return [];
 
-  const edgeIds = bottlenecks.map((b) => b.edgeId);
-  const edgeRows = await db
-    .select({
-      edgeId: navEdges.edgeId,
-      fromNodeId: navEdges.fromNodeId,
-      toNodeId: navEdges.toNodeId,
-    })
-    .from(navEdges)
-    .where(inArray(navEdges.edgeId, edgeIds));
+  const flagged = new Set(bottlenecks.map((b) => b.edgeId));
+  const edgeRows = liveEdges.filter((e) => flagged.has(e.edgeId));
 
   const nodeIds = Array.from(
     new Set(edgeRows.flatMap((e) => [e.fromNodeId, e.toNodeId])),
@@ -544,12 +589,23 @@ export async function getCongestionMultipliers(
 ): Promise<Map<number, number>> {
   await requireLiveMapHall(warehouseId, hallId);
 
+  // Joined to the live graph so the caller gets edge ids it can apply to a
+  // compiled routing graph. State for an edge that no longer exists is kept in
+  // the table -- redrawing that aisle brings its learned congestion back --
+  // but has nothing to apply to right now, so the join drops it.
   const rows = await db
     .select({
-      edgeId: edgeCongestionState.edgeId,
+      edgeId: navEdges.edgeId,
       activeMultiplier: edgeCongestionState.activeMultiplier,
     })
     .from(edgeCongestionState)
+    .innerJoin(
+      navEdges,
+      and(
+        eq(navEdges.hallId, edgeCongestionState.hallId),
+        eq(navEdges.edgeKey, edgeCongestionState.edgeKey),
+      ),
+    )
     .where(
       and(
         eq(edgeCongestionState.warehouseId, warehouseId),

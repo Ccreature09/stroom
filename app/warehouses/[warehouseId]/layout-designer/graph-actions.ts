@@ -273,6 +273,10 @@ export async function compileHallGraph(
             hallId,
             fromNodeId: nodeIdByKey.get(edge.fromKey)!,
             toNodeId: nodeIdByKey.get(edge.toKey)!,
+            // Geometry-derived and therefore stable across this very
+            // delete-and-reinsert: it is what lets the traffic tables keep
+            // their history through a recompile.
+            edgeKey: edge.edgeKey,
             traversal: edge.traversal,
             edgeKind: edge.edgeKind,
             lengthMm: edge.lengthMm,

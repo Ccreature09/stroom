@@ -199,6 +199,8 @@ export type CompiledNode = {
 export type CompiledEdge = {
   fromKey: string;
   toKey: string;
+  /** Geometry-derived identity that survives a recompile. See `edgeKeyFor`. */
+  edgeKey: string;
   edgeKind:
     | "LANE"
     | "AISLE"
@@ -565,6 +567,49 @@ export function inferCorridors(
 }
 
 // --- Graph assembly -------------------------------------------------------
+
+/**
+ * Stable, geometry-derived identity for an edge.
+ *
+ * `nav_edges.edge_id` is a serial, and recompiling deletes every generated row
+ * and inserts replacements -- so the aisle down the middle of a hall gets a
+ * brand new id each time even though nothing about it changed. Anything that
+ * accumulates per-edge history (traversals, learned travel time, the damped
+ * congestion EWMA) has to hang off something that does NOT change, or a
+ * routine recompile silently wipes it.
+ *
+ * Two properties matter:
+ *
+ *   - **Order-independent.** An edge is stored once per physical connection
+ *     with direction as an attribute, so `a→b` and `b→a` must key identically.
+ *   - **Quantised to SNAP_MM.** That is already the compiler's own resolution
+ *     for "these are the same node", so two points closer than it cannot be
+ *     distinct edges -- which is exactly the guarantee needed for a key
+ *     collision to be impossible between genuinely different edges. Coarser
+ *     would risk merging distinct edges (history attributed to the wrong one);
+ *     finer would split unchanged edges on sub-millimetre jitter.
+ *
+ * The failure direction is deliberately safe: if geometry really moved, the
+ * key changes and history detaches, which is correct. It can never attach one
+ * edge's history to a different edge.
+ *
+ * Coordinates are hall-local, so callers must scope on `hall_id` as well --
+ * two halls can legitimately produce the same key.
+ */
+export function edgeKeyFor(
+  a: { xMm: number; yMm: number },
+  b: { xMm: number; yMm: number },
+  floorLevel: number,
+): string {
+  // Math.round(v) === Math.floor(v + 0.5) for every finite v, which is what
+  // lets the SQL backfill reproduce this exactly.
+  const q = (v: number) => Math.floor(v / SNAP_MM + 0.5);
+  const ka = `${q(a.xMm)}:${q(a.yMm)}`;
+  const kb = `${q(b.xMm)}:${q(b.yMm)}`;
+  return ka <= kb
+    ? `${floorLevel}:${ka}|${kb}`
+    : `${floorLevel}:${kb}|${ka}`;
+}
 
 function snapKey(point: Point, floorLevel: number): string {
   return `${floorLevel}:${Math.round(point.x / SNAP_MM)}:${Math.round(point.y / SNAP_MM)}`;
@@ -1799,7 +1844,7 @@ export function compileNavigationGraph(input: CompilerInput): CompileResult {
   function addEdge(
     fromKey: string,
     toKey: string,
-    template: Omit<CompiledEdge, "fromKey" | "toKey" | "lengthMm">,
+    template: Omit<CompiledEdge, "fromKey" | "toKey" | "lengthMm" | "edgeKey">,
     lengthMm?: number,
   ) {
     if (fromKey === toKey) return;
@@ -1814,6 +1859,11 @@ export function compileNavigationGraph(input: CompilerInput): CompileResult {
       ...template,
       fromKey,
       toKey,
+      // Derived from the materialised node coordinates rather than from
+      // fromKey/toKey. Node keys are the snapKey of whichever point happened to
+      // create the node first within a merge cluster, so they shift with
+      // segment iteration order; the coordinates do not.
+      edgeKey: edgeKeyFor(from, to, floorLevel),
       lengthMm:
         lengthMm ??
         Math.round(Math.hypot(to.xMm - from.xMm, to.yMm - from.yMm)),
