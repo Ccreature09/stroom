@@ -1,6 +1,6 @@
 "use server";
 
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray, or } from "drizzle-orm";
 import { db } from "@/lib/db";
 import {
   halls,
@@ -217,16 +217,27 @@ export async function compileHallGraph(
         );
       const generatedNodeIds = generatedNodes.map((n) => n.nodeId);
 
-      await tx
-        .delete(navEdges)
-        .where(
-          and(
-            eq(navEdges.warehouseId, warehouseId),
-            eq(navEdges.hallId, hallId),
-            eq(navEdges.isGenerated, true),
-          ),
-        );
       if (generatedNodeIds.length > 0) {
+        // Scoped to THIS floor's generated nodes. nav_edges carries no
+        // floor_level of its own, so a hall-wide delete wiped every floor's
+        // edges while only this floor's nodes were replaced -- compiling
+        // floor 2 left floor 1 with nodes and no edges, silently unroutable.
+        // Every edge the compiler emits joins two nodes it generated, so
+        // matching on either endpoint covers exactly its own output and
+        // leaves hand-placed edges alone.
+        await tx
+          .delete(navEdges)
+          .where(
+            and(
+              eq(navEdges.warehouseId, warehouseId),
+              eq(navEdges.hallId, hallId),
+              eq(navEdges.isGenerated, true),
+              or(
+                inArray(navEdges.fromNodeId, generatedNodeIds),
+                inArray(navEdges.toNodeId, generatedNodeIds),
+              ),
+            ),
+          );
         // Access points cascade from nav_nodes, but deleting them explicitly
         // keeps the intent obvious rather than relying on the FK.
         await tx
@@ -365,17 +376,24 @@ export async function clearHallGraph(
           eq(navNodes.isGenerated, true),
         ),
       );
-    await tx
-      .delete(navEdges)
-      .where(
-        and(
-          eq(navEdges.warehouseId, warehouseId),
-          eq(navEdges.hallId, hallId),
-          eq(navEdges.isGenerated, true),
-        ),
-      );
     const ids = generated.map((n) => n.nodeId);
     if (ids.length > 0) {
+      // Same floor-scoping as compileHallGraph: nav_edges has no floor of its
+      // own, so deleting hall-wide would clear other floors' edges too and
+      // leave their nodes stranded.
+      await tx
+        .delete(navEdges)
+        .where(
+          and(
+            eq(navEdges.warehouseId, warehouseId),
+            eq(navEdges.hallId, hallId),
+            eq(navEdges.isGenerated, true),
+            or(
+              inArray(navEdges.fromNodeId, ids),
+              inArray(navEdges.toNodeId, ids),
+            ),
+          ),
+        );
       await tx
         .delete(locationAccessPoints)
         .where(inArray(locationAccessPoints.nodeId, ids));
