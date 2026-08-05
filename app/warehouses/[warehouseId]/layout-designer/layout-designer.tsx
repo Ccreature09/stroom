@@ -618,6 +618,19 @@ export default function LayoutDesigner({
   const canUndoHall = (hallHistory?.past.length ?? 0) > 0;
   const canRedoHall = (hallHistory?.future.length ?? 0) > 0;
 
+  // The hall as the user currently sees it, draft applied -- the same
+  // base-plus-staged-patch projection `effectiveLocations` and
+  // `effectiveFeatures` use, and for the same reason.
+  //
+  // The canvas needs this rather than the saved row: hall dimensions are what
+  // every in-bounds clamp measures against, so handing it the stale size meant
+  // resizing a hall left you unable to place anything in the space you had
+  // just added, until you saved and reloaded.
+  const effectiveHall = useMemo(
+    () => ({ ...hall, ...hallDraft }),
+    [hall, hallDraft],
+  );
+
   const pendingCount = useMemo(() => {
     let sum = 0;
     for (const history of Object.values(draftState)) {
@@ -1361,7 +1374,7 @@ export default function LayoutDesigner({
       <div className="relative flex min-w-0 flex-1 p-3 bg-muted/30">
         <div className="h-full w-full overflow-hidden rounded-xl shadow-sm">
           <LayoutDesignerCanvas
-            hall={hall}
+            hall={effectiveHall}
             locations={effectiveLocations}
             features={effectiveFeatures}
             featureKinds={featureKinds}

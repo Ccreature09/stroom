@@ -470,6 +470,10 @@ export default function LayoutDesignerCanvas({
   const locationLayerRef = useRef<Container | null>(null);
   const featureLayerRef = useRef<Container | null>(null);
   const underlayLayerRef = useRef<Container | null>(null);
+  // Hall floor plate and the grid redraw, kept reachable so a hall resize can
+  // be applied in place instead of tearing the whole Pixi app down.
+  const floorRef = useRef<Graphics | null>(null);
+  const redrawGridRef = useRef<(() => void) | null>(null);
   const underlaySpriteRef = useRef<Sprite | null>(null);
   // Which image is on screen, by stable storage path -- NOT by signed URL,
   // which is re-minted on every server render and so never compares equal.
@@ -1814,6 +1818,7 @@ export default function LayoutDesignerCanvas({
         .fill({ color: 0xffffff })
         .stroke({ width: 60, color: 0x1e293b });
       viewport.addChild(floor);
+      floorRef.current = floor;
 
       const grid = new Graphics();
       viewport.addChild(grid);
@@ -1821,6 +1826,10 @@ export default function LayoutDesignerCanvas({
       function drawDynamicGrid() {
         grid.clear();
         const scale = viewport.scale.x;
+        // Live ref, not the closed-over prop: the hall can be resized in the
+        // draft without the Pixi app being rebuilt.
+        const { physicalWidthMm: hallWidth, physicalLengthMm: hallLength } =
+          stateRef.current.hall;
 
         let stepMm = 10000;
         if (scale > 1.0) {
@@ -1833,11 +1842,11 @@ export default function LayoutDesignerCanvas({
         const majorStrokeWidth = 3 / scale;
         const minorStrokeWidth = 1 / scale;
 
-        for (let x = 0; x <= hall.physicalWidthMm; x += stepMm) {
+        for (let x = 0; x <= hallWidth; x += stepMm) {
           const isMajor = Math.round(x / stepMm) % majorEvery === 0;
           grid
             .moveTo(x, 0)
-            .lineTo(x, hall.physicalLengthMm)
+            .lineTo(x, hallLength)
             .stroke({
               width: isMajor ? majorStrokeWidth : minorStrokeWidth,
               color: isMajor ? 0xcbd5e1 : 0xe2e8f0,
@@ -1845,11 +1854,11 @@ export default function LayoutDesignerCanvas({
             });
         }
 
-        for (let y = 0; y <= hall.physicalLengthMm; y += stepMm) {
+        for (let y = 0; y <= hallLength; y += stepMm) {
           const isMajor = Math.round(y / stepMm) % majorEvery === 0;
           grid
             .moveTo(0, y)
-            .lineTo(hall.physicalWidthMm, y)
+            .lineTo(hallWidth, y)
             .stroke({
               width: isMajor ? majorStrokeWidth : minorStrokeWidth,
               color: isMajor ? 0xcbd5e1 : 0xe2e8f0,
@@ -1859,6 +1868,7 @@ export default function LayoutDesignerCanvas({
       }
 
       const updateScale = () => updateScaleBar(viewport);
+      redrawGridRef.current = drawDynamicGrid;
 
       viewport.on("zoomed", drawDynamicGrid);
       viewport.on("zoomed", updateScale);
@@ -2299,6 +2309,10 @@ export default function LayoutDesignerCanvas({
       underlayLayerRef.current = null;
       underlaySpriteRef.current = null;
       underlayPathRef.current = null;
+      // Both point at objects owned by the app being destroyed; a resize
+      // arriving after teardown must not reach into freed Pixi state.
+      floorRef.current = null;
+      redrawGridRef.current = null;
       // Switching hall (or leaving the designer) tears the whole Pixi app
       // down, but Pixi's Assets cache is global and outlives it -- so the
       // floorplan texture has to be released explicitly or it stays resident
@@ -2340,8 +2354,46 @@ export default function LayoutDesignerCanvas({
       }
       if (el) el.innerHTML = "";
     };
+    // Deliberately keyed on hall identity alone. Hall dimensions are editable
+    // in the draft, and including them here rebuilt the entire Pixi
+    // application on every keystroke in the width field -- destroying the
+    // renderer, re-uploading every texture, and throwing away the user's zoom
+    // and pan. A resize is applied in place by the effect below instead.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hall.hallId, hall.physicalWidthMm, hall.physicalLengthMm]);
+  }, [hall.hallId]);
+
+  // Hall resize, applied to the live scene.
+  //
+  // The canvas is handed the DRAFT-merged hall, so this runs while the change
+  // is still unsaved -- which is the point: the clamps that keep locations and
+  // features inside the building all read these dimensions, and until they
+  // update you cannot place anything in space you just added.
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    const el = containerRef.current;
+    if (!viewport || !el || !isReady) return;
+
+    viewport.worldWidth = hall.physicalWidthMm;
+    viewport.worldHeight = hall.physicalLengthMm;
+
+    const minFitScale = Math.min(
+      el.clientWidth / hall.physicalWidthMm,
+      el.clientHeight / hall.physicalLengthMm,
+    );
+    minFitScaleRef.current = minFitScale;
+    viewport.clampZoom({
+      minScale: minFitScale,
+      maxScale: Math.max(8, minFitScale * 1.5),
+    });
+    viewport.clamp({ direction: "all", underflow: "center" });
+
+    floorRef.current
+      ?.clear()
+      .rect(0, 0, hall.physicalWidthMm, hall.physicalLengthMm)
+      .fill({ color: 0xffffff })
+      .stroke({ width: 60, color: 0x1e293b });
+    redrawGridRef.current?.();
+  }, [hall.physicalWidthMm, hall.physicalLengthMm, isReady]);
 
   useEffect(() => {
     const viewport = viewportRef.current;
