@@ -682,33 +682,73 @@ export function applyCuts(
   return output;
 }
 
-/** Splits every segment at each point where it properly crosses another. */
+/**
+ * Splits every segment at each point where it properly crosses another.
+ *
+ * Candidate pairs come from a uniform grid rather than a full double loop.
+ * Two segments can only cross where their bounding boxes overlap, so filing
+ * each segment under the cells its box covers and only comparing within a cell
+ * finds exactly the same crossings. The naive version was O(n^2) over every
+ * segment in the hall -- with zone lattices contributing thousands, that is
+ * tens of millions of iterations before the compile can continue.
+ */
 export function splitAtIntersections(
   segments: WorkingSegment[],
 ): WorkingSegment[] {
   const cutsBySegment = new Map<number, Point[]>();
 
-  for (let i = 0; i < segments.length; i++) {
-    for (let j = i + 1; j < segments.length; j++) {
-      // Two lattice edges never need cutting against each other. They are
-      // built to meet only at lattice points, and the one place they do cross
-      // -- the two diagonals of a cell, which meet at its centre -- is a
-      // crossing with no junction at it: splitting there would invent a node
-      // per cell, roughly tripling the lattice and putting a kink in every
-      // diagonal run. Lattice-vs-lane crossings still split, which is what
-      // actually stitches an authored lane into the mesh.
-      if (
-        segments[i].edgeKind === "ZONE" &&
-        segments[j].edgeKind === "ZONE"
-      ) {
-        continue;
+  const cell = (v: number) => Math.floor(v / SEGMENT_INDEX_CELL_MM);
+  const buckets = new Map<string, number[]>();
+  segments.forEach((segment, index) => {
+    const cx0 = cell(Math.min(segment.a.x, segment.b.x));
+    const cx1 = cell(Math.max(segment.a.x, segment.b.x));
+    const cy0 = cell(Math.min(segment.a.y, segment.b.y));
+    const cy1 = cell(Math.max(segment.a.y, segment.b.y));
+    for (let cx = cx0; cx <= cx1; cx++) {
+      for (let cy = cy0; cy <= cy1; cy++) {
+        const key = `${cx}:${cy}`;
+        const bucket = buckets.get(key);
+        if (bucket) bucket.push(index);
+        else buckets.set(key, [index]);
       }
-      const hit = segmentIntersection(segments[i], segments[j]);
-      if (!hit) continue;
-      for (const index of [i, j]) {
-        const list = cutsBySegment.get(index) ?? [];
-        list.push(hit);
-        cutsBySegment.set(index, list);
+    }
+  });
+
+  // A pair sharing several cells would otherwise be tested once per shared
+  // cell. Testing is pure, but recording the same cut twice would leave
+  // duplicate points for applyCuts to sort through.
+  const testedPairs = new Set<number>();
+
+  for (const bucket of buckets.values()) {
+    for (let bi = 0; bi < bucket.length; bi++) {
+      for (let bj = bi + 1; bj < bucket.length; bj++) {
+        const i = Math.min(bucket[bi], bucket[bj]);
+        const j = Math.max(bucket[bi], bucket[bj]);
+
+          // Two lattice edges never need cutting against each other. They are
+          // built to meet only at lattice points, and the one place they do cross
+          // -- the two diagonals of a cell, which meet at its centre -- is a
+          // crossing with no junction at it: splitting there would invent a node
+          // per cell, roughly tripling the lattice and putting a kink in every
+          // diagonal run. Lattice-vs-lane crossings still split, which is what
+          // actually stitches an authored lane into the mesh.
+          if (
+            segments[i].edgeKind === "ZONE" &&
+            segments[j].edgeKind === "ZONE"
+          ) {
+            continue;
+          }
+          const pairId = i * segments.length + j;
+          if (testedPairs.has(pairId)) continue;
+          testedPairs.add(pairId);
+
+        const hit = segmentIntersection(segments[i], segments[j]);
+        if (!hit) continue;
+        for (const index of [i, j]) {
+          const list = cutsBySegment.get(index) ?? [];
+          list.push(hit);
+          cutsBySegment.set(index, list);
+        }
       }
     }
   }
