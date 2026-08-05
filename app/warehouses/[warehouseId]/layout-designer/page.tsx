@@ -502,6 +502,7 @@ export default async function WarehouseLayoutDesignerPage({
           underlayId: row.underlayId,
           hallId: row.hallId,
           floorLevel: row.floorLevel,
+          storagePath: row.storagePath,
           signedUrl: urlByPath.get(row.storagePath) ?? null,
           originalFilename: row.originalFilename,
           imageWidthPx: row.imageWidthPx,

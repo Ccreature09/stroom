@@ -99,6 +99,15 @@ export type UnderlayDTO = {
   underlayId: number;
   hallId: number;
   floorLevel: number;
+  /**
+   * Stable identity of the image in the bucket.
+   *
+   * `signedUrl` is NOT stable -- it carries a token minted fresh on every
+   * server render, so it differs on every page load and every router.refresh().
+   * Anything caching or change-detecting on the image must key on this instead,
+   * or it re-fetches (and re-uploads to the GPU) an image it already has.
+   */
+  storagePath: string;
   signedUrl: string | null;
   originalFilename: string | null;
   imageWidthPx: number | null;

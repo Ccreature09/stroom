@@ -471,7 +471,12 @@ export default function LayoutDesignerCanvas({
   const featureLayerRef = useRef<Container | null>(null);
   const underlayLayerRef = useRef<Container | null>(null);
   const underlaySpriteRef = useRef<Sprite | null>(null);
-  const underlayUrlRef = useRef<string | null>(null);
+  // Which image is on screen, by stable storage path -- NOT by signed URL,
+  // which is re-minted on every server render and so never compares equal.
+  const underlayPathRef = useRef<string | null>(null);
+  // The URL actually handed to Assets.load, kept solely so it can be unloaded
+  // again: Pixi's asset cache is keyed on the string that loaded it.
+  const underlayLoadedUrlRef = useRef<string | null>(null);
   const measureLayerRef = useRef<Graphics | null>(null);
   const featureGhostRef = useRef<Graphics | null>(null);
   const locationGhostRef = useRef<Graphics | null>(null);
@@ -2293,7 +2298,16 @@ export default function LayoutDesignerCanvas({
       featureLayerRef.current = null;
       underlayLayerRef.current = null;
       underlaySpriteRef.current = null;
-      underlayUrlRef.current = null;
+      underlayPathRef.current = null;
+      // Switching hall (or leaving the designer) tears the whole Pixi app
+      // down, but Pixi's Assets cache is global and outlives it -- so the
+      // floorplan texture has to be released explicitly or it stays resident
+      // for the life of the tab.
+      {
+        const loadedUrl = underlayLoadedUrlRef.current;
+        underlayLoadedUrlRef.current = null;
+        if (loadedUrl) Assets.unload(loadedUrl).catch(() => {});
+      }
       measureLayerRef.current = null;
       measureAnchorRef.current = null;
       featureGhostRef.current = null;
@@ -2385,9 +2399,21 @@ export default function LayoutDesignerCanvas({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showLabels, labelCategoryVisibility, isReady]);
 
-  // Underlay sprite. The texture is only re-fetched when the URL changes;
-  // placement (scale/offset/rotation/opacity) is applied every render, so
-  // calibrating or nudging it never round-trips the image again.
+  // Underlay sprite. The texture is only re-fetched when a *different image*
+  // arrives; placement (scale/offset/rotation/opacity) is applied every render,
+  // so calibrating or nudging it never round-trips the image again.
+  //
+  // Two things here are load-bearing, and both exist because the naive version
+  // leaked a full floorplan texture per page render:
+  //
+  //   - Change detection keys on `storagePath`, not `signedUrl`. The signed URL
+  //     carries a token re-minted on every server render, so it differs after
+  //     every save, graph compile and router.refresh() -- comparing on it meant
+  //     the "same image?" check was never true.
+  //   - Every texture that gets loaded also gets unloaded. Pixi's Assets cache
+  //     is global and holds the GPU texture by URL; destroying the Sprite
+  //     releases neither. With a rotating URL as the key, each refresh uploaded
+  //     another ~50 MB raster that nothing would ever evict.
   useEffect(() => {
     if (!isReady) return;
     const layer = underlayLayerRef.current;
@@ -2395,25 +2421,43 @@ export default function LayoutDesignerCanvas({
 
     let cancelled = false;
 
+    /** Drops the current sprite and releases its texture from the Assets cache. */
+    function releaseCurrent() {
+      underlaySpriteRef.current?.destroy();
+      underlaySpriteRef.current = null;
+      underlayPathRef.current = null;
+      const loadedUrl = underlayLoadedUrlRef.current;
+      underlayLoadedUrlRef.current = null;
+      if (loadedUrl) {
+        // Fire-and-forget: unloading is cleanup, and a failure here must not
+        // stop the next image from being shown.
+        Assets.unload(loadedUrl).catch(() => {});
+      }
+    }
+
     async function sync() {
       if (!underlay?.signedUrl || !underlay.isVisible) {
-        underlaySpriteRef.current?.destroy();
-        underlaySpriteRef.current = null;
-        underlayUrlRef.current = null;
+        releaseCurrent();
         return;
       }
 
-      if (underlayUrlRef.current !== underlay.signedUrl) {
-        underlaySpriteRef.current?.destroy();
-        underlaySpriteRef.current = null;
+      if (underlayPathRef.current !== underlay.storagePath) {
+        releaseCurrent();
+        const url = underlay.signedUrl;
         try {
-          const texture = await Assets.load(underlay.signedUrl);
-          if (cancelled) return;
+          const texture = await Assets.load(url);
+          if (cancelled) {
+            // Unmounted mid-fetch: nothing will ever draw this, so release it
+            // rather than leaving it resident for a sprite that never existed.
+            Assets.unload(url).catch(() => {});
+            return;
+          }
           const sprite = new Sprite(texture);
           sprite.eventMode = "none";
           layer!.addChild(sprite);
           underlaySpriteRef.current = sprite;
-          underlayUrlRef.current = underlay.signedUrl;
+          underlayPathRef.current = underlay.storagePath;
+          underlayLoadedUrlRef.current = url;
         } catch (err) {
           // An expired signed URL or a corrupt upload should not take the
           // whole designer down -- the layout is still fully editable.
