@@ -444,10 +444,19 @@ export const inventoryStatuses = pgTable(
   ],
 );
 
+// Equipment catalogue, scoped to one warehouse.
+//
+// Per warehouse rather than per organisation because sites genuinely differ:
+// one may run long EPTs where another runs OPTs, and "our reach trucks need
+// 2.9 m aisles" is a fact about a building, not about a company. It also gives
+// each warehouse its own class_bit space -- masks are only ever compared
+// within a single warehouse's graph, so the 31-bit ceiling is per site instead
+// of being shared across every tenant in the database.
 export const mheTypes = pgTable(
   "mhe_types",
   {
     mheTypeId: serial("mhe_type_id").primaryKey().notNull(),
+    warehouseId: integer("warehouse_id").notNull(),
     name: varchar({ length: 50 }).notNull(),
     requiresLicense: boolean("requires_license").default(true),
     maxWeightCapacityKg: integer("max_weight_capacity_kg"),
@@ -472,8 +481,23 @@ export const mheTypes = pgTable(
     maxSpeedUnladenMms: integer("max_speed_unladen_mms"),
   },
   (table) => [
-    unique("mhe_types_name_key").on(table.name),
-    unique("uq_mhe_types_class_bit").on(table.classBit),
+    index("idx_mhe_types_warehouse").using(
+      "btree",
+      table.warehouseId.asc().nullsLast().op("int4_ops"),
+    ),
+    foreignKey({
+      columns: [table.warehouseId],
+      foreignColumns: [warehouses.warehouseId],
+      name: "mhe_types_warehouse_id_fkey",
+    }).onDelete("cascade"),
+    // Both uniques are per warehouse now. Globally unique names meant one site
+    // naming a truck "Reach Truck" stopped every other site from doing so, and
+    // a globally unique class_bit meant all tenants shared a 31-slot namespace.
+    unique("uq_mhe_types_warehouse_name").on(table.warehouseId, table.name),
+    unique("uq_mhe_types_warehouse_class_bit").on(
+      table.warehouseId,
+      table.classBit,
+    ),
     // Capped at 30, not 52: the mask is manipulated with JS bitwise operators,
     // which coerce to signed 32-bit. `1 << 31` is negative and `1 << 32` wraps
     // to 1, so a bit above 30 would silently alias another vehicle class
