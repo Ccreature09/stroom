@@ -13,7 +13,9 @@ import {
   routePlans,
 } from "@/drizzle/schema";
 import {
+  HallScopeError,
   requireLiveMapContext,
+  requireLiveMapHall,
   revalidateLiveMap,
 } from "@/lib/warehouse-map/context";
 import { distanceToSegment } from "@/lib/warehouse-map/geometry";
@@ -51,8 +53,16 @@ export async function reportBlockage(
     expiresInMinutes?: number;
   },
 ): Promise<BlockageResult> {
-  const { organizationId, employeeId, canReportBlockages } =
-    await requireLiveMapContext(warehouseId);
+  let organizationId: number;
+  let employeeId: number;
+  let canReportBlockages: boolean;
+  try {
+    ({ organizationId, employeeId, canReportBlockages } =
+      await requireLiveMapHall(warehouseId, hallId));
+  } catch (err) {
+    if (err instanceof HallScopeError) return { error: err.message };
+    throw err;
+  }
   if (!canReportBlockages) {
     return { error: "You do not have permission to report blockages." };
   }
@@ -66,7 +76,11 @@ export async function reportBlockage(
       .select({ nodeId: navNodes.nodeId, xMm: navNodes.xMm, yMm: navNodes.yMm })
       .from(navNodes)
       .where(
-        and(eq(navNodes.hallId, hallId), eq(navNodes.floorLevel, floorLevel)),
+        and(
+          eq(navNodes.warehouseId, warehouseId),
+          eq(navNodes.hallId, hallId),
+          eq(navNodes.floorLevel, floorLevel),
+        ),
       ),
     db
       .select({
@@ -75,7 +89,9 @@ export async function reportBlockage(
         toNodeId: navEdges.toNodeId,
       })
       .from(navEdges)
-      .where(eq(navEdges.hallId, hallId)),
+      .where(
+        and(eq(navEdges.warehouseId, warehouseId), eq(navEdges.hallId, hallId)),
+      ),
   ]);
 
   const nodeById = new Map(nodeRows.map((n) => [n.nodeId, n]));
@@ -251,6 +267,21 @@ async function findRoutesCrossing(
  * durable snapshot, written on a state change or every ~15s. History is
  * appended only when the asset has actually moved, which is what keeps the
  * trail useful for heatmaps without it becoming a firehose.
+ *
+ * Authorisation is deliberately stricter than the rest of the live map. Every
+ * other action here only reads; this one WRITES the position of a named
+ * person, and what it writes feeds the traffic rollup, the learned travel
+ * times and the congestion multipliers the router uses. So `can_view_metrics`
+ * -- a viewing permission -- is not sufficient on its own:
+ *
+ *   - Reporting your OWN position is what a barcode scan is, so any live-map
+ *     user may do it for themselves.
+ *   - Reporting anyone else's position, or an MHE unit's, is directing and
+ *     recording floor activity, and needs `can_assign_tasks` -- the same
+ *     capability raising a blockage requires, for the same reason.
+ *
+ * Without this split, anyone who could see the map could fabricate a named
+ * colleague's location history.
  */
 export async function reportAssetPosition(
   warehouseId: number,
@@ -270,7 +301,32 @@ export async function reportAssetPosition(
     routePlanId?: number | null;
   },
 ): Promise<{ error?: string; success?: true }> {
-  const { organizationId } = await requireLiveMapContext(warehouseId);
+  let organizationId: number;
+  let employeeId: number;
+  let canReportForOthers: boolean;
+  try {
+    ({
+      organizationId,
+      employeeId,
+      canReportBlockages: canReportForOthers,
+    } = await requireLiveMapHall(warehouseId, input.hallId));
+  } catch (err) {
+    if (err instanceof HallScopeError) return { error: err.message };
+    throw err;
+  }
+
+  const isSelfReport =
+    input.assetKind === "EMPLOYEE" && input.assetRefId === employeeId;
+  if (!isSelfReport && !canReportForOthers) {
+    return {
+      error:
+        "You can only report your own position. Recording someone else's, or a vehicle's, needs task-assignment permission.",
+    };
+  }
+
+  if (!Number.isFinite(input.xMm) || !Number.isFinite(input.yMm)) {
+    return { error: "Position must be a pair of finite coordinates." };
+  }
 
   const now = new Date().toISOString();
   const values = {
@@ -338,7 +394,12 @@ export async function reportAssetPosition(
 
 /** Live snapshot for a hall: current asset positions and active blockages. */
 export async function loadLiveSnapshot(warehouseId: number, hallId: number) {
-  await requireLiveMapContext(warehouseId);
+  // Both queries below already carry `warehouse_id`, so a foreign hall would
+  // return nothing rather than leak. Gated anyway so the rule has no
+  // exceptions: every action naming a hall validates the hall, which is an
+  // invariant you can grep for -- "this one is safe for a different reason"
+  // is how the next one gets missed.
+  await requireLiveMapHall(warehouseId, hallId);
 
   const [assetRows, blockageRows] = await Promise.all([
     db

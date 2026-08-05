@@ -10,7 +10,7 @@ import {
   navEdges,
   navNodes,
 } from "@/drizzle/schema";
-import { requireLiveMapContext } from "@/lib/warehouse-map/context";
+import { requireLiveMapHall } from "@/lib/warehouse-map/context";
 import type { MatchableEdge } from "@/lib/warehouse-map/live-map";
 import {
   advanceCongestionState,
@@ -46,7 +46,7 @@ export async function runTrafficRollup(
   traversalsWritten: number;
   bucketsUpdated: number;
 }> {
-  await requireLiveMapContext(warehouseId);
+  await requireLiveMapHall(warehouseId, hallId);
 
   const bucketMinutes = options.bucketMinutes ?? 15;
   const lookbackMinutes = options.lookbackMinutes ?? 240;
@@ -57,7 +57,12 @@ export async function runTrafficRollup(
   const [latest] = await db
     .select({ exitedAt: edgeTraversals.exitedAt })
     .from(edgeTraversals)
-    .where(eq(edgeTraversals.hallId, hallId))
+    .where(
+      and(
+        eq(edgeTraversals.warehouseId, warehouseId),
+        eq(edgeTraversals.hallId, hallId),
+      ),
+    )
     .orderBy(desc(edgeTraversals.exitedAt))
     .limit(1);
 
@@ -69,7 +74,9 @@ export async function runTrafficRollup(
     db
       .select({ nodeId: navNodes.nodeId, xMm: navNodes.xMm, yMm: navNodes.yMm })
       .from(navNodes)
-      .where(eq(navNodes.hallId, hallId)),
+      .where(
+        and(eq(navNodes.warehouseId, warehouseId), eq(navNodes.hallId, hallId)),
+      ),
     db
       .select({
         edgeId: navEdges.edgeId,
@@ -78,7 +85,9 @@ export async function runTrafficRollup(
         lengthMm: navEdges.lengthMm,
       })
       .from(navEdges)
-      .where(eq(navEdges.hallId, hallId)),
+      .where(
+        and(eq(navEdges.warehouseId, warehouseId), eq(navEdges.hallId, hallId)),
+      ),
     db
       .select({
         assetKind: assetPositionHistory.assetKind,
@@ -90,6 +99,7 @@ export async function runTrafficRollup(
       .from(assetPositionHistory)
       .where(
         and(
+          eq(assetPositionHistory.warehouseId, warehouseId),
           eq(assetPositionHistory.hallId, hallId),
           gt(assetPositionHistory.observedAt, new Date(sinceMs).toISOString()),
         ),
@@ -136,7 +146,9 @@ export async function runTrafficRollup(
     const [ctx] = await db
       .select({ organizationId: navEdges.organizationId })
       .from(navEdges)
-      .where(eq(navEdges.hallId, hallId))
+      .where(
+        and(eq(navEdges.warehouseId, warehouseId), eq(navEdges.hallId, hallId)),
+      )
       .limit(1);
     organizationId = ctx?.organizationId ?? 0;
   }
@@ -192,6 +204,7 @@ export async function runTrafficRollup(
       .from(edgeTraversals)
       .where(
         and(
+          eq(edgeTraversals.warehouseId, warehouseId),
           eq(edgeTraversals.hallId, hallId),
           inArray(edgeTraversals.edgeId, Array.from(touchedEdgeIds)),
           gte(edgeTraversals.enteredAt, new Date(earliest).toISOString()),
@@ -337,7 +350,7 @@ export async function getBottlenecks(
   hallId: number,
   lookbackMinutes = 120,
 ): Promise<BottleneckDTO[]> {
-  await requireLiveMapContext(warehouseId);
+  await requireLiveMapHall(warehouseId, hallId);
 
   const since = new Date(Date.now() - lookbackMinutes * 60_000).toISOString();
   const statRows = await db
@@ -353,6 +366,7 @@ export async function getBottlenecks(
     .from(edgeTrafficStats)
     .where(
       and(
+        eq(edgeTrafficStats.warehouseId, warehouseId),
         eq(edgeTrafficStats.hallId, hallId),
         gte(edgeTrafficStats.bucketStart, since),
       ),
@@ -417,7 +431,7 @@ export async function getHeatmapCells(
   hallId: number,
   options: { cellSizeMm?: number; lookbackMinutes?: number } = {},
 ): Promise<HeatmapCell[]> {
-  await requireLiveMapContext(warehouseId);
+  await requireLiveMapHall(warehouseId, hallId);
 
   const cellSizeMm = options.cellSizeMm ?? 1000;
   const lookbackMinutes = options.lookbackMinutes ?? 120;
@@ -428,6 +442,7 @@ export async function getHeatmapCells(
     .from(assetPositionHistory)
     .where(
       and(
+        eq(assetPositionHistory.warehouseId, warehouseId),
         eq(assetPositionHistory.hallId, hallId),
         gte(assetPositionHistory.observedAt, since),
       ),
@@ -449,7 +464,7 @@ export async function getCongestionMultipliers(
   warehouseId: number,
   hallId: number,
 ): Promise<Map<number, number>> {
-  await requireLiveMapContext(warehouseId);
+  await requireLiveMapHall(warehouseId, hallId);
 
   const rows = await db
     .select({
@@ -457,7 +472,12 @@ export async function getCongestionMultipliers(
       activeMultiplier: edgeCongestionState.activeMultiplier,
     })
     .from(edgeCongestionState)
-    .where(eq(edgeCongestionState.hallId, hallId));
+    .where(
+      and(
+        eq(edgeCongestionState.warehouseId, warehouseId),
+        eq(edgeCongestionState.hallId, hallId),
+      ),
+    );
 
   const result = new Map<number, number>();
   for (const row of rows) {

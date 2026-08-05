@@ -62,6 +62,7 @@ type CacheEntry = { key: string; graph: CompiledRoutingGraph };
 const graphCache = new Map<number, CacheEntry>();
 
 async function loadRoutingGraph(
+  warehouseId: number,
   hallId: number,
   layoutVersion: number,
   graphEpoch: number,
@@ -70,6 +71,10 @@ async function loadRoutingGraph(
   const cached = graphCache.get(hallId);
   if (cached && cached.key === key) return cached.graph;
 
+  // Scoped by warehouse as well as hall. Callers gate on hall ownership before
+  // reaching here, but that is a check-then-use; keeping the predicate on the
+  // query itself is what makes a missed gate fail closed instead of silently
+  // loading another organisation's graph.
   const [nodeRows, edgeRows] = await Promise.all([
     db
       .select({
@@ -79,7 +84,9 @@ async function loadRoutingGraph(
         floorLevel: navNodes.floorLevel,
       })
       .from(navNodes)
-      .where(eq(navNodes.hallId, hallId)),
+      .where(
+        and(eq(navNodes.warehouseId, warehouseId), eq(navNodes.hallId, hallId)),
+      ),
     db
       .select({
         edgeId: navEdges.edgeId,
@@ -96,7 +103,9 @@ async function loadRoutingGraph(
         fixedDelayMs: navEdges.fixedDelayMs,
       })
       .from(navEdges)
-      .where(eq(navEdges.hallId, hallId)),
+      .where(
+        and(eq(navEdges.warehouseId, warehouseId), eq(navEdges.hallId, hallId)),
+      ),
   ]);
 
   const graph = buildRoutingGraph(
@@ -211,7 +220,12 @@ export async function computeRoutePreview(
     }
   }
 
-  const baseGraph = await loadRoutingGraph(hallId, layoutVersion, graphEpoch);
+  const baseGraph = await loadRoutingGraph(
+    warehouseId,
+    hallId,
+    layoutVersion,
+    graphEpoch,
+  );
   if (baseGraph.nodeCount === 0) {
     return { error: "This hall has no compiled navigation graph yet." };
   }

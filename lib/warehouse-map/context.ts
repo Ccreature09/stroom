@@ -181,6 +181,46 @@ export async function hallBelongsToWarehouse(
 }
 
 /**
+ * Thrown when a hall id does not belong to the warehouse the caller was
+ * authorised against.
+ *
+ * Tagged rather than a bare Error so callers with an `{ error }` channel can
+ * turn it into a message while callers without one let it propagate.
+ */
+export class HallScopeError extends Error {
+  constructor() {
+    super("That hall does not belong to this warehouse.");
+    this.name = "HallScopeError";
+  }
+}
+
+/**
+ * Live-map access check for an action that names a specific hall.
+ *
+ * `requireLiveMapContext` authorises the *warehouse*. Every live-map action
+ * additionally takes a `hallId` straight from the client and filters on it,
+ * so without this the warehouse check authorises nothing: passing another
+ * organisation's hall id reads that organisation's nav graph, traffic stats
+ * and -- worst of all -- its `asset_position_history`, which is the regulated
+ * worker-location data the permission gate above exists to protect.
+ *
+ * Callers must ALSO keep `warehouse_id` in their own predicates. This gate is
+ * a check-then-use and every query being scoped independently is what makes
+ * the window between them harmless.
+ */
+export async function requireLiveMapHall(
+  warehouseId: number,
+  hallId: number,
+): Promise<LiveMapContext> {
+  const context = await requireLiveMapContext(warehouseId);
+  if (!Number.isInteger(hallId) || hallId <= 0) throw new HallScopeError();
+  if (!(await hallBelongsToWarehouse(hallId, warehouseId))) {
+    throw new HallScopeError();
+  }
+  return context;
+}
+
+/**
  * Thrown when a publish is built on a layout version that is no longer
  * current. Carried out of the transaction as a tagged error so the caller can
  * turn it into a reviewable message instead of a generic failure.

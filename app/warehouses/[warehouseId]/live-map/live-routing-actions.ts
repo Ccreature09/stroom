@@ -1,6 +1,6 @@
 "use server";
 
-import { requireLiveMapContext } from "@/lib/warehouse-map/context";
+import { requireLiveMapHall } from "@/lib/warehouse-map/context";
 import {
   computeRoutePreview,
   type RoutePreview,
@@ -31,7 +31,7 @@ export async function previewLiveRoute(
   toLocationIds: number[],
   options: { mheTypeId?: number | null } = {},
 ): Promise<RoutePreview> {
-  const { organizationId } = await requireLiveMapContext(warehouseId);
+  const { organizationId } = await requireLiveMapHall(warehouseId, hallId);
   const congestionMultipliers = await getCongestionMultipliers(
     warehouseId,
     hallId,

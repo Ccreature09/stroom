@@ -59,6 +59,7 @@ export async function saveHallDraft(
       .delete(layoutDrafts)
       .where(
         and(
+          eq(layoutDrafts.warehouseId, warehouseId),
           eq(layoutDrafts.hallId, hallId),
           eq(layoutDrafts.employeeId, employeeId),
         ),
@@ -107,6 +108,7 @@ export async function discardHallDraft(
     .delete(layoutDrafts)
     .where(
       and(
+        eq(layoutDrafts.warehouseId, warehouseId),
         eq(layoutDrafts.hallId, hallId),
         eq(layoutDrafts.employeeId, employeeId),
       ),
@@ -194,6 +196,7 @@ export async function uploadHallUnderlay(
     .from(hallUnderlays)
     .where(
       and(
+        eq(hallUnderlays.warehouseId, warehouseId),
         eq(hallUnderlays.hallId, hallId),
         eq(hallUnderlays.floorLevel, floorLevel),
       ),

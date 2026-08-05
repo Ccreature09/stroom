@@ -2,7 +2,11 @@
 
 import { db } from "@/lib/db";
 import { mheTypes } from "@/drizzle/schema";
-import { requireLayoutContext, revalidateLayout } from "@/lib/warehouse-map/context";
+import {
+  hallBelongsToWarehouse,
+  requireLayoutContext,
+  revalidateLayout,
+} from "@/lib/warehouse-map/context";
 import {
   computeRoutePreview,
   type RoutePreview,
@@ -34,6 +38,13 @@ export async function previewRoute(
     ({ organizationId } = await requireLayoutContext(warehouseId));
   } catch (err) {
     return { error: (err as Error).message };
+  }
+
+  // `hallId` comes straight from the client and every graph query downstream
+  // filters on it alone, so authorising the warehouse authorises nothing
+  // without this.
+  if (!(await hallBelongsToWarehouse(hallId, warehouseId))) {
+    return { error: "That hall does not belong to this warehouse." };
   }
 
   const result = await computeRoutePreview(

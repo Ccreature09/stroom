@@ -754,7 +754,9 @@ export async function commitHallStates(
               }),
               updatedAt: new Date().toISOString(),
             })
-            .where(eq(halls.hallId, hallId));
+            .where(
+              and(eq(halls.hallId, hallId), eq(halls.warehouseId, warehouseId)),
+            );
         }
       }
 

@@ -77,7 +77,7 @@ export async function compileHallGraph(
       clearHeightMm: halls.clearHeightMm,
     })
     .from(halls)
-    .where(eq(halls.hallId, hallId))
+    .where(and(eq(halls.hallId, hallId), eq(halls.warehouseId, warehouseId)))
     .limit(1);
   if (!hall) return { error: "That hall no longer exists." };
 
@@ -208,6 +208,7 @@ export async function compileHallGraph(
         .from(navNodes)
         .where(
           and(
+            eq(navNodes.warehouseId, warehouseId),
             eq(navNodes.hallId, hallId),
             eq(navNodes.floorLevel, floorLevel),
             eq(navNodes.isGenerated, true),
@@ -218,7 +219,11 @@ export async function compileHallGraph(
       await tx
         .delete(navEdges)
         .where(
-          and(eq(navEdges.hallId, hallId), eq(navEdges.isGenerated, true)),
+          and(
+            eq(navEdges.warehouseId, warehouseId),
+            eq(navEdges.hallId, hallId),
+            eq(navEdges.isGenerated, true),
+          ),
         );
       if (generatedNodeIds.length > 0) {
         // Access points cascade from nav_nodes, but deleting them explicitly
@@ -335,12 +340,21 @@ export async function clearHallGraph(
     return { error: (err as Error).message };
   }
 
+  // This deletes rows selected by `hallId`, so without an ownership check the
+  // warehouse gate above authorises nothing -- a hall id from another
+  // organisation would wipe that organisation's compiled graph, and the
+  // traffic tables that cascade off nav_edges with it.
+  if (!(await hallBelongsToWarehouse(hallId, warehouseId))) {
+    return { error: "That hall does not belong to this warehouse." };
+  }
+
   await db.transaction(async (tx) => {
     const generated = await tx
       .select({ nodeId: navNodes.nodeId })
       .from(navNodes)
       .where(
         and(
+          eq(navNodes.warehouseId, warehouseId),
           eq(navNodes.hallId, hallId),
           eq(navNodes.floorLevel, floorLevel),
           eq(navNodes.isGenerated, true),
@@ -348,7 +362,13 @@ export async function clearHallGraph(
       );
     await tx
       .delete(navEdges)
-      .where(and(eq(navEdges.hallId, hallId), eq(navEdges.isGenerated, true)));
+      .where(
+        and(
+          eq(navEdges.warehouseId, warehouseId),
+          eq(navEdges.hallId, hallId),
+          eq(navEdges.isGenerated, true),
+        ),
+      );
     const ids = generated.map((n) => n.nodeId);
     if (ids.length > 0) {
       await tx
