@@ -1619,8 +1619,20 @@ export const navEdges = pgTable(
     sourceFeatureId: integer("source_feature_id"),
     isGenerated: boolean("is_generated").default(true).notNull(),
     layoutVersion: integer("layout_version").default(0).notNull(),
+
+    // Geometry-derived identity that survives a recompile -- see `edgeKeyFor`
+    // in lib/warehouse-map/graph-compiler.ts. edge_id is a serial and every
+    // recompile deletes and reinserts the generated rows, so anything that
+    // accumulates per-edge history keys on this instead. Hall-local:
+    // coordinates repeat between halls, so always pair it with hall_id.
+    edgeKey: varchar("edge_key", { length: 80 }).notNull(),
   },
   (table) => [
+    index("idx_nav_edges_key").using(
+      "btree",
+      table.hallId.asc().nullsLast().op("int4_ops"),
+      table.edgeKey.asc().nullsLast().op("text_ops"),
+    ),
     index("idx_nav_edges_hall").using(
       "btree",
       table.warehouseId.asc().nullsLast().op("int4_ops"),
@@ -2051,7 +2063,10 @@ export const edgeTraversals = pgTable(
     organizationId: integer("organization_id").notNull(),
     warehouseId: integer("warehouse_id").notNull(),
     hallId: integer("hall_id").notNull(),
-    edgeId: integer("edge_id").notNull(),
+    // Stable geometry key, not the serial edge_id: a recompile replaces every
+    // generated nav_edges row, and cascading off the serial deleted the entire
+    // traffic history every time anyone pressed "Recompile graph".
+    edgeKey: varchar("edge_key", { length: 80 }).notNull(),
     assetKind: varchar("asset_kind", { length: 20 }).notNull(),
     assetRefId: integer("asset_ref_id").notNull(),
     enteredAt: timestamp("entered_at", {
@@ -2067,7 +2082,8 @@ export const edgeTraversals = pgTable(
   (table) => [
     index("idx_edge_traversals_edge_time").using(
       "btree",
-      table.edgeId.asc().nullsLast().op("int4_ops"),
+      table.hallId.asc().nullsLast().op("int4_ops"),
+      table.edgeKey.asc().nullsLast().op("text_ops"),
       table.enteredAt.desc().nullsLast().op("timestamptz_ops"),
     ),
     index("idx_edge_traversals_warehouse_time").using(
@@ -2085,11 +2101,6 @@ export const edgeTraversals = pgTable(
       table.exitedAt.desc().nullsLast().op("timestamptz_ops"),
     ),
     foreignKey({
-      columns: [table.edgeId],
-      foreignColumns: [navEdges.edgeId],
-      name: "edge_traversals_edge_id_fkey",
-    }).onDelete("cascade"),
-    foreignKey({
       columns: [table.warehouseId],
       foreignColumns: [warehouses.warehouseId],
       name: "edge_traversals_warehouse_id_fkey",
@@ -2103,7 +2114,8 @@ export const edgeTraversals = pgTable(
     // permanently inflating every count and percentile downstream with no way
     // to tell the duplicates apart afterwards.
     unique("uq_edge_traversal_event").on(
-      table.edgeId,
+      table.hallId,
+      table.edgeKey,
       table.assetKind,
       table.assetRefId,
       table.enteredAt,
@@ -2122,7 +2134,7 @@ export const edgeTrafficStats = pgTable(
     organizationId: integer("organization_id").notNull(),
     warehouseId: integer("warehouse_id").notNull(),
     hallId: integer("hall_id").notNull(),
-    edgeId: integer("edge_id").notNull(),
+    edgeKey: varchar("edge_key", { length: 80 }).notNull(),
     bucketStart: timestamp("bucket_start", {
       withTimezone: true,
       mode: "string",
@@ -2144,7 +2156,8 @@ export const edgeTrafficStats = pgTable(
   (table) => [
     index("idx_edge_traffic_stats_edge").using(
       "btree",
-      table.edgeId.asc().nullsLast().op("int4_ops"),
+      table.hallId.asc().nullsLast().op("int4_ops"),
+      table.edgeKey.asc().nullsLast().op("text_ops"),
       table.bucketStart.desc().nullsLast().op("timestamptz_ops"),
     ),
     index("idx_edge_traffic_stats_warehouse_bucket").using(
@@ -2153,16 +2166,15 @@ export const edgeTrafficStats = pgTable(
       table.bucketStart.desc().nullsLast().op("timestamptz_ops"),
     ),
     foreignKey({
-      columns: [table.edgeId],
-      foreignColumns: [navEdges.edgeId],
-      name: "edge_traffic_stats_edge_id_fkey",
-    }).onDelete("cascade"),
-    foreignKey({
       columns: [table.warehouseId],
       foreignColumns: [warehouses.warehouseId],
       name: "edge_traffic_stats_warehouse_id_fkey",
     }).onDelete("cascade"),
-    unique("uq_edge_traffic_stats_bucket").on(table.edgeId, table.bucketStart),
+    unique("uq_edge_traffic_stats_bucket").on(
+      table.hallId,
+      table.edgeKey,
+      table.bucketStart,
+    ),
     check("chk_edge_traffic_stats_count", sql`traversal_count >= 0`),
   ],
 );
@@ -2176,9 +2188,9 @@ export const edgeTrafficStats = pgTable(
 export const edgeCongestionState = pgTable(
   "edge_congestion_state",
   {
-    edgeId: integer("edge_id").primaryKey().notNull(),
     warehouseId: integer("warehouse_id").notNull(),
     hallId: integer("hall_id").notNull(),
+    edgeKey: varchar("edge_key", { length: 80 }).notNull(),
     smoothedRatio: numeric("smoothed_ratio", { precision: 6, scale: 3 })
       .default("0")
       .notNull(),
@@ -2198,11 +2210,10 @@ export const edgeCongestionState = pgTable(
       "btree",
       table.warehouseId.asc().nullsLast().op("int4_ops"),
     ),
-    foreignKey({
-      columns: [table.edgeId],
-      foreignColumns: [navEdges.edgeId],
-      name: "edge_congestion_state_edge_id_fkey",
-    }).onDelete("cascade"),
+    primaryKey({
+      columns: [table.hallId, table.edgeKey],
+      name: "edge_congestion_state_pkey",
+    }),
     check(
       "chk_edge_congestion_multiplier",
       sql`active_multiplier >= 1 AND active_multiplier <= 3`,
