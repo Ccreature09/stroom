@@ -113,6 +113,13 @@
       "when": 1785957551126,
       "tag": "0015_drop_edge_id",
       "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1785960440422,
+      "tag": "0016_nav_edge_impedance_floor",
+      "breakpoints": true
     }
   ]
 }

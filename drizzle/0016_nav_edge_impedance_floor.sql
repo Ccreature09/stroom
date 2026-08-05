@@ -1,0 +1,13 @@
+-- A* admissibility, enforced rather than assumed.
+--
+-- The routing heuristic is straight-line distance divided by the network's
+-- fastest speed. An arc's real cost is (length / speed) * impedance, and
+-- because speed <= max_speed_mms the heuristic is a lower bound only while
+-- impedance stays at or above 1. A single edge at 0.5 would effectively
+-- traverse at twice the network maximum, the heuristic would over-estimate,
+-- and A* would silently return non-optimal routes -- no error raised, just
+-- worse paths for everyone.
+--
+-- Everything that writes impedance today (ZONE_IMPEDANCE, congestion
+-- multipliers) is already >= 1, so this codifies an existing invariant.
+ALTER TABLE "nav_edges" ADD CONSTRAINT "chk_nav_edge_impedance" CHECK (impedance >= 1.00);

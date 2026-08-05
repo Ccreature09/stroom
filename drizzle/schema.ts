@@ -1681,6 +1681,17 @@ export const navEdges = pgTable(
     ),
     check("chk_nav_edge_length", sql`length_mm >= 0`),
     check("chk_nav_edge_endpoints", sql`from_node_id <> to_node_id`),
+    // A* admissibility depends on this.
+    //
+    // The heuristic is straight-line distance over the network's fastest
+    // speed. An arc's true cost is (length / speed) * impedance, and since
+    // speed <= maxSpeedMms, the estimate stays a lower bound only while
+    // impedance never drops below 1. An edge at 0.5 would traverse at twice
+    // the network maximum, the heuristic would over-estimate, and A* would
+    // quietly return non-optimal routes -- no error, just worse paths.
+    // Congestion multipliers and ZONE_IMPEDANCE are all >= 1, so this
+    // documents and enforces what the code already assumes.
+    check("chk_nav_edge_impedance", sql`impedance >= 1.00`),
   ],
 );
 
