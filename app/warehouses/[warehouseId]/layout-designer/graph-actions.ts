@@ -149,7 +149,8 @@ export async function compileHallGraph(
           maxSpeedLadenMms: mheTypes.maxSpeedLadenMms,
           heightMm: mheTypes.heightMm,
         })
-        .from(mheTypes),
+        .from(mheTypes)
+        .where(eq(mheTypes.warehouseId, warehouseId)),
       db
         .select({ versionNumber: layoutVersions.versionNumber })
         .from(layoutVersions)

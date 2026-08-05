@@ -1,5 +1,6 @@
 "use server";
 
+import { eq } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { mheTypes } from "@/drizzle/schema";
 import {
@@ -74,6 +75,7 @@ export async function listRoutingVehicles(warehouseId: number) {
       classBit: mheTypes.classBit,
       isPedestrian: mheTypes.isPedestrian,
     })
-    .from(mheTypes);
+    .from(mheTypes)
+    .where(eq(mheTypes.warehouseId, warehouseId));
   return rows.filter((row) => row.classBit !== null);
 }

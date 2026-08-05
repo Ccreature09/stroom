@@ -113,7 +113,10 @@ export default async function PeopleRolesPage({
             eq(departments.warehouseId, pageWarehouseId),
           ),
         ),
-      db.select().from(mheTypes),
+      db
+        .select()
+        .from(mheTypes)
+        .where(eq(mheTypes.warehouseId, pageWarehouseId)),
       // Employees assigned to this warehouse (primary or current), plus
       // employees with no warehouse assignment at all (org-wide staff).
       db

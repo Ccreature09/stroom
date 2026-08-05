@@ -434,6 +434,7 @@ export default async function WarehouseLayoutDesignerPage({
         isPedestrian: mheTypes.isPedestrian,
       })
       .from(mheTypes)
+      .where(eq(mheTypes.warehouseId, parsedWarehouseId))
       .orderBy(mheTypes.name),
   ]);
 

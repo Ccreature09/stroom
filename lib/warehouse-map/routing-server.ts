@@ -207,7 +207,12 @@ export async function computeRoutePreview(
         maxSpeedLadenMms: mheTypes.maxSpeedLadenMms,
       })
       .from(mheTypes)
-      .where(eq(mheTypes.mheTypeId, options.mheTypeId))
+      .where(
+        and(
+          eq(mheTypes.warehouseId, warehouseId),
+          eq(mheTypes.mheTypeId, options.mheTypeId),
+        ),
+      )
       .limit(1);
     if (mhe?.classBit != null) {
       traveller = {

@@ -139,13 +139,30 @@ async function getValidRoleIds(roleIds: number[]) {
   return new Set(rows.map((row) => row.positionId));
 }
 
-async function getValidMheTypeIds(typeIds: number[]) {
+/**
+ * Licences are only valid if their equipment type belongs to a warehouse in
+ * the actor's own organisation.
+ *
+ * Equipment types are per-warehouse, so an unscoped lookup here would accept
+ * an mhe_type_id belonging to another tenant entirely -- same shape of hole
+ * as `getValidWarehouseIds` exists to close for warehouses. Scoped to the
+ * organisation rather than the page's warehouse because an employee can be
+ * assigned across sites, and a licence for their other warehouse is
+ * legitimate.
+ */
+async function getValidMheTypeIds(organizationId: number, typeIds: number[]) {
   if (typeIds.length === 0) return new Set<number>();
 
   const rows = await db
     .select({ mheTypeId: mheTypes.mheTypeId })
     .from(mheTypes)
-    .where(inArray(mheTypes.mheTypeId, typeIds));
+    .innerJoin(warehouses, eq(warehouses.warehouseId, mheTypes.warehouseId))
+    .where(
+      and(
+        inArray(mheTypes.mheTypeId, typeIds),
+        eq(warehouses.organizationId, organizationId),
+      ),
+    );
 
   return new Set(rows.map((row) => row.mheTypeId));
 }
@@ -310,7 +327,7 @@ export async function createEmployee(pageWarehouseId: number, formData: FormData
     redirect(buildReturnUrl(pageWarehouseId, "error", "Primary department must be one of the selected departments."));
   }
 
-  const validMheTypeIds = await getValidMheTypeIds(mheTypeIds);
+  const validMheTypeIds = await getValidMheTypeIds(actor.organizationId, mheTypeIds);
   if (mheTypeIds.some((mheTypeId) => !validMheTypeIds.has(mheTypeId))) {
     redirect(buildReturnUrl(pageWarehouseId, "error", "One or more selected licenses are invalid."));
   }
@@ -482,7 +499,7 @@ export async function syncEmployeeLicenses(pageWarehouseId: number, formData: Fo
     redirect(buildReturnUrl(pageWarehouseId, "error", "Employee not found for your organization."));
   }
 
-  const validMheTypeIds = await getValidMheTypeIds(mheTypeIds);
+  const validMheTypeIds = await getValidMheTypeIds(actor.organizationId, mheTypeIds);
   if (mheTypeIds.some((mheTypeId) => !validMheTypeIds.has(mheTypeId))) {
     redirect(buildReturnUrl(pageWarehouseId, "error", "One or more selected licenses are invalid."));
   }
