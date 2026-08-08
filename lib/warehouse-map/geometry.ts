@@ -13,6 +13,29 @@
 
 export type GeometryKind = "RECT" | "POLYGON" | "POLYLINE" | "POINT" | "CIRCLE";
 
+/**
+ * Points closer than this are treated as the same point everywhere in the
+ * warehouse-map module -- node dedup, endpoint alignment, cut placement. It
+ * lives here rather than in the graph compiler because it is a geometry
+ * tolerance, not a compiler pass: the zone-lattice builder needs it too, and
+ * a shared foundation module is what lets both depend on it without
+ * depending on each other.
+ */
+export const SNAP_MM = 250;
+/**
+ * Radius within which two points become one node. Must be strictly greater
+ * than twice SNAP_MM, and that relationship is load-bearing.
+ *
+ * The graph compiler drops a cut that lands within SNAP_MM of a segment end,
+ * because splitting there would emit a zero-length stub. When two segments
+ * cross near one of their endpoints, the cut is therefore dropped on both --
+ * and each endpoint can be up to SNAP_MM from the true intersection, so they
+ * can end up 2 x SNAP_MM apart. If the merge radius were not wider than that,
+ * the two lanes would look joined on the canvas and be disconnected in the
+ * graph.
+ */
+export const MERGE_RADIUS_MM = SNAP_MM * 2 + 50;
+
 export type Point = { x: number; y: number };
 
 export type Envelope = {
@@ -748,4 +771,44 @@ export function scaleGeometry(
       y: Math.round(p.y * scaleY),
     })),
   };
+}
+
+/**
+ * Union-find over node keys, for "which connected piece is this in".
+ *
+ * Generic on purpose: the graph compiler uses it for the connectivity
+ * report at compile time, the zone-lattice builder uses it to drop slivers
+ * left by clipping, and the layout designer canvas re-runs it client-side to
+ * colour disconnected pieces on the map -- all three need the exact same
+ * notion of "same component" or their answers could disagree.
+ */
+export function connectedComponents(
+  nodeKeys: string[],
+  edges: Array<{ fromKey: string; toKey: string }>,
+): Map<string, string> {
+  const parent = new Map<string, string>();
+  for (const key of nodeKeys) parent.set(key, key);
+
+  function find(key: string): string {
+    let root = key;
+    while (parent.get(root) !== root) root = parent.get(root)!;
+    let cursor = key;
+    while (parent.get(cursor) !== root) {
+      const next = parent.get(cursor)!;
+      parent.set(cursor, root);
+      cursor = next;
+    }
+    return root;
+  }
+
+  for (const edge of edges) {
+    if (!parent.has(edge.fromKey) || !parent.has(edge.toKey)) continue;
+    const a = find(edge.fromKey);
+    const b = find(edge.toKey);
+    if (a !== b) parent.set(a, b);
+  }
+
+  const roots = new Map<string, string>();
+  for (const key of nodeKeys) roots.set(key, find(key));
+  return roots;
 }
