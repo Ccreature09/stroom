@@ -14,11 +14,16 @@ import {
   type LocationDTO,
 } from "@/lib/warehouse-map/types";
 import {
+  centredPlacement,
   normalizeRotation,
   rotateAboutOrigin,
   type Point,
   type ResizeAxis,
 } from "@/lib/warehouse-map/geometry";
+import {
+  LOCATION_TYPE_DEFAULT_SIZE_MM,
+  type LocationType,
+} from "@/lib/warehouse-map/naming";
 
 export const HANDLE_CORNERS = ["nw", "ne", "se", "sw"] as const;
 export type Corner = (typeof HANDLE_CORNERS)[number];
@@ -159,6 +164,39 @@ export function strokeForNode(locationId: number, isSelected: boolean) {
     width: isSelected ? 45 : 18,
     color: isSelected ? 0x0f172a : 0x1e293b,
   };
+}
+
+const LOCATION_GHOST_COLOR = 0x0891b2;
+
+/**
+ * Outline of the armed location type at its stock size, centred on the
+ * cursor -- the click-to-place counterpart of a feature ghost: you should
+ * see what you are about to drop before committing.
+ */
+export function drawLocationGhost(
+  g: Graphics,
+  world: Point | null,
+  armed: LocationType | null,
+  tool: string,
+  hallWidthMm: number,
+  hallLengthMm: number,
+) {
+  g.clear();
+  if (!armed || !world || tool !== "draw") return;
+
+  const size = LOCATION_TYPE_DEFAULT_SIZE_MM[armed];
+  const { x, y, width, height } = centredPlacement(
+    world.x,
+    world.y,
+    size.widthMm,
+    size.lengthMm,
+    hallWidthMm,
+    hallLengthMm,
+  );
+
+  g.rect(x, y, width, height)
+    .fill({ color: LOCATION_GHOST_COLOR, alpha: 0.2 })
+    .stroke({ width: 60, color: LOCATION_GHOST_COLOR, alpha: 0.9 });
 }
 
 export function formatFootprint(

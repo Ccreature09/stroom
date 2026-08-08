@@ -63,6 +63,7 @@ import {
   PENDING_CREATE_COLOR,
   axisResizeCursorFor,
   dashPath,
+  drawLocationGhost,
   formatFootprint,
   parseHexToInt,
   resizeCursorFor,
@@ -1109,37 +1110,6 @@ export default function LayoutDesignerCanvas({
       .stroke({ width: 60, color, alpha: 0.9 });
   }
 
-  const LOCATION_GHOST_COLOR = 0x0891b2;
-
-  /**
-   * Outline of the armed location type at its stock size, centred on the
-   * cursor -- the click-to-place counterpart of drawFeatureGhost above, same
-   * reasoning: you should see what you are about to drop before committing.
-   */
-  function drawLocationGhost(world: Point | null) {
-    const g = locationGhostRef.current;
-    if (!g) return;
-    g.clear();
-
-    const armed = stateRef.current.armedLocationType;
-    if (!armed || !world || stateRef.current.tool !== "draw") return;
-
-    const liveHall = stateRef.current.hall;
-    const size = LOCATION_TYPE_DEFAULT_SIZE_MM[armed];
-    const { x, y, width, height } = centredPlacement(
-      world.x,
-      world.y,
-      size.widthMm,
-      size.lengthMm,
-      liveHall.physicalWidthMm,
-      liveHall.physicalLengthMm,
-    );
-
-    g.rect(x, y, width, height)
-      .fill({ color: LOCATION_GHOST_COLOR, alpha: 0.2 })
-      .stroke({ width: 60, color: LOCATION_GHOST_COLOR, alpha: 0.9 });
-  }
-
   function updateFeatureLabelVisibility() {
     const viewport = viewportRef.current;
     if (!viewport) return;
@@ -1937,8 +1907,18 @@ export default function LayoutDesignerCanvas({
 
         if (stateRef.current.tool === "draw") {
           const world = viewport.toWorld(e.global);
-          drawLocationGhost(world);
           const armed = stateRef.current.armedLocationType;
+          const liveHall = stateRef.current.hall;
+          if (locationGhostRef.current) {
+            drawLocationGhost(
+              locationGhostRef.current,
+              world,
+              armed,
+              stateRef.current.tool,
+              liveHall.physicalWidthMm,
+              liveHall.physicalLengthMm,
+            );
+          }
           if (armed) {
             const size = LOCATION_TYPE_DEFAULT_SIZE_MM[armed];
             showCoordOverlay(
