@@ -73,6 +73,8 @@ import {
   type Corner,
 } from "./canvas-render";
 import { useBoxSelect } from "./use-box-select";
+import { useLocationDrag } from "./use-location-drag";
+import { useLocationResize } from "./use-location-resize";
 import { useMeasureGesture } from "./use-measure-gesture";
 
 import { Button } from "@/components/ui/button";
@@ -458,21 +460,8 @@ export default function LayoutDesignerCanvas({
   const activeLevelRef = useRef(activeLevel);
   activeLevelRef.current = activeLevel;
 
-  const dragRef = useRef<null | {
-    locationId: number;
-    startWorldX: number;
-    startWorldY: number;
-    originX: number;
-    originY: number;
-  }>(null);
-  const resizeRef = useRef<null | {
-    locationId: number;
-    corner: Corner;
-    originX: number;
-    originY: number;
-    originW: number;
-    originH: number;
-  }>(null);
+  const locationDrag = useLocationDrag();
+  const locationResize = useLocationResize();
 
   const featureDragRef = useRef<null | {
     featureId: number;
@@ -542,9 +531,9 @@ export default function LayoutDesignerCanvas({
   // ---------------------------------------------------------------------
 
   function commitSingleDrag() {
-    const drag = dragRef.current;
+    const drag = locationDrag.current();
     if (!drag) return;
-    dragRef.current = null;
+    locationDrag.clear();
     hideCoordOverlay();
     const node = nodesRef.current.get(drag.locationId);
     if (node) {
@@ -559,9 +548,9 @@ export default function LayoutDesignerCanvas({
   }
 
   function commitSingleResize() {
-    const resize = resizeRef.current;
+    const resize = locationResize.current();
     if (!resize) return;
-    resizeRef.current = null;
+    locationResize.clear();
     hideCoordOverlay();
     const node = nodesRef.current.get(resize.locationId);
     if (node) {
@@ -1363,13 +1352,13 @@ export default function LayoutDesignerCanvas({
             startGroupDrag(fullLocationIds, [], world);
           } else {
             stateRef.current.onSelectionChange([loc.locationId], []);
-            dragRef.current = {
-              locationId: loc.locationId,
-              startWorldX: world.x,
-              startWorldY: world.y,
-              originX: current.loc.physicalX,
-              originY: current.loc.physicalY,
-            };
+            locationDrag.start(
+              loc.locationId,
+              world.x,
+              world.y,
+              current.loc.physicalX,
+              current.loc.physicalY,
+            );
           }
         });
 
@@ -1976,8 +1965,8 @@ export default function LayoutDesignerCanvas({
       // canvas", not these cases.
       forceCancelInteractions = () => {
         boxSelect.cancel();
-        dragRef.current = null;
-        resizeRef.current = null;
+        locationDrag.clear();
+        locationResize.clear();
         groupDragRef.current = null;
         featureDragRef.current = null;
         featureResizeRef.current = null;
@@ -2559,14 +2548,14 @@ export default function LayoutDesignerCanvas({
 
       handle.on("pointerdown", (e: FederatedPointerEvent) => {
         e.stopPropagation();
-        resizeRef.current = {
-          locationId: node.loc.locationId,
+        locationResize.start(
+          node.loc.locationId,
           corner,
-          originX: node.loc.physicalX,
-          originY: node.loc.physicalY,
-          originW: node.loc.physicalWidthMm,
-          originH: node.loc.physicalLengthMm,
-        };
+          node.loc.physicalX,
+          node.loc.physicalY,
+          node.loc.physicalWidthMm,
+          node.loc.physicalLengthMm,
+        );
       });
 
       const handleResizeUp = (e: FederatedPointerEvent) => {
@@ -2698,7 +2687,7 @@ export default function LayoutDesignerCanvas({
         hall.physicalLengthMm,
       );
 
-      const drag = dragRef.current;
+      const drag = locationDrag.current();
       if (drag) {
         const node = nodesRef.current.get(drag.locationId);
         if (node) {
@@ -2869,7 +2858,7 @@ export default function LayoutDesignerCanvas({
         return;
       }
 
-      const resize = resizeRef.current;
+      const resize = locationResize.current();
       if (resize) {
         const node = nodesRef.current.get(resize.locationId);
         if (node) {
