@@ -38,7 +38,6 @@ import {
   unionEnvelopes,
   worldCorner,
   type Envelope,
-  type FeatureGeometry,
   type GeometryKind,
   type Point,
   type ResizeAxis,
@@ -61,6 +60,8 @@ import {
   HANDLE_CORNERS,
   PENDING_CREATE_COLOR,
   axisResizeCursorFor,
+  clampOriginToHall,
+  clampPointToHall,
   dashPath,
   drawFeatureGhost,
   drawLocationGhost,
@@ -239,58 +240,6 @@ type FeatureNode = {
   label: Text;
   feature: FeatureDTO;
 };
-
-/**
- * Clamps a proposed origin so the geometry's *rendered envelope* stays inside
- * the hall.
- *
- * The envelope rather than (origin, width, length) is what has to fit:
- * rotation is about the origin, so a rotated box occupies a different
- * rectangle than its nominal one, and a polyline's local points can legally
- * run outside its nominal box as well. Clamping the nominal box would let a
- * rotated rack hang through the wall while its numbers still looked in range.
- *
- * A footprint larger than the hall pins to the near edge rather than jumping:
- * when the upper bound falls below the lower one, the outer Math.max wins.
- */
-function clampOriginToHall(
-  geometry: FeatureGeometry,
-  nextX: number,
-  nextY: number,
-  hallWidth: number,
-  hallHeight: number,
-): Point {
-  // Measured with the origin at (0, 0), the envelope is the set of offsets
-  // from the origin to each edge of the footprint -- which is exactly what the
-  // hall bounds have to be applied against.
-  const local = computeEnvelope({
-    ...geometry,
-    originXMm: 0,
-    originYMm: 0,
-  });
-  return {
-    x: Math.max(-local.minX, Math.min(nextX, hallWidth - local.maxX)),
-    y: Math.max(-local.minY, Math.min(nextY, hallHeight - local.maxY)),
-  };
-}
-
-/**
- * Pins a pointer position to the hall.
- *
- * Every resize gesture holds one corner fixed and follows the pointer with the
- * opposite one, so confining the pointer is enough to confine the result --
- * the anchor corner is already inside the hall by induction.
- */
-function clampPointToHall(
-  world: Point,
-  hallWidth: number,
-  hallHeight: number,
-): Point {
-  return {
-    x: Math.max(0, Math.min(world.x, hallWidth)),
-    y: Math.max(0, Math.min(world.y, hallHeight)),
-  };
-}
 
 export default function LayoutDesignerCanvas({
   hall,
