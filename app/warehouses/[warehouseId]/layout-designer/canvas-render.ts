@@ -17,6 +17,7 @@ import {
   centredPlacement,
   normalizeRotation,
   rotateAboutOrigin,
+  type GeometryKind,
   type Point,
   type ResizeAxis,
 } from "@/lib/warehouse-map/geometry";
@@ -164,6 +165,75 @@ export function strokeForNode(locationId: number, isSelected: boolean) {
     width: isSelected ? 45 : 18,
     color: isSelected ? 0x0f172a : 0x1e293b,
   };
+}
+
+const POINT_MARKER_MM = 350;
+
+export type ArmedFeature = {
+  kind: string;
+  label: string;
+  color: string;
+  geometryKind: GeometryKind;
+  widthMm: number;
+  lengthMm: number;
+};
+
+/**
+ * Outline of the armed feature at its real size, centred on the cursor.
+ * Click-to-place is only trustworthy if you can see what you are about to
+ * drop and how big it is before committing.
+ */
+export function drawFeatureGhost(
+  g: Graphics,
+  world: Point | null,
+  armed: ArmedFeature | null,
+  tool: string,
+  hallWidthMm: number,
+  hallLengthMm: number,
+) {
+  g.clear();
+  if (!armed || !world || tool !== "feature") return;
+
+  const color = parseHexToInt(armed.color, 0x0891b2);
+  const { x, y, width, height } = centredPlacement(
+    world.x,
+    world.y,
+    armed.widthMm,
+    armed.lengthMm,
+    hallWidthMm,
+    hallLengthMm,
+  );
+
+  if (armed.geometryKind === "POINT") {
+    g.circle(world.x, world.y, POINT_MARKER_MM)
+      .fill({ color, alpha: 0.35 })
+      .stroke({ width: 60, color, alpha: 0.9 });
+    return;
+  }
+
+  if (armed.geometryKind === "CIRCLE") {
+    const r = Math.min(width, height) / 2;
+    g.circle(x + width / 2, y + height / 2, r)
+      .fill({ color, alpha: 0.2 })
+      .stroke({ width: 60, color, alpha: 0.9 });
+    return;
+  }
+
+  if (armed.geometryKind === "POLYLINE") {
+    const midY = y + height / 2;
+    g.moveTo(x, midY).lineTo(x + width, midY);
+    g.stroke({
+      width: Math.max(60, height),
+      color,
+      alpha: 0.4,
+      cap: "round",
+    });
+    return;
+  }
+
+  g.rect(x, y, width, height)
+    .fill({ color, alpha: 0.2 })
+    .stroke({ width: 60, color, alpha: 0.9 });
 }
 
 const LOCATION_GHOST_COLOR = 0x0891b2;

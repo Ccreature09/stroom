@@ -28,7 +28,6 @@ import {
   sortFeaturesForRender,
 } from "@/lib/warehouse-map/types";
 import {
-  centredPlacement,
   computeEnvelope,
   edgeMidpoint,
   footprintVertices,
@@ -63,6 +62,7 @@ import {
   PENDING_CREATE_COLOR,
   axisResizeCursorFor,
   dashPath,
+  drawFeatureGhost,
   drawLocationGhost,
   formatFootprint,
   parseHexToInt,
@@ -1051,65 +1051,6 @@ export default function LayoutDesignerCanvas({
       .stroke({ width: Math.max(8, padX * 0.06), color: 0x0f172a, alpha: 0.18 });
   }
 
-  /**
-   * Outline of the armed feature at its real size, centred on the cursor.
-   * Click-to-place is only trustworthy if you can see what you are about to
-   * drop and how big it is before committing.
-   */
-  function drawFeatureGhost(world: Point | null) {
-    const g = featureGhostRef.current;
-    if (!g) return;
-    g.clear();
-
-    const armed = stateRef.current.armedFeature;
-    if (!armed || !world || stateRef.current.tool !== "feature") return;
-
-    const color = parseHexToInt(armed.color, 0x0891b2);
-    // stateRef, not the prop: this runs from a pointermove listener registered
-    // once at init, so the captured `hall` would go stale the moment someone
-    // edits the hall's dimensions.
-    const liveHall = stateRef.current.hall;
-    const { x, y, width, height } = centredPlacement(
-      world.x,
-      world.y,
-      armed.widthMm,
-      armed.lengthMm,
-      liveHall.physicalWidthMm,
-      liveHall.physicalLengthMm,
-    );
-
-    if (armed.geometryKind === "POINT") {
-      g.circle(world.x, world.y, POINT_MARKER_MM)
-        .fill({ color, alpha: 0.35 })
-        .stroke({ width: 60, color, alpha: 0.9 });
-      return;
-    }
-
-    if (armed.geometryKind === "CIRCLE") {
-      const r = Math.min(width, height) / 2;
-      g.circle(x + width / 2, y + height / 2, r)
-        .fill({ color, alpha: 0.2 })
-        .stroke({ width: 60, color, alpha: 0.9 });
-      return;
-    }
-
-    if (armed.geometryKind === "POLYLINE") {
-      const midY = y + height / 2;
-      g.moveTo(x, midY).lineTo(x + width, midY);
-      g.stroke({
-        width: Math.max(60, height),
-        color,
-        alpha: 0.4,
-        cap: "round",
-      });
-      return;
-    }
-
-    g.rect(x, y, width, height)
-      .fill({ color, alpha: 0.2 })
-      .stroke({ width: 60, color, alpha: 0.9 });
-  }
-
   function updateFeatureLabelVisibility() {
     const viewport = viewportRef.current;
     if (!viewport) return;
@@ -1877,8 +1818,18 @@ export default function LayoutDesignerCanvas({
 
         if (stateRef.current.tool === "feature") {
           const world = viewport.toWorld(e.global);
-          drawFeatureGhost(world);
           const armed = stateRef.current.armedFeature;
+          const liveHall = stateRef.current.hall;
+          if (featureGhostRef.current) {
+            drawFeatureGhost(
+              featureGhostRef.current,
+              world,
+              armed,
+              stateRef.current.tool,
+              liveHall.physicalWidthMm,
+              liveHall.physicalLengthMm,
+            );
+          }
           if (armed) {
             showCoordOverlay(
               e.global.x,
