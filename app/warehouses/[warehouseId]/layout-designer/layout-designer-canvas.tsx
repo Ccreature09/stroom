@@ -70,6 +70,7 @@ import {
   strokeForNode,
   type Corner,
 } from "./canvas-render";
+import { useBoxSelect } from "./use-box-select";
 
 import { Button } from "@/components/ui/button";
 import { ZoomIn, ZoomOut } from "lucide-react";
@@ -559,11 +560,7 @@ export default function LayoutDesignerCanvas({
   // re-deriving lockedResizeAxisFor from a possibly-stale node lookup.
   const featureHandleAxisRef = useRef<ResizeAxis | null>(null);
 
-  const boxSelectRef = useRef<null | {
-    startWorldX: number;
-    startWorldY: number;
-    rect: Graphics;
-  }>(null);
+  const boxSelect = useBoxSelect();
   // A mixed group drag: any combination of locations and features moved
   // together as a rigid body. There is no group-resize counterpart -- see the
   // note on Props.onGroupMove for why.
@@ -1898,13 +1895,7 @@ export default function LayoutDesignerCanvas({
           stateRef.current.tool === "select" ||
           stateRef.current.tool === "transform"
         ) {
-          const rect = new Graphics();
-          viewport.addChild(rect);
-          boxSelectRef.current = {
-            startWorldX: world.x,
-            startWorldY: world.y,
-            rect,
-          };
+          boxSelect.start(viewport, world.x, world.y);
         }
       });
 
@@ -1968,29 +1959,16 @@ export default function LayoutDesignerCanvas({
           return;
         }
 
-        const box = boxSelectRef.current;
-        if (box) {
+        if (boxSelect.isActive()) {
           const world = viewport.toWorld(e.global);
-          const x = Math.min(box.startWorldX, world.x);
-          const y = Math.min(box.startWorldY, world.y);
-          const w = Math.abs(world.x - box.startWorldX);
-          const h = Math.abs(world.y - box.startWorldY);
-          box.rect
-            .clear()
-            .rect(x, y, w, h)
-            .fill({ color: 0x2563eb, alpha: 0.15 })
-            .stroke({ width: 15, color: 0x2563eb });
+          boxSelect.update(world.x, world.y);
         }
       });
 
       // Leaving the canvas viewport entirely mid-marquee cancels it outright
       // (rather than letting it linger/commit on eventual release).
       cancelBoxSelectOnLeave = () => {
-        const box = boxSelectRef.current;
-        if (box) {
-          box.rect.destroy();
-          boxSelectRef.current = null;
-        }
+        boxSelect.cancel();
       };
       app.canvas.addEventListener("pointerleave", cancelBoxSelectOnLeave);
 
@@ -2043,15 +2021,10 @@ export default function LayoutDesignerCanvas({
           middlePanRef.current = null;
           return;
         }
-        const box = boxSelectRef.current;
-        if (box) {
-          const world = viewport.toWorld(e.global);
-          const x0 = Math.min(box.startWorldX, world.x);
-          const y0 = Math.min(box.startWorldY, world.y);
-          const x1 = Math.max(box.startWorldX, world.x);
-          const y1 = Math.max(box.startWorldY, world.y);
-          box.rect.destroy();
-          boxSelectRef.current = null;
+        const world = viewport.toWorld(e.global);
+        const bounds = boxSelect.commit(world.x, world.y);
+        if (bounds) {
+          const { x0, y0, x1, y1 } = bounds;
 
           // multiSelectMode makes a plain click behave like a shift-click --
           // additive rather than replacing -- without needing the key held.
@@ -2131,11 +2104,7 @@ export default function LayoutDesignerCanvas({
       // pointerupoutside only covers "outside the object, still over the
       // canvas", not these cases.
       forceCancelInteractions = () => {
-        const box = boxSelectRef.current;
-        if (box) {
-          box.rect.destroy();
-          boxSelectRef.current = null;
-        }
+        boxSelect.cancel();
         dragRef.current = null;
         resizeRef.current = null;
         groupDragRef.current = null;
