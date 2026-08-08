@@ -71,6 +71,7 @@ import {
   type Corner,
 } from "./canvas-render";
 import { useBoxSelect } from "./use-box-select";
+import { useMeasureGesture } from "./use-measure-gesture";
 
 import { Button } from "@/components/ui/button";
 import { ZoomIn, ZoomOut } from "lucide-react";
@@ -343,7 +344,6 @@ export default function LayoutDesignerCanvas({
   // The URL actually handed to Assets.load, kept solely so it can be unloaded
   // again: Pixi's asset cache is keyed on the string that loaded it.
   const underlayLoadedUrlRef = useRef<string | null>(null);
-  const measureLayerRef = useRef<Graphics | null>(null);
   const featureGhostRef = useRef<Graphics | null>(null);
   const locationGhostRef = useRef<Graphics | null>(null);
   const navGraphLayerRef = useRef<Graphics | null>(null);
@@ -492,9 +492,7 @@ export default function LayoutDesignerCanvas({
   const featureKindsRef = useRef(featureKinds);
   featureKindsRef.current = featureKinds;
 
-  // First click of a measure gesture, in world mm; the second click reports
-  // the distance and resets.
-  const measureAnchorRef = useRef<Point | null>(null);
+  const measure = useMeasureGesture();
 
   function kindMetaFor(kind: string): FeatureKindDTO | undefined {
     return featureKindsRef.current.find((k) => k.kind === kind);
@@ -1768,7 +1766,7 @@ export default function LayoutDesignerCanvas({
 
       const measureLayer = new Graphics();
       viewport.addChild(measureLayer);
-      measureLayerRef.current = measureLayer;
+      measure.setLayer(measureLayer);
 
       const featureGhost = new Graphics();
       featureGhost.eventMode = "none";
@@ -1822,16 +1820,13 @@ export default function LayoutDesignerCanvas({
         // apart than one comfortable drag, and each end wants to be placed
         // precisely (with a zoom in between if need be).
         if (stateRef.current.tool === "measure") {
-          const anchor = measureAnchorRef.current;
-          if (!anchor) {
-            measureAnchorRef.current = { x: world.x, y: world.y };
-            drawMeasureOverlay(null);
+          if (!measure.hasAnchor()) {
+            measure.start(world.x, world.y, viewport.scale.x);
           } else {
-            const distance = Math.hypot(world.x - anchor.x, world.y - anchor.y);
-            measureAnchorRef.current = null;
-            measureLayerRef.current?.clear();
+            const distance = measure.finish(world.x, world.y);
             hideCoordOverlay();
-            if (distance > 0) stateRef.current.onMeasured(distance);
+            if (distance != null && distance > 0)
+              stateRef.current.onMeasured(distance);
           }
           return;
         }
@@ -1928,13 +1923,9 @@ export default function LayoutDesignerCanvas({
 
         if (stateRef.current.tool === "measure") {
           const world = viewport.toWorld(e.global);
-          if (measureAnchorRef.current) {
-            drawMeasureOverlay(world);
-            const anchor = measureAnchorRef.current;
-            const distance = Math.hypot(
-              world.x - anchor.x,
-              world.y - anchor.y,
-            );
+          if (measure.hasAnchor()) {
+            measure.draw(world, viewport.scale.x);
+            const distance = measure.distanceTo(world.x, world.y)!;
             showCoordOverlay(
               e.global.x,
               e.global.y,
@@ -2152,8 +2143,7 @@ export default function LayoutDesignerCanvas({
         underlayLoadedUrlRef.current = null;
         if (loadedUrl) Assets.unload(loadedUrl).catch(() => {});
       }
-      measureLayerRef.current = null;
-      measureAnchorRef.current = null;
+      measure.teardown();
       featureGhostRef.current = null;
       locationGhostRef.current = null;
       navGraphLayerRef.current = null;
@@ -2571,34 +2561,10 @@ export default function LayoutDesignerCanvas({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [routePoints, isReady]);
 
-  // Measure overlay: anchor marker plus the rubber-band line to the cursor.
-  function drawMeasureOverlay(cursor: Point | null) {
-    const g = measureLayerRef.current;
-    const viewport = viewportRef.current;
-    if (!g || !viewport) return;
-    g.clear();
-    const anchor = measureAnchorRef.current;
-    if (!anchor) return;
-
-    const markerRadius = 6 / viewport.scale.x;
-    const lineWidth = 2 / viewport.scale.x;
-    g.circle(anchor.x, anchor.y, markerRadius).fill({ color: 0x7c3aed });
-    if (cursor) {
-      g.moveTo(anchor.x, anchor.y)
-        .lineTo(cursor.x, cursor.y)
-        .stroke({ width: lineWidth, color: 0x7c3aed });
-      g.circle(cursor.x, cursor.y, markerRadius).stroke({
-        width: lineWidth,
-        color: 0x7c3aed,
-      });
-    }
-  }
-
   // Leaving Measure mode abandons any half-finished measurement.
   useEffect(() => {
     if (tool === "measure") return;
-    measureAnchorRef.current = null;
-    measureLayerRef.current?.clear();
+    measure.reset();
   }, [tool]);
 
   // Selection styling for features is a redraw of the existing Graphics only,
