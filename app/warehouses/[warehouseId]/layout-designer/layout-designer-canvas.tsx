@@ -24,7 +24,6 @@ import type {
 import {
   bayFootprintKey,
   colorForLocation,
-  groupByBayFootprint,
   locationIdsInAisle,
   sortFeaturesForRender,
 } from "@/lib/warehouse-map/types";
@@ -34,10 +33,8 @@ import {
   edgeMidpoint,
   footprintVertices,
   hitTestFeature,
-  normalizeRotation,
   resizeRotatedBox,
   resizeRotatedBoxAlongAxis,
-  rotateAboutOrigin,
   scaleGeometry,
   unionEnvelopes,
   worldCorner,
@@ -61,6 +58,18 @@ import {
 } from "@/lib/warehouse-map/naming";
 import { connectedComponents } from "@/lib/warehouse-map/graph-compiler";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
+import {
+  HANDLE_CORNERS,
+  PENDING_CREATE_COLOR,
+  axisResizeCursorFor,
+  dashPath,
+  formatFootprint,
+  parseHexToInt,
+  resizeCursorFor,
+  resolveVisibleLocations,
+  strokeForNode,
+  type Corner,
+} from "./canvas-render";
 
 import { Button } from "@/components/ui/button";
 import { ZoomIn, ZoomOut } from "lucide-react";
@@ -229,92 +238,6 @@ type FeatureNode = {
 };
 
 /**
- * Walks a polyline and emits dash segments into `g`. Pixi has no dashed-stroke
- * primitive, and the dashed centre line is what makes a travel lane read as a
- * road rather than a solid painted block.
- */
-function dashPath(
-  g: Graphics,
-  points: Point[],
-  dashMm: number,
-  gapMm: number,
-) {
-  const period = dashMm + gapMm;
-  if (period <= 0) return;
-  let carry = 0;
-
-  for (let i = 1; i < points.length; i++) {
-    const from = points[i - 1];
-    const to = points[i];
-    const dx = to.x - from.x;
-    const dy = to.y - from.y;
-    const segment = Math.hypot(dx, dy);
-    if (segment <= 0) continue;
-    const ux = dx / segment;
-    const uy = dy / segment;
-
-    // `carry` keeps the dash rhythm continuous across corners instead of
-    // restarting the pattern at every vertex.
-    let cursor = -carry;
-    while (cursor < segment) {
-      const start = Math.max(cursor, 0);
-      const end = Math.min(cursor + dashMm, segment);
-      if (end > start) {
-        g.moveTo(from.x + ux * start, from.y + uy * start);
-        g.lineTo(from.x + ux * end, from.y + uy * end);
-      }
-      cursor += period;
-    }
-    carry = (carry + segment) % period;
-  }
-}
-
-function parseHexToInt(hex: string | null | undefined, fallback: number) {
-  if (!hex) return fallback;
-  const match = /^#?([0-9a-fA-F]{6})$/.exec(hex.trim());
-  return match ? parseInt(match[1], 16) : fallback;
-}
-
-const HANDLE_CORNERS = ["nw", "ne", "se", "sw"] as const;
-type Corner = (typeof HANDLE_CORNERS)[number];
-
-/**
- * Diagonal resize cursor for a corner, accounting for rotation. A "nw" corner
- * on a box rotated 90° sits where "ne" visually is, so the unrotated cursor
- * would point across the drag rather than along it.
- */
-function resizeCursorFor(corner: Corner, rotationDegrees: number) {
-  const quarterTurns = Math.round(normalizeRotation(rotationDegrees) / 90) % 2;
-  const isPrimaryDiagonal = corner === "nw" || corner === "se";
-  const flipped = quarterTurns === 1 ? !isPrimaryDiagonal : isPrimaryDiagonal;
-  return flipped ? "nwse-resize" : "nesw-resize";
-}
-
-/**
- * Resize cursor for a single-axis (edge midpoint) handle. Unlike a corner --
- * which is diagonal in the local frame at every rotation, so only nwse/nesw
- * ever apply -- an edge handle is axis-aligned locally and can land exactly
- * horizontal or vertical on screen, so this also picks the plain ns/ew
- * cursors when the rotation puts it there.
- */
-function axisResizeCursorFor(axis: ResizeAxis, rotationDegrees: number) {
-  const AXIS_CURSORS = [
-    "ew-resize",
-    "nwse-resize",
-    "ns-resize",
-    "nesw-resize",
-  ] as const;
-  const local = axis === "length" ? { x: 0, y: 1 } : { x: 1, y: 0 };
-  const world = rotateAboutOrigin(local.x, local.y, rotationDegrees);
-  const angleDeg = ((Math.atan2(world.y, world.x) * 180) / Math.PI + 360) % 360;
-  // The cursor is undirected (dragging either way along the same line looks
-  // the same), so fold to a half-turn before snapping to the nearest of the
-  // 4 orientations 45 degrees apart.
-  const sector = Math.round((angleDeg % 180) / 45) % 4;
-  return AXIS_CURSORS[sector];
-}
-
-/**
  * Clamps a proposed origin so the geometry's *rendered envelope* stays inside
  * the hall.
  *
@@ -364,68 +287,6 @@ function clampPointToHall(
     x: Math.max(0, Math.min(world.x, hallWidth)),
     y: Math.max(0, Math.min(world.y, hallHeight)),
   };
-}
-
-/**
- * Bay Aggregation: for racking/shelf locations, multiple DB rows can share
- * the same physical footprint (aisle+bay), one per level. On the top-level
- * canvas we only want to render ONE node per footprint -- preferring the
- * currently active level if it has a member there, otherwise falling back to
- * the lowest level present -- plus every other location (floor storage, or
- * anything without aisle/bay) rendered as-is.
- */
-function resolveVisibleLocations(
-  allLocations: LocationDTO[],
-  activeLevel: number | null,
-): { visible: LocationDTO[]; memberCountByLocationId: Map<number, number> } {
-  const memberCountByLocationId = new Map<number, number>();
-  const bayGroups = groupByBayFootprint(allLocations);
-  const aggregatedIds = new Set<number>();
-  for (const group of bayGroups.values()) {
-    for (const loc of group) aggregatedIds.add(loc.locationId);
-  }
-
-  const visible: LocationDTO[] = [];
-
-  for (const group of bayGroups.values()) {
-    if (group.length === 0) continue;
-    const sorted = [...group].sort((a, b) => (a.level ?? 0) - (b.level ?? 0));
-    const preferred =
-      (activeLevel != null && sorted.find((l) => l.level === activeLevel)) ||
-      sorted[0];
-    visible.push(preferred);
-    memberCountByLocationId.set(preferred.locationId, sorted.length);
-  }
-
-  for (const loc of allLocations) {
-    if (!aggregatedIds.has(loc.locationId)) {
-      visible.push(loc);
-      memberCountByLocationId.set(loc.locationId, 1);
-    }
-  }
-
-  return { visible, memberCountByLocationId };
-}
-const PENDING_CREATE_COLOR = 0xf59e0b;
-
-function strokeForNode(locationId: number, isSelected: boolean) {
-  if (locationId < 0) {
-    return { width: isSelected ? 45 : 24, color: PENDING_CREATE_COLOR };
-  }
-  return {
-    width: isSelected ? 45 : 18,
-    color: isSelected ? 0x0f172a : 0x1e293b,
-  };
-}
-
-function formatFootprint(
-  w: number,
-  h: number,
-  x: number,
-  y: number,
-  rotation: number,
-) {
-  return `${Math.round(w)}mm × ${Math.round(h)}mm at (${Math.round(x)}, ${Math.round(y)}) · ${rotation}°`;
 }
 
 export default function LayoutDesignerCanvas({
