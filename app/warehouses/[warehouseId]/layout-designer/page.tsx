@@ -31,7 +31,7 @@ import {
   type UnderlayDTO,
 } from "@/lib/warehouse-map/types";
 import { createClient } from "@/lib/server";
-import { createHall } from "./actions";
+import { createHall } from "./actions/actions";
 import LayoutDesigner from "./layout-designer";
 import { sanitizePoints } from "@/lib/warehouse-map/geometry";
 import type { GeometryKind } from "@/lib/warehouse-map/geometry";

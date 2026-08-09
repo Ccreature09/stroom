@@ -3,7 +3,7 @@
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import type { HallDTO, NavGraphDTO } from "@/lib/warehouse-map/types";
-import { compileHallGraph, type CompileGraphResult } from "./graph-actions";
+import { compileHallGraph, type CompileGraphResult } from "../actions/graph-actions";
 
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";

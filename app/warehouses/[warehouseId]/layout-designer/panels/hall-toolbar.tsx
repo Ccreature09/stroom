@@ -15,7 +15,7 @@ import NavGraphPanel from "./nav-graph-panel";
 import RoutePanel from "./route-panel";
 import LabelsPanel from "./labels-panel";
 import type { RoutePreview } from "@/lib/warehouse-map/routing-server";
-import type { Tool } from "./layout-designer-canvas";
+import type { Tool } from "../canvas/layout-designer-canvas";
 import { DraftTextField } from "./draft-fields";
 
 import { Button } from "@/components/ui/button";

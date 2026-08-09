@@ -3,7 +3,7 @@
 import { useState, useTransition } from "react";
 import type { LocationDTO, RoutingVehicleDTO } from "@/lib/warehouse-map/types";
 import type { RoutePreview } from "@/lib/warehouse-map/routing-server";
-import { previewRoute } from "./routing-actions";
+import { previewRoute } from "../actions/routing-actions";
 
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";

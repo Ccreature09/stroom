@@ -3,7 +3,7 @@
 import { useMemo, useState, useTransition } from "react";
 import type { HallDTO } from "@/lib/warehouse-map/types";
 import type { Point } from "@/lib/warehouse-map/geometry";
-import { bulkGenerateLocations, type BulkGenerateResult } from "./actions";
+import { bulkGenerateLocations, type BulkGenerateResult } from "../actions/actions";
 
 export type BulkGeneratorKind = "racking" | "floor_line" | "shelving";
 

@@ -17,8 +17,8 @@ import {
   LOCATION_TYPE_LABELS,
   type LocationType,
 } from "@/lib/warehouse-map/naming";
-import type { Tool } from "./layout-designer-canvas";
-import { createHall, deleteHall } from "./actions";
+import type { Tool } from "../canvas/layout-designer-canvas";
+import { createHall, deleteHall } from "../actions/actions";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";

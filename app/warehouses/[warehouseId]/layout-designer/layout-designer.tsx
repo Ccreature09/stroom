@@ -11,12 +11,12 @@ import {
 import { useRouter } from "next/navigation";
 import { AlertTriangle, History, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import HallToolbar from "./hall-toolbar";
-import LayoutTopBar from "./layout-top-bar";
-import LayoutDesignerCanvas, { type Tool } from "./layout-designer-canvas";
-import { EditLocationPanel, EmptyLocationPanel } from "./location-panel";
-import { EditFeaturePanel } from "./feature-panel";
-import { MultiObjectPanel } from "./multi-object-panel";
+import HallToolbar from "./panels/hall-toolbar";
+import LayoutTopBar from "./panels/layout-top-bar";
+import LayoutDesignerCanvas, { type Tool } from "./canvas/layout-designer-canvas";
+import { EditLocationPanel, EmptyLocationPanel } from "./panels/location-panel";
+import { EditFeaturePanel } from "./panels/feature-panel";
+import { MultiObjectPanel } from "./panels/multi-object-panel";
 import type {
   FeatureDTO,
   FeatureKindDTO,
@@ -50,7 +50,7 @@ import {
   type Envelope,
   type Point,
 } from "@/lib/warehouse-map/geometry";
-import type { BulkGeneratorKind } from "./bulk-generator-dialog";
+import type { BulkGeneratorKind } from "./panels/bulk-generator-dialog";
 import {
   CATEGORY_ORDER,
   defaultPlacementSizeMm,
@@ -60,9 +60,9 @@ import {
   LOCATION_TYPES,
   type LocationType,
 } from "@/lib/warehouse-map/naming";
-import { commitHallStates, type PublishConflict } from "./actions";
+import { commitHallStates, type PublishConflict } from "./actions/actions";
 import type { RoutePreview } from "@/lib/warehouse-map/routing-server";
-import { saveHallDraft } from "./lifecycle-actions";
+import { saveHallDraft } from "./actions/lifecycle-actions";
 
 type HallHistory = {
   past: HallState[];
