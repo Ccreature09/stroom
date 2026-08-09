@@ -41,7 +41,6 @@ import {
   type GeometryKind,
   type Point,
   type ResizeAxis,
-  type ResizeEnd,
 } from "@/lib/warehouse-map/geometry";
 import {
   isRoomKind,
@@ -73,6 +72,9 @@ import {
   type Corner,
 } from "./canvas-render";
 import { useBoxSelect } from "./use-box-select";
+import { useFeatureDrag } from "./use-feature-drag";
+import { useFeatureResize } from "./use-feature-resize";
+import { useGroupDrag } from "./use-group-drag";
 import { useLocationDrag } from "./use-location-drag";
 import { useLocationResize } from "./use-location-resize";
 import { useMeasureGesture } from "./use-measure-gesture";
@@ -463,34 +465,8 @@ export default function LayoutDesignerCanvas({
   const locationDrag = useLocationDrag();
   const locationResize = useLocationResize();
 
-  const featureDragRef = useRef<null | {
-    featureId: number;
-    startWorldX: number;
-    startWorldY: number;
-    originX: number;
-    originY: number;
-  }>(null);
-  // "corner" is the usual free 2-axis resize; "axis" is a single-axis resize
-  // for a feature kind whose other dimension is locked (see
-  // lockedResizeAxisFor) -- axis/end identify which edge was grabbed, the
-  // same way corner does for the free case.
-  type FeatureResizeGrab =
-    | { mode: "corner"; corner: Corner }
-    | { mode: "axis"; axis: ResizeAxis; end: ResizeEnd };
-  const featureResizeRef = useRef<
-    | null
-    | ({
-        featureId: number;
-        originX: number;
-        originY: number;
-        originW: number;
-        originH: number;
-        // Snapshotted at grab time: every move event rescales from *these*,
-        // not from the live points, otherwise each event would scale the
-        // already scaled result and the shape would run away from the cursor.
-        originPoints: Point[] | null;
-      } & FeatureResizeGrab)
-  >(null);
+  const featureDragGesture = useFeatureDrag();
+  const featureResizeGesture = useFeatureResize();
   // null when the selected feature's handles are the usual 4 corners;
   // otherwise the locked-axis mode currently on screen, so
   // repositionFeatureHandles knows how to interpret its 2 handles without
@@ -501,20 +477,7 @@ export default function LayoutDesignerCanvas({
   // A mixed group drag: any combination of locations and features moved
   // together as a rigid body. There is no group-resize counterpart -- see the
   // note on Props.onGroupMove for why.
-  const groupDragRef = useRef<null | {
-    locationIds: number[];
-    featureIds: number[];
-    startWorldX: number;
-    startWorldY: number;
-    locOrigins: Map<number, { x: number; y: number }>;
-    featOrigins: Map<number, { x: number; y: number }>;
-    originBBox: { x: number; y: number; w: number; h: number };
-    // Updated every pointermove tick with the same clamped delta already
-    // being applied to the canvas -- see the note on commitGroupDrag for why
-    // it, not a node lookup, is what commit reads back.
-    lastDx: number;
-    lastDy: number;
-  }>(null);
+  const groupDragGesture = useGroupDrag();
 
   function fittedFontSize(widthMm: number, lengthMm: number) {
     // Adaptive label sizing: scale with the smaller box dimension so text
@@ -618,7 +581,7 @@ export default function LayoutDesignerCanvas({
     if (locOrigins.size + featOrigins.size === 0) return;
 
     const bbox = unionEnvelopes(envelopes);
-    groupDragRef.current = {
+    groupDragGesture.start({
       locationIds: Array.from(locOrigins.keys()),
       featureIds: Array.from(featOrigins.keys()),
       startWorldX: world.x,
@@ -631,15 +594,13 @@ export default function LayoutDesignerCanvas({
         w: bbox.maxX - bbox.minX,
         h: bbox.maxY - bbox.minY,
       },
-      lastDx: 0,
-      lastDy: 0,
-    };
+    });
   }
 
   function commitGroupDrag() {
-    const drag = groupDragRef.current;
+    const drag = groupDragGesture.current();
     if (!drag) return;
-    groupDragRef.current = null;
+    groupDragGesture.clear();
     hideCoordOverlay();
 
     // Read the delta the pointermove handler already computed and clamped,
@@ -986,7 +947,11 @@ export default function LayoutDesignerCanvas({
       radius,
     )
       .fill({ color: 0xffffff, alpha: 0.82 })
-      .stroke({ width: Math.max(8, padX * 0.06), color: 0x0f172a, alpha: 0.18 });
+      .stroke({
+        width: Math.max(8, padX * 0.06),
+        color: 0x0f172a,
+        alpha: 0.18,
+      });
   }
 
   function updateFeatureLabelVisibility() {
@@ -1007,7 +972,8 @@ export default function LayoutDesignerCanvas({
       // dragging large aisles expensive.
       const category = kindMetaFor(node.feature.kind)?.category;
       const categoryAllowed =
-        showLabels && (category == null || labelCategoryVisibility[category] !== false);
+        showLabels &&
+        (category == null || labelCategoryVisibility[category] !== false);
       const onScreenFontPx = (node.label.style.fontSize as number) * scale;
       const areaLike = node.feature.geometryKind !== "POINT";
       const zoomAllowed = areaLike
@@ -1078,9 +1044,9 @@ export default function LayoutDesignerCanvas({
   }
 
   function commitFeatureDrag() {
-    const drag = featureDragRef.current;
+    const drag = featureDragGesture.current();
     if (!drag) return;
-    featureDragRef.current = null;
+    featureDragGesture.clear();
     hideCoordOverlay();
     const node = featureNodesRef.current.get(drag.featureId);
     if (!node) return;
@@ -1100,9 +1066,9 @@ export default function LayoutDesignerCanvas({
   }
 
   function commitFeatureResize() {
-    const resize = featureResizeRef.current;
+    const resize = featureResizeGesture.current();
     if (!resize) return;
-    featureResizeRef.current = null;
+    featureResizeGesture.clear();
     hideCoordOverlay();
     const node = featureNodesRef.current.get(resize.featureId);
     if (!node) return;
@@ -1150,7 +1116,12 @@ export default function LayoutDesignerCanvas({
 
     const worldSize = HANDLE_SCREEN_SIZE / viewport.scale.x;
     const rotation = node.feature.rotationDegrees;
-    const { originXMm: x, originYMm: y, widthMm: w, lengthMm: h } = node.feature;
+    const {
+      originXMm: x,
+      originYMm: y,
+      widthMm: w,
+      lengthMm: h,
+    } = node.feature;
 
     // Some kinds have one dimension that is a fixed physical spec (a door's
     // opening width) or that never actually renders (a polyline's lengthMm --
@@ -1169,7 +1140,15 @@ export default function LayoutDesignerCanvas({
       const cursor = axisResizeCursorFor(adjustableAxis, rotation);
 
       for (const end of ["start", "end"] as const) {
-        const { x: cx, y: cy } = edgeMidpoint(x, y, w, h, rotation, adjustableAxis, end);
+        const { x: cx, y: cy } = edgeMidpoint(
+          x,
+          y,
+          w,
+          h,
+          rotation,
+          adjustableAxis,
+          end,
+        );
         const handle = new Graphics()
           .rect(-worldSize, -worldSize, worldSize * 2, worldSize * 2)
           .fill({ color: 0xffffff })
@@ -1181,7 +1160,7 @@ export default function LayoutDesignerCanvas({
 
         handle.on("pointerdown", (e: FederatedPointerEvent) => {
           e.stopPropagation();
-          featureResizeRef.current = {
+          featureResizeGesture.start({
             mode: "axis",
             axis: adjustableAxis,
             end,
@@ -1191,7 +1170,7 @@ export default function LayoutDesignerCanvas({
             originW: node.feature.widthMm,
             originH: node.feature.lengthMm,
             originPoints: node.feature.points,
-          };
+          });
         });
 
         const up = (e: FederatedPointerEvent) => {
@@ -1224,7 +1203,7 @@ export default function LayoutDesignerCanvas({
 
       handle.on("pointerdown", (e: FederatedPointerEvent) => {
         e.stopPropagation();
-        featureResizeRef.current = {
+        featureResizeGesture.start({
           mode: "corner",
           corner,
           featureId: node.feature.featureId,
@@ -1233,7 +1212,7 @@ export default function LayoutDesignerCanvas({
           originW: node.feature.widthMm,
           originH: node.feature.lengthMm,
           originPoints: node.feature.points,
-        };
+        });
       });
 
       const up = (e: FederatedPointerEvent) => {
@@ -1263,7 +1242,15 @@ export default function LayoutDesignerCanvas({
       featureHandlesRef.current.forEach((handle, index) => {
         const end = order[index];
         if (!end) return;
-        const p = edgeMidpoint(x, y, w, h, rotationDegrees, adjustableAxis, end);
+        const p = edgeMidpoint(
+          x,
+          y,
+          w,
+          h,
+          rotationDegrees,
+          adjustableAxis,
+          end,
+        );
         handle.position.set(p.x, p.y);
       });
       return;
@@ -1723,13 +1710,13 @@ export default function LayoutDesignerCanvas({
               }
 
               stateRef.current.onSelectionChange([], [featureId]);
-              featureDragRef.current = {
+              featureDragGesture.start(
                 featureId,
-                startWorldX: world.x,
-                startWorldY: world.y,
-                originX: node.feature.originXMm,
-                originY: node.feature.originYMm,
-              };
+                world.x,
+                world.y,
+                node.feature.originXMm,
+                node.feature.originYMm,
+              );
               return;
             }
           }
@@ -1967,9 +1954,9 @@ export default function LayoutDesignerCanvas({
         boxSelect.cancel();
         locationDrag.clear();
         locationResize.clear();
-        groupDragRef.current = null;
-        featureDragRef.current = null;
-        featureResizeRef.current = null;
+        groupDragGesture.clear();
+        featureDragGesture.clear();
+        featureResizeGesture.clear();
         middlePanRef.current = null;
         hideCoordOverlay();
       };
@@ -2492,7 +2479,8 @@ export default function LayoutDesignerCanvas({
     if (tool !== "transform") return;
 
     const worldSize = HANDLE_SCREEN_SIZE / viewport.scale.x;
-    const totalSelected = selectedLocationIds.length + selectedFeatureIds.length;
+    const totalSelected =
+      selectedLocationIds.length + selectedFeatureIds.length;
 
     if (totalSelected > 1) {
       // A mixed (or same-type) multi-selection gets an outline showing what
@@ -2514,7 +2502,12 @@ export default function LayoutDesignerCanvas({
 
       const bbox = unionEnvelopes(envelopes);
       const outline = new Graphics()
-        .rect(bbox.minX, bbox.minY, bbox.maxX - bbox.minX, bbox.maxY - bbox.minY)
+        .rect(
+          bbox.minX,
+          bbox.minY,
+          bbox.maxX - bbox.minX,
+          bbox.maxY - bbox.minY,
+        )
         .stroke({ width: worldSize * 0.4, color: 0x0891b2 });
       handleLayer.addChild(outline);
       handlesRef.current.push(outline);
@@ -2730,7 +2723,7 @@ export default function LayoutDesignerCanvas({
         return;
       }
 
-      const featureDrag = featureDragRef.current;
+      const featureDrag = featureDragGesture.current();
       if (featureDrag) {
         const node = featureNodesRef.current.get(featureDrag.featureId);
         if (node) {
@@ -2773,7 +2766,7 @@ export default function LayoutDesignerCanvas({
         return;
       }
 
-      const featureResize = featureResizeRef.current;
+      const featureResize = featureResizeGesture.current();
       if (featureResize) {
         const node = featureNodesRef.current.get(featureResize.featureId);
         if (node) {
@@ -2834,7 +2827,10 @@ export default function LayoutDesignerCanvas({
             lengthMm: scaled.lengthMm,
             points: scaled.points,
           };
-          node.container.position.set(node.feature.originXMm, node.feature.originYMm);
+          node.container.position.set(
+            node.feature.originXMm,
+            node.feature.originYMm,
+          );
           drawFeatureShape(node, true);
           repositionFeatureHandles(
             node.feature.originXMm,
@@ -2903,7 +2899,7 @@ export default function LayoutDesignerCanvas({
         return;
       }
 
-      const groupDrag = groupDragRef.current;
+      const groupDrag = groupDragGesture.current();
       if (groupDrag) {
         const rawDx = world.x - groupDrag.startWorldX;
         const rawDy = world.y - groupDrag.startWorldY;
@@ -2927,8 +2923,7 @@ export default function LayoutDesignerCanvas({
         );
         // Recorded so commitGroupDrag can read the delta back directly
         // instead of reconstructing it from a moved node's position.
-        groupDrag.lastDx = dx;
-        groupDrag.lastDy = dy;
+        groupDragGesture.updateDelta(dx, dy);
 
         for (const id of groupDrag.locationIds) {
           const node = nodesRef.current.get(id);
@@ -2945,7 +2940,11 @@ export default function LayoutDesignerCanvas({
           if (!node || !origin) continue;
           const nextX = origin.x + dx;
           const nextY = origin.y + dy;
-          node.feature = { ...node.feature, originXMm: nextX, originYMm: nextY };
+          node.feature = {
+            ...node.feature,
+            originXMm: nextX,
+            originYMm: nextY,
+          };
           node.container.position.set(nextX, nextY);
         }
         // The group bbox outline is a separate Graphics positioned at fixed
@@ -3012,13 +3011,7 @@ export default function LayoutDesignerCanvas({
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    locations,
-    features,
-    selectedLocationIds,
-    selectedFeatureIds,
-    isReady,
-  ]);
+  }, [locations, features, selectedLocationIds, selectedFeatureIds, isReady]);
 
   return (
     <div className="relative flex h-full w-full overflow-hidden rounded-xl border bg-background/60">
