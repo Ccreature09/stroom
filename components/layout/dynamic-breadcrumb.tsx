@@ -17,6 +17,14 @@ const routeNameMap: Record<string, string> = {
   warehouses: "Warehouses",
   "people-roles": "People & Roles",
   inventory: "Inventory",
+  inbound: "Inbound Operations",
+  outbound: "Outbound Operations",
+  internal: "Internal Operations",
+  "sales-orders": "Sales Orders",
+  "cycle-count": "Cycle Count",
+  "task-routing": "Task Routing",
+  timeclock: "Time Clock",
+  floor: "My Tasks",
   settings: "Settings",
 };
 
