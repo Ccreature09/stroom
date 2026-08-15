@@ -3,7 +3,6 @@
 import { and, desc, eq, isNull, or, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import {
-  assetPositionHistory,
   assetPositions,
   employees,
   layoutBlockages,
@@ -19,7 +18,11 @@ import {
   revalidateLiveMap,
 } from "@/lib/warehouse-map/context";
 import { distanceToSegment } from "@/lib/warehouse-map/geometry";
-import type { PositionSource } from "@/lib/warehouse-map/live-map";
+import type { AssetStatus, PositionSource } from "@/lib/warehouse-map/live-map";
+import {
+  recordAssetPosition,
+  resolveAssetLabel,
+} from "@/lib/warehouse-map/asset-positions";
 
 export type BlockageResult = {
   error?: string;
@@ -324,72 +327,25 @@ export async function reportAssetPosition(
     };
   }
 
-  if (!Number.isFinite(input.xMm) || !Number.isFinite(input.yMm)) {
-    return { error: "Position must be a pair of finite coordinates." };
-  }
-
-  const now = new Date().toISOString();
-  const values = {
+  const label = await resolveAssetLabel(input.assetKind, input.assetRefId);
+  return recordAssetPosition({
     organizationId,
     warehouseId,
     hallId: input.hallId,
     assetKind: input.assetKind,
     assetRefId: input.assetRefId,
-    xMm: Math.round(input.xMm),
-    yMm: Math.round(input.yMm),
-    floorLevel: input.floorLevel ?? 1,
-    headingDeg: input.headingDeg ?? null,
-    nodeId: input.nodeId ?? null,
-    edgeId: input.edgeId ?? null,
-    source: input.source ?? "SCAN",
-    confidence: String(
-      Math.min(1, Math.max(0, input.confidence ?? 1)).toFixed(2),
-    ),
-    status: input.status ?? "IDLE",
-    routePlanId: input.routePlanId ?? null,
-    observedAt: now,
-    updatedAt: now,
-  };
-
-  const [previous] = await db
-    .select({ xMm: assetPositions.xMm, yMm: assetPositions.yMm })
-    .from(assetPositions)
-    .where(
-      and(
-        eq(assetPositions.assetKind, input.assetKind),
-        eq(assetPositions.assetRefId, input.assetRefId),
-      ),
-    )
-    .limit(1);
-
-  await db
-    .insert(assetPositions)
-    .values(values)
-    .onConflictDoUpdate({
-      target: [assetPositions.assetKind, assetPositions.assetRefId],
-      set: values,
-    });
-
-  const moved =
-    !previous ||
-    Math.hypot(previous.xMm - values.xMm, previous.yMm - values.yMm) > 500;
-  if (moved) {
-    await db.insert(assetPositionHistory).values({
-      organizationId,
-      warehouseId,
-      hallId: input.hallId,
-      assetKind: input.assetKind,
-      assetRefId: input.assetRefId,
-      xMm: values.xMm,
-      yMm: values.yMm,
-      floorLevel: values.floorLevel,
-      edgeId: values.edgeId,
-      source: values.source,
-      observedAt: now,
-    });
-  }
-
-  return { success: true };
+    label,
+    xMm: input.xMm,
+    yMm: input.yMm,
+    floorLevel: input.floorLevel,
+    headingDeg: input.headingDeg,
+    nodeId: input.nodeId,
+    edgeId: input.edgeId,
+    source: input.source,
+    confidence: input.confidence,
+    status: input.status as AssetStatus | undefined,
+    routePlanId: input.routePlanId,
+  });
 }
 
 /** Live snapshot for a hall: current asset positions and active blockages. */

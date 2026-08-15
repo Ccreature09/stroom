@@ -11,6 +11,7 @@ import {
   type MapEvent,
   type StreamState,
 } from "@/lib/warehouse-map/live-map";
+import type { InventoryLocationDTO } from "@/lib/warehouse-map/types";
 
 /**
  * Subscribes a hall to its live channels.
@@ -41,6 +42,8 @@ export type LiveConnectionState =
 
 export type UseLiveMapResult = {
   assets: Map<string, LiveAsset>;
+  /** Current stock aggregate per location, keyed by locationId. */
+  inventory: Map<number, InventoryLocationDTO>;
   connection: LiveConnectionState;
   /** Bumps when the server says the layout changed and we should refetch. */
   layoutChangedAt: number | null;
@@ -61,19 +64,30 @@ function seedAssets(assets: LiveAsset[]): Map<string, LiveAsset> {
   return seeded;
 }
 
+function seedInventory(
+  rows: InventoryLocationDTO[],
+): Map<number, InventoryLocationDTO> {
+  return new Map(rows.map((row) => [row.locationId, row]));
+}
+
 export function useLiveMap({
   warehouseId,
   hallId,
   enabled,
   initialAssets,
+  initialInventory,
 }: {
   warehouseId: number;
   hallId: number;
   enabled: boolean;
   initialAssets: LiveAsset[];
+  initialInventory: InventoryLocationDTO[];
 }): UseLiveMapResult {
   const [assets, setAssets] = useState<Map<string, LiveAsset>>(() =>
     seedAssets(initialAssets),
+  );
+  const [inventory, setInventory] = useState<Map<number, InventoryLocationDTO>>(
+    () => seedInventory(initialInventory),
   );
   // Null until the channel reports. Derived below rather than stored as
   // "idle", so toggling the layer off never needs a setState in an effect.
@@ -97,6 +111,12 @@ export function useLiveMap({
   if (initialAssets !== prevInitial) {
     setPrevInitial(initialAssets);
     setAssets(seedAssets(initialAssets));
+  }
+  const [prevInitialInventory, setPrevInitialInventory] =
+    useState(initialInventory);
+  if (initialInventory !== prevInitialInventory) {
+    setPrevInitialInventory(initialInventory);
+    setInventory(seedInventory(initialInventory));
   }
 
   const flush = useCallback(() => {
@@ -165,6 +185,17 @@ export function useLiveMap({
         if (event.kind === "LAYOUT" || event.kind === "BLOCKAGE") {
           setLayoutChangedAt(Date.now());
         }
+        // Stock edits are rare compared to position ticks, so there is no
+        // burst to coalesce -- applied straight to state instead of routed
+        // through the flush buffer built for 5 Hz telemetry.
+        if (event.kind === "INVENTORY" && event.payload) {
+          const row = event.payload as InventoryLocationDTO;
+          setInventory((previous) => {
+            const next = new Map(previous);
+            next.set(row.locationId, row);
+            return next;
+          });
+        }
       });
 
       channel.subscribe((status) => {
@@ -200,6 +231,7 @@ export function useLiveMap({
 
   return {
     assets,
+    inventory,
     connection,
     layoutChangedAt,
     resyncRequestedAt,

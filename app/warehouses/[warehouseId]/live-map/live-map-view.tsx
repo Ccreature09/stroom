@@ -7,16 +7,21 @@ import type {
   FeatureDTO,
   FeatureKindDTO,
   HallDTO,
+  InventoryLocationDTO,
+  ItemSearchResultDTO,
   LiveAssetDTO,
   LocationDTO,
   NavGraphDTO,
+  RoutingVehicleDTO,
 } from "@/lib/warehouse-map/types";
 import type { LiveAsset } from "@/lib/warehouse-map/live-map";
+import type { RoutePreview } from "@/lib/warehouse-map/routing-server";
 import type { Point } from "@/lib/warehouse-map/geometry";
 import LiveMapCanvas from "./live-map-canvas";
 import BlockagePanel from "./blockage-panel";
 import AssetRoster from "./asset-roster";
 import AnalyticsPanel from "./analytics-panel";
+import InventoryPanel from "./inventory-panel";
 import { useLiveMap } from "./use-live-map";
 import type { BottleneckDTO } from "./traffic-actions";
 import type { HeatmapCell } from "@/lib/warehouse-map/traffic";
@@ -31,7 +36,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Radio, RefreshCw } from "lucide-react";
+import { Info, Radio, RefreshCw } from "lucide-react";
 
 const CONNECTION_STYLE: Record<string, string> = {
   live: "text-emerald-600",
@@ -82,6 +87,9 @@ export default function LiveMapView({
   bottlenecks,
   heatmapCells,
   heatmapCellSizeMm,
+  initialInventory,
+  routingVehicles,
+  hasNavGraph,
 }: {
   warehouseId: number;
   halls: HallDTO[];
@@ -97,14 +105,44 @@ export default function LiveMapView({
   bottlenecks: BottleneckDTO[];
   heatmapCells: HeatmapCell[];
   heatmapCellSizeMm: number;
+  initialInventory: InventoryLocationDTO[];
+  routingVehicles: RoutingVehicleDTO[];
+  hasNavGraph: boolean;
 }) {
   const router = useRouter();
   const [, startTransition] = useTransition();
   const [isPaused, setIsPaused] = useState(false);
   const [showNavGraph, setShowNavGraph] = useState(false);
   const [showHeatmap, setShowHeatmap] = useState(false);
+  const [showInventory, setShowInventory] = useState(true);
   const [pickedPoint, setPickedPoint] = useState<Point | null>(null);
   const [isPicking, setIsPicking] = useState(false);
+
+  // Find-item-and-route state. Origin is picked on the canvas (a read-only
+  // click, not a mutation -- see locationAtPoint in the canvas), destinations
+  // come from the inventory search results below.
+  const [originLocationId, setOriginLocationId] = useState<number | null>(
+    null,
+  );
+  const [pickingOrigin, setPickingOrigin] = useState(false);
+  const [destinations, setDestinations] = useState<ItemSearchResultDTO[]>([]);
+  const [searchResultIds, setSearchResultIds] = useState<number[]>([]);
+  const [routePreview, setRoutePreview] = useState<RoutePreview | null>(null);
+
+  const highlightedLocationIds = useMemo(() => {
+    const ids = new Set<number>(searchResultIds);
+    for (const d of destinations) ids.add(d.locationId);
+    return ids;
+  }, [searchResultIds, destinations]);
+
+  const originLocationCode = useMemo(
+    () =>
+      originLocationId != null
+        ? (locations.find((l) => l.locationId === originLocationId)
+            ?.locationCode ?? null)
+        : null,
+    [locations, originLocationId],
+  );
 
   // Snapshot -> live shape. Memoised on identity so the hook does not reseed
   // its asset map on every render.
@@ -120,6 +158,7 @@ export default function LiveMapView({
     hallId: hall.hallId,
     enabled: !isPaused,
     initialAssets: seededAssets,
+    initialInventory,
   });
 
   // A layout republish or a blockage raised elsewhere makes what is on screen
@@ -138,6 +177,40 @@ export default function LiveMapView({
   function handlePointPicked(point: Point) {
     setPickedPoint(point);
     setIsPicking(false);
+  }
+
+  // Blockage placement and route-origin picking share the same canvas click
+  // -- only one can be "armed" at a time, so starting either cancels the
+  // other rather than letting a click satisfy both silently.
+  function handleStartPickBlockage() {
+    setPickedPoint(null);
+    setPickingOrigin(false);
+    setIsPicking(true);
+  }
+
+  function handleStartPickOrigin() {
+    setIsPicking(false);
+    setPickingOrigin(true);
+  }
+
+  function handleRouteOriginPicked(locationId: number) {
+    setOriginLocationId(locationId);
+    setPickingOrigin(false);
+    setRoutePreview(null);
+  }
+
+  function handleAddDestination(result: ItemSearchResultDTO) {
+    setDestinations((prev) =>
+      prev.some((d) => d.locationId === result.locationId)
+        ? prev
+        : [...prev, result],
+    );
+    setRoutePreview(null);
+  }
+
+  function handleRemoveDestination(locationId: number) {
+    setDestinations((prev) => prev.filter((d) => d.locationId !== locationId));
+    setRoutePreview(null);
   }
 
   return (
@@ -212,9 +285,63 @@ export default function LiveMapView({
               Show travel network
             </Label>
           </div>
+
+          <div className="flex items-center space-x-2">
+            <Checkbox
+              id="show-inventory"
+              checked={showInventory}
+              onCheckedChange={(checked) => setShowInventory(checked === true)}
+            />
+            <Label
+              htmlFor="show-inventory"
+              className="cursor-pointer text-xs font-medium leading-none"
+            >
+              Show inventory
+            </Label>
+          </div>
+        </div>
+
+        <div className="flex items-start gap-2 rounded-md border border-sky-200 bg-sky-50 px-2.5 py-2 text-[11px] leading-snug text-sky-900">
+          <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          <p>
+            Positions are scan-derived: each fix comes from someone&apos;s last
+            inventory action, not a continuous feed. Most warehouses don&apos;t
+            run RTLS hardware, so this is the honest default rather than a
+            simulated one -- certainty fades with age (see the % on each
+            person below) instead of staying pinned to a stale spot.
+          </p>
         </div>
 
         <AssetRoster assets={assetList} />
+
+        <InventoryPanel
+          warehouseId={warehouseId}
+          hallId={hall.hallId}
+          vehicles={routingVehicles}
+          hasGraph={hasNavGraph}
+          originLocationId={originLocationId}
+          originLocationCode={originLocationCode}
+          pickingOrigin={pickingOrigin}
+          onStartPickOrigin={handleStartPickOrigin}
+          onClearOrigin={() => {
+            setOriginLocationId(null);
+            setRoutePreview(null);
+          }}
+          destinations={destinations}
+          onAddDestination={handleAddDestination}
+          onRemoveDestination={handleRemoveDestination}
+          onClearDestinations={() => {
+            setDestinations([]);
+            setRoutePreview(null);
+          }}
+          preview={routePreview}
+          onPreview={setRoutePreview}
+          onClearPreview={() => setRoutePreview(null)}
+          onSearchResultsChange={(results) =>
+            setSearchResultIds(results.map((r) => r.locationId))
+          }
+          locked={false}
+        />
 
         <BlockagePanel
           warehouseId={warehouseId}
@@ -222,10 +349,7 @@ export default function LiveMapView({
           blockages={blockages}
           pickedPoint={pickedPoint}
           isPicking={isPicking}
-          onStartPicking={() => {
-            setPickedPoint(null);
-            setIsPicking(true);
-          }}
+          onStartPicking={handleStartPickBlockage}
           onCancel={() => {
             setPickedPoint(null);
             setIsPicking(false);
@@ -258,9 +382,19 @@ export default function LiveMapView({
             heatmapCellSizeMm={heatmapCellSizeMm}
             bottleneckEdges={bottlenecks}
             assets={assetList}
-            routes={[]}
+            routes={
+              routePreview?.points
+                ? [{ key: "inventory-route", points: routePreview.points }]
+                : []
+            }
             pickingPoint={isPicking}
             onPointPicked={handlePointPicked}
+            inventory={live.inventory}
+            showInventory={showInventory}
+            highlightedLocationIds={highlightedLocationIds}
+            routeOriginLocationId={originLocationId}
+            pickingRouteOrigin={pickingOrigin}
+            onRouteOriginPicked={handleRouteOriginPicked}
           />
         </div>
       </div>

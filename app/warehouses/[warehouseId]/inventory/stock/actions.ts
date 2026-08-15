@@ -1,6 +1,6 @@
 "use server";
 
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { db } from "@/lib/db";
 import {
@@ -11,21 +11,20 @@ import {
   stockMovements,
 } from "@/drizzle/schema";
 import { requireWarehouseActionAccess } from "@/lib/warehouse-access";
+import { reportEmployeeAtLocation } from "@/lib/warehouse-map/asset-positions";
+import {
+  notifyLocationInventoryChanged,
+  receiveIntoInventory,
+  stockKeyCondition,
+} from "@/lib/inventory/receiving";
 
 // Movement types written to stock_movements. Every quantity change to the
 // inventory table goes through one of these so the movements log stays a
 // complete audit trail -- nothing mutates stock without a matching row.
-const MOVEMENT_RECEIPT = "RECEIPT";
+// RECEIPT lives in lib/inventory/receiving.ts, shared with PO receiving.
 const MOVEMENT_ADJUSTMENT_IN = "ADJUSTMENT_IN";
 const MOVEMENT_ADJUSTMENT_OUT = "ADJUSTMENT_OUT";
 const MOVEMENT_TRANSFER = "TRANSFER";
-
-type StockKey = {
-  locationId: number;
-  itemId: number;
-  batchNumber: string | null;
-  lotNumber: string | null;
-};
 
 function parsePositiveInt(value: FormDataEntryValue | null) {
   if (value === null) return null;
@@ -45,22 +44,6 @@ function parseOptionalText(value: FormDataEntryValue | null) {
   if (value === null) return null;
   const raw = String(value).trim();
   return raw ? raw : null;
-}
-
-// The unique constraint on (location, item, batch, lot) treats NULLs as
-// distinct, so onConflict can't be used to upsert -- a NULL batch would insert
-// a duplicate row instead of merging. Match explicitly with IS NULL instead.
-function stockKeyCondition(key: StockKey) {
-  return and(
-    eq(inventory.locationId, key.locationId),
-    eq(inventory.itemId, key.itemId),
-    key.batchNumber === null
-      ? isNull(inventory.batchNumber)
-      : eq(inventory.batchNumber, key.batchNumber),
-    key.lotNumber === null
-      ? isNull(inventory.lotNumber)
-      : eq(inventory.lotNumber, key.lotNumber),
-  );
 }
 
 /** Confirms a location is inside this warehouse before stock is written to it. */
@@ -184,60 +167,19 @@ export async function receiveStock(formData: FormData) {
     return { error: "Inventory status not found for your organization." };
   }
 
-  const key: StockKey = { locationId, itemId, batchNumber, lotNumber };
-
   const conflict = await db.transaction(async (tx) => {
-    const [existing] = await tx
-      .select({
-        inventoryId: inventory.inventoryId,
-        quantity: inventory.quantity,
-        statusId: inventory.statusId,
-      })
-      .from(inventory)
-      .where(stockKeyCondition(key))
-      .limit(1);
-
-    if (existing) {
-      // One row per location+item+batch+lot, so status is a property of that
-      // line. Merging stock of a different status would silently reclassify
-      // what's already there -- refuse and let the user adjust deliberately.
-      if (existing.statusId !== statusId) {
-        return "status-mismatch" as const;
-      }
-
-      await tx
-        .update(inventory)
-        .set({
-          quantity: (existing.quantity ?? 0) + quantity,
-          expiryDate: expiryDate ?? undefined,
-          updatedAt: new Date().toISOString(),
-        })
-        .where(eq(inventory.inventoryId, existing.inventoryId));
-    } else {
-      await tx.insert(inventory).values({
-        locationId,
-        itemId,
-        quantity,
-        batchNumber,
-        lotNumber,
-        expiryDate,
-        statusId,
-      });
-    }
-
-    await tx.insert(stockMovements).values({
+    const outcome = await receiveIntoInventory(tx, {
       employeeId: employee.employeeId,
+      locationId,
       itemId,
+      quantity,
       batchNumber,
       lotNumber,
       expiryDate,
-      quantity,
-      destinationLocationId: locationId,
-      movementType: MOVEMENT_RECEIPT,
+      statusId,
       reasonCode,
     });
-
-    return null;
+    return outcome === "status-mismatch" ? ("status-mismatch" as const) : null;
   });
 
   if (conflict === "status-mismatch") {
@@ -248,6 +190,13 @@ export async function receiveStock(formData: FormData) {
   }
 
   revalidateStock(warehouseId);
+  await notifyLocationInventoryChanged(warehouseId, locationId);
+  await reportEmployeeAtLocation(
+    warehouseId,
+    employee.organizationId,
+    employee,
+    locationId,
+  );
   return { success: true };
 }
 
@@ -310,6 +259,15 @@ export async function adjustStock(formData: FormData) {
   });
 
   revalidateStock(warehouseId);
+  if (existing.locationId !== null) {
+    await notifyLocationInventoryChanged(warehouseId, existing.locationId);
+    await reportEmployeeAtLocation(
+      warehouseId,
+      employee.organizationId,
+      employee,
+      existing.locationId,
+    );
+  }
   return { success: true };
 }
 
@@ -450,6 +408,16 @@ export async function moveStock(formData: FormData) {
   }
 
   revalidateStock(warehouseId);
+  await notifyLocationInventoryChanged(warehouseId, sourceLocationId);
+  await notifyLocationInventoryChanged(warehouseId, destinationLocationId);
+  // Reported at the destination -- wherever the mover ended up, not where
+  // they started.
+  await reportEmployeeAtLocation(
+    warehouseId,
+    employee.organizationId,
+    employee,
+    destinationLocationId,
+  );
   return { success: true };
 }
 
@@ -490,5 +458,14 @@ export async function deleteStockLine(formData: FormData) {
   });
 
   revalidateStock(warehouseId);
+  if (existing.locationId !== null) {
+    await notifyLocationInventoryChanged(warehouseId, existing.locationId);
+    await reportEmployeeAtLocation(
+      warehouseId,
+      employee.organizationId,
+      employee,
+      existing.locationId,
+    );
+  }
   return { success: true };
 }

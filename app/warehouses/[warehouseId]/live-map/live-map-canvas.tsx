@@ -13,11 +13,16 @@ import type {
   FeatureDTO,
   FeatureKindDTO,
   HallDTO,
+  InventoryLocationDTO,
   LocationDTO,
   NavGraphDTO,
 } from "@/lib/warehouse-map/types";
 import { colorForLocation, sortFeaturesForRender } from "@/lib/warehouse-map/types";
-import { footprintVertices, type Point } from "@/lib/warehouse-map/geometry";
+import {
+  footprintVertices,
+  pointInPolygon,
+  type Point,
+} from "@/lib/warehouse-map/geometry";
 import {
   CONFIDENCE_STALE,
   renderAssetAt,
@@ -77,6 +82,16 @@ export type LiveMapCanvasProps = {
   /** Set while the supervisor is placing a blockage. */
   pickingPoint: boolean;
   onPointPicked: (point: Point) => void;
+  /** Current stock aggregate per location, keyed by locationId. */
+  inventory: Map<number, InventoryLocationDTO>;
+  showInventory: boolean;
+  /** Locations matching an item search -- drawn with a pulsing outline. */
+  highlightedLocationIds: Set<number>;
+  /** Chosen start point for a route preview, drawn as a distinct marker. */
+  routeOriginLocationId: number | null;
+  /** Set while picking a location on the canvas as a route's origin. */
+  pickingRouteOrigin: boolean;
+  onRouteOriginPicked: (locationId: number) => void;
 };
 
 export default function LiveMapCanvas({
@@ -95,12 +110,19 @@ export default function LiveMapCanvas({
   routes,
   pickingPoint,
   onPointPicked,
+  inventory,
+  showInventory,
+  highlightedLocationIds,
+  routeOriginLocationId,
+  pickingRouteOrigin,
+  onRouteOriginPicked,
 }: LiveMapCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const appRef = useRef<Application | null>(null);
   const viewportRef = useRef<Viewport | null>(null);
   const staticLayerRef = useRef<Container | null>(null);
   const heatmapLayerRef = useRef<Graphics | null>(null);
+  const inventoryLayerRef = useRef<Graphics | null>(null);
   const liveLayerRef = useRef<Graphics | null>(null);
   const [isReady, setIsReady] = useState(false);
   const [initError, setInitError] = useState<string | null>(null);
@@ -116,6 +138,11 @@ export default function LiveMapCanvas({
   const bottleneckEdgesRef = useRef(bottleneckEdges);
   const pickingRef = useRef(pickingPoint);
   const onPointPickedRef = useRef(onPointPicked);
+  const locationsRef = useRef(locations);
+  const highlightedLocationIdsRef = useRef(highlightedLocationIds);
+  const routeOriginLocationIdRef = useRef(routeOriginLocationId);
+  const pickingRouteOriginRef = useRef(pickingRouteOrigin);
+  const onRouteOriginPickedRef = useRef(onRouteOriginPicked);
 
   useEffect(() => {
     assetsRef.current = assets;
@@ -124,7 +151,56 @@ export default function LiveMapCanvas({
     bottleneckEdgesRef.current = bottleneckEdges;
     pickingRef.current = pickingPoint;
     onPointPickedRef.current = onPointPicked;
-  }, [assets, blockages, routes, bottleneckEdges, pickingPoint, onPointPicked]);
+    locationsRef.current = locations;
+    highlightedLocationIdsRef.current = highlightedLocationIds;
+    routeOriginLocationIdRef.current = routeOriginLocationId;
+    pickingRouteOriginRef.current = pickingRouteOrigin;
+    onRouteOriginPickedRef.current = onRouteOriginPicked;
+  }, [
+    assets,
+    blockages,
+    routes,
+    bottleneckEdges,
+    pickingPoint,
+    onPointPicked,
+    locations,
+    highlightedLocationIds,
+    routeOriginLocationId,
+    pickingRouteOrigin,
+    onRouteOriginPicked,
+  ]);
+
+  /** Nearest location to a clicked world point: exact OBB hit first (accounts
+   *  for rotation), falling back to nearest centre within a generous
+   *  tolerance so a click just outside a bay's edge still resolves. */
+  function locationAtPoint(point: Point): LocationDTO | null {
+    for (const location of locationsRef.current) {
+      const corners = footprintVertices({
+        geometryKind: "RECT",
+        originXMm: location.physicalX,
+        originYMm: location.physicalY,
+        widthMm: location.physicalWidthMm,
+        lengthMm: location.physicalLengthMm,
+        rotationDegrees: location.rotationDegrees,
+        points: null,
+      });
+      if (pointInPolygon(point, corners)) return location;
+    }
+
+    const TOLERANCE_MM = 3000;
+    let nearest: LocationDTO | null = null;
+    let nearestDistance = TOLERANCE_MM;
+    for (const location of locationsRef.current) {
+      const cx = location.physicalX + location.physicalWidthMm / 2;
+      const cy = location.physicalY + location.physicalLengthMm / 2;
+      const distance = Math.hypot(point.x - cx, point.y - cy);
+      if (distance < nearestDistance) {
+        nearestDistance = distance;
+        nearest = location;
+      }
+    }
+    return nearest;
+  }
 
   function handleZoomIn() {
     const vp = viewportRef.current;
@@ -262,6 +338,39 @@ export default function LiveMapCanvas({
     }
   }
 
+  // Inventory overlay: redrawn on the same low cadence as the heatmap --
+  // stock changes arrive as occasional broadcast events, not a per-frame
+  // signal, so there is nothing for the ticker to interpolate here.
+  function drawInventory() {
+    const g = inventoryLayerRef.current;
+    if (!g) return;
+    g.clear();
+    if (!showInventory || inventory.size === 0) return;
+
+    const maxQuantity = Math.max(
+      1,
+      ...Array.from(inventory.values(), (row) => row.totalQuantity),
+    );
+    const drawn = new Set<string>();
+    for (const location of locations) {
+      const key = `${location.physicalX}:${location.physicalY}:${location.physicalWidthMm}:${location.physicalLengthMm}`;
+      if (drawn.has(key)) continue;
+      drawn.add(key);
+      const stock = inventory.get(location.locationId);
+      if (!stock || stock.totalQuantity <= 0) continue;
+      // Darker/more opaque with more stock -- a supervisor should be able to
+      // tell "light" from "full" at a glance, the same intensity language
+      // the heatmap already uses.
+      const intensity = Math.min(1, stock.totalQuantity / maxQuantity);
+      g.rect(
+        location.physicalX,
+        location.physicalY,
+        location.physicalWidthMm,
+        location.physicalLengthMm,
+      ).fill({ color: 0x0ea5e9, alpha: 0.15 + intensity * 0.45 });
+    }
+  }
+
   // --- Init ---------------------------------------------------------------
 
   useEffect(() => {
@@ -321,6 +430,11 @@ export default function LiveMapCanvas({
       viewport.addChild(heatmapLayer);
       heatmapLayerRef.current = heatmapLayer;
 
+      const inventoryLayer = new Graphics();
+      inventoryLayer.eventMode = "none";
+      viewport.addChild(inventoryLayer);
+      inventoryLayerRef.current = inventoryLayer;
+
       const liveLayer = new Graphics();
       liveLayer.eventMode = "none";
       viewport.addChild(liveLayer);
@@ -331,9 +445,16 @@ export default function LiveMapCanvas({
 
       viewport.eventMode = "static";
       viewport.on("pointerdown", (e: FederatedPointerEvent) => {
-        if (!pickingRef.current || e.button !== 0) return;
+        if (e.button !== 0) return;
         const world = viewport.toWorld(e.global);
-        onPointPickedRef.current({ x: world.x, y: world.y });
+        if (pickingRef.current) {
+          onPointPickedRef.current({ x: world.x, y: world.y });
+          return;
+        }
+        if (pickingRouteOriginRef.current) {
+          const location = locationAtPoint({ x: world.x, y: world.y });
+          if (location) onRouteOriginPickedRef.current(location.locationId);
+        }
       });
 
       // Live redraw on the ticker, not on React state. This is what turns
@@ -382,6 +503,42 @@ export default function LiveMapCanvas({
           g.stroke({ width: 4 / scale, color: 0xf59e0b, alpha: 0.85 });
         }
 
+        // Item-search matches pulse the same way bottleneck edges do -- a
+        // location holding the searched item should be as hard to miss as a
+        // congested aisle.
+        if (highlightedLocationIdsRef.current.size > 0) {
+          const pulse = 0.5 + 0.5 * Math.sin(Date.now() / 300);
+          for (const location of locationsRef.current) {
+            if (!highlightedLocationIdsRef.current.has(location.locationId)) {
+              continue;
+            }
+            g.rect(
+              location.physicalX,
+              location.physicalY,
+              location.physicalWidthMm,
+              location.physicalLengthMm,
+            ).stroke({
+              width: (6 + pulse * 4) / scale,
+              color: 0xd946ef,
+              alpha: 0.6 + pulse * 0.4,
+            });
+          }
+        }
+
+        const originId = routeOriginLocationIdRef.current;
+        if (originId != null) {
+          const origin = locationsRef.current.find(
+            (l) => l.locationId === originId,
+          );
+          if (origin) {
+            const cx = origin.physicalX + origin.physicalWidthMm / 2;
+            const cy = origin.physicalY + origin.physicalLengthMm / 2;
+            g.circle(cx, cy, 250 / scale + 250)
+              .fill({ color: 0x16a34a, alpha: 0.25 })
+              .stroke({ width: 3 / scale, color: 0x16a34a, alpha: 0.95 });
+          }
+        }
+
         const now = Date.now();
         for (const asset of assetsRef.current) {
           const rendered = renderAssetAt(asset, now);
@@ -422,6 +579,7 @@ export default function LiveMapCanvas({
       setIsReady(true);
       drawStatic();
       drawHeatmap();
+      drawInventory();
     })();
 
     return () => {
@@ -433,6 +591,7 @@ export default function LiveMapCanvas({
       viewportRef.current = null;
       staticLayerRef.current = null;
       heatmapLayerRef.current = null;
+      inventoryLayerRef.current = null;
       liveLayerRef.current = null;
       if (currentViewport) {
         try {
@@ -467,6 +626,12 @@ export default function LiveMapCanvas({
   }, [heatmapCells, showHeatmap, heatmapCellSizeMm, isReady]);
 
   useEffect(() => {
+    if (!isReady) return;
+    drawInventory();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inventory, showInventory, locations, isReady]);
+
+  useEffect(() => {
     const viewport = viewportRef.current;
     if (!viewport || !isReady) return;
     if (!showNavGraph) return;
@@ -483,7 +648,9 @@ export default function LiveMapCanvas({
     <div className="relative flex h-full w-full overflow-hidden rounded-xl border bg-background/60">
       <div
         ref={containerRef}
-        className={`relative z-0 h-full w-full ${pickingPoint ? "cursor-crosshair" : ""}`}
+        className={`relative z-0 h-full w-full ${
+          pickingPoint || pickingRouteOrigin ? "cursor-crosshair" : ""
+        }`}
       />
 
       {initError && (
@@ -495,6 +662,12 @@ export default function LiveMapCanvas({
       {pickingPoint && (
         <div className="pointer-events-none absolute left-1/2 top-4 z-50 -translate-x-1/2 rounded-md bg-slate-900/90 px-3 py-1.5 text-xs font-medium text-white shadow">
           Click the spot to block
+        </div>
+      )}
+
+      {pickingRouteOrigin && (
+        <div className="pointer-events-none absolute left-1/2 top-4 z-50 -translate-x-1/2 rounded-md bg-emerald-900/90 px-3 py-1.5 text-xs font-medium text-white shadow">
+          Click a location to start the route there
         </div>
       )}
 
