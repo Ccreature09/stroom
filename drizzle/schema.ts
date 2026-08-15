@@ -1310,6 +1310,57 @@ export const taskEligibleDepartments = pgTable(
   ],
 );
 
+// Standing policy for who a kind of work goes to, as opposed to
+// `task_eligible_departments`, which records where one particular task went.
+//
+// Rules are the default applied at task creation; an explicit choice at
+// creation time still wins, so this sets the norm rather than removing the
+// operator's judgement. Scoped per warehouse because the same task type is
+// genuinely owned by differently-named teams at different sites.
+export const taskRoutingRules = pgTable(
+  "task_routing_rules",
+  {
+    ruleId: serial("rule_id").primaryKey().notNull(),
+    warehouseId: integer("warehouse_id").notNull(),
+    taskTypeId: integer("task_type_id").notNull(),
+    departmentId: integer("department_id").notNull(),
+    isActive: boolean("is_active").default(true).notNull(),
+    createdAt: timestamp("created_at", { mode: "string" }).default(
+      sql`CURRENT_TIMESTAMP`,
+    ),
+  },
+  (table) => [
+    index("idx_task_routing_rules_lookup").using(
+      "btree",
+      table.warehouseId.asc().nullsLast().op("int4_ops"),
+      table.taskTypeId.asc().nullsLast().op("int4_ops"),
+    ),
+    foreignKey({
+      columns: [table.warehouseId],
+      foreignColumns: [warehouses.warehouseId],
+      name: "task_routing_rules_warehouse_id_fkey",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.taskTypeId],
+      foreignColumns: [taskTypes.taskTypeId],
+      name: "task_routing_rules_task_type_id_fkey",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.departmentId],
+      foreignColumns: [departments.departmentId],
+      name: "task_routing_rules_department_id_fkey",
+    }).onDelete("cascade"),
+    // A task type may route to several departments, but each pairing is
+    // stated once -- a duplicate rule would silently double-insert the same
+    // eligibility row on every task created.
+    unique("uq_task_routing_rules_wh_type_dept").on(
+      table.warehouseId,
+      table.taskTypeId,
+      table.departmentId,
+    ),
+  ],
+);
+
 export const employeeDepartments = pgTable(
   "employee_departments",
   {
@@ -1696,34 +1747,15 @@ export const navEdges = pgTable(
 );
 
 // Turn cost depends on the edge you arrived on, which is why the search runs
-// over directed arcs rather than nodes. Most turns are derived from the angle
-// between them; this table is only for hand-authored exceptions (no left turn
-// out of the dock lane, and so on).
-export const navTurnRestrictions = pgTable(
-  "nav_turn_restrictions",
-  {
-    restrictionId: serial("restriction_id").primaryKey().notNull(),
-    warehouseId: integer("warehouse_id").notNull(),
-    fromEdgeId: integer("from_edge_id").notNull(),
-    toEdgeId: integer("to_edge_id").notNull(),
-    penaltyMs: integer("penalty_ms").default(0).notNull(),
-    isForbidden: boolean("is_forbidden").default(false).notNull(),
-    allowedVehicleMask: bigint("allowed_vehicle_mask", { mode: "number" }),
-  },
-  (table) => [
-    foreignKey({
-      columns: [table.fromEdgeId],
-      foreignColumns: [navEdges.edgeId],
-      name: "nav_turn_restrictions_from_edge_id_fkey",
-    }).onDelete("cascade"),
-    foreignKey({
-      columns: [table.toEdgeId],
-      foreignColumns: [navEdges.edgeId],
-      name: "nav_turn_restrictions_to_edge_id_fkey",
-    }).onDelete("cascade"),
-    unique("uq_nav_turn_restriction").on(table.fromEdgeId, table.toEdgeId),
-  ],
-);
+// over directed arcs rather than nodes -- see routing.ts. Turn cost is
+// derived entirely from the angle between the two arcs.
+//
+// A `nav_turn_restrictions` table for hand-authored exceptions ("no left
+// turn out of the dock lane") existed here and was dropped in migration
+// 0019: it was created with the graph, never written to, never read, and
+// carrying an empty table for a feature nobody had asked for made the
+// schema harder to read for no benefit. Re-adding it is a small additive
+// migration if a real need for per-turn overrides ever turns up.
 
 // Where an operator stands (or a truck parks) to service a bin, and what it
 // costs once they are there.

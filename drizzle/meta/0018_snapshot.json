@@ -1,6 +1,6 @@
 {
-  "id": "a68b5e0b-4336-43bc-9bf6-8e7718c54346",
-  "prevId": "2a57a31b-43c4-486f-8716-040726ea90d3",
+  "id": "81a40fea-d592-4e25-80b5-638901a91c2e",
+  "prevId": "a68b5e0b-4336-43bc-9bf6-8e7718c54346",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -6569,6 +6569,131 @@
         }
       },
       "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.task_routing_rules": {
+      "name": "task_routing_rules",
+      "schema": "",
+      "columns": {
+        "rule_id": {
+          "name": "rule_id",
+          "type": "serial",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "warehouse_id": {
+          "name": "warehouse_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "task_type_id": {
+          "name": "task_type_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "department_id": {
+          "name": "department_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "is_active": {
+          "name": "is_active",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false,
+          "default": "CURRENT_TIMESTAMP"
+        }
+      },
+      "indexes": {
+        "idx_task_routing_rules_lookup": {
+          "name": "idx_task_routing_rules_lookup",
+          "columns": [
+            {
+              "expression": "warehouse_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last",
+              "opclass": "int4_ops"
+            },
+            {
+              "expression": "task_type_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last",
+              "opclass": "int4_ops"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "task_routing_rules_warehouse_id_fkey": {
+          "name": "task_routing_rules_warehouse_id_fkey",
+          "tableFrom": "task_routing_rules",
+          "tableTo": "warehouses",
+          "columnsFrom": [
+            "warehouse_id"
+          ],
+          "columnsTo": [
+            "warehouse_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "task_routing_rules_task_type_id_fkey": {
+          "name": "task_routing_rules_task_type_id_fkey",
+          "tableFrom": "task_routing_rules",
+          "tableTo": "task_types",
+          "columnsFrom": [
+            "task_type_id"
+          ],
+          "columnsTo": [
+            "task_type_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "task_routing_rules_department_id_fkey": {
+          "name": "task_routing_rules_department_id_fkey",
+          "tableFrom": "task_routing_rules",
+          "tableTo": "departments",
+          "columnsFrom": [
+            "department_id"
+          ],
+          "columnsTo": [
+            "department_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "uq_task_routing_rules_wh_type_dept": {
+          "name": "uq_task_routing_rules_wh_type_dept",
+          "nullsNotDistinct": false,
+          "columns": [
+            "warehouse_id",
+            "task_type_id",
+            "department_id"
+          ]
+        }
+      },
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false
