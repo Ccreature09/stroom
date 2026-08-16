@@ -219,6 +219,27 @@ export default async function WarehouseDashboardPage({
             </Link>
           ) : null}
 
+          {/* Performance -- named individuals' output is on this page, so it
+              sits behind canViewMetrics like Time Clock and Live Map. */}
+          {employee.canViewMetrics ? (
+            <Link href={`/warehouses/${warehouse.warehouseId}/metrics`}>
+              <Card className="rounded-2xl border border-slate-200 bg-white shadow-sm transition hover:-translate-y-0.5 hover:border-teal-300 hover:shadow-md h-full">
+                <CardContent className="p-6">
+                  <h2 className="text-lg font-bold text-slate-950">
+                    Performance
+                  </h2>
+                  <p className="mt-2 text-sm text-slate-600">
+                    Throughput, dock-to-stock, count accuracy, and where the
+                    time actually goes.
+                  </p>
+                  <span className="mt-4 inline-flex text-sm font-semibold text-teal-700">
+                    Open module →
+                  </span>
+                </CardContent>
+              </Card>
+            </Link>
+          ) : null}
+
           {/* Time Clock -- workforce hours. Behind the metrics gate, the
               same boundary individual worker location sits behind. */}
           {employee.canViewMetrics ? (

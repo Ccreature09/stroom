@@ -152,6 +152,23 @@ export async function requireInternalManagerAccess(warehouseIdParam: string) {
   return access;
 }
 
+/**
+ * The performance dashboard. Gated on `canViewMetrics` rather than
+ * `canAssignTasks`, because the two are genuinely different jobs: a shift lead
+ * directs work without needing the productivity table, and an operations
+ * analyst reads the productivity table without directing anyone.
+ *
+ * This is the one gate that exposes named individuals' output to whoever holds
+ * it, so it stays its own permission and is not implied by any other.
+ */
+export async function requireMetricsAccess(warehouseIdParam: string) {
+  const access = await requireWarehouseAccess(warehouseIdParam);
+  if (access.employee.canViewMetrics !== true) {
+    redirect(`/warehouses/${access.warehouseId}/floor`);
+  }
+  return access;
+}
+
 export type InventoryActionContext = {
   employee: NonNullable<Awaited<ReturnType<typeof loadEmployee>>>;
   warehouseId: number;
