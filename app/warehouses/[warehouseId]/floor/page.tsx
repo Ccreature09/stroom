@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { and, desc, eq, inArray, isNull, or } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import {
   bookingTasks,
@@ -15,6 +15,9 @@ import {
   taskTypes,
   timeClockEntries,
   unloadingTasks,
+  salesOrders,
+  vasTaskSteps,
+  vasTasks,
 } from "@/drizzle/schema";
 import { requireWarehouseAccess } from "@/lib/warehouse-access";
 import { getTaskLookups } from "@/lib/inbound/task-lookups";
@@ -30,6 +33,7 @@ import {
   CalendarClock,
   ClipboardCheck,
   ClipboardList,
+  Package,
   PackageCheck,
   PackagePlus,
   Truck,
@@ -110,6 +114,7 @@ export default async function FloorHomePage({
     loadingRows,
     replenRows,
     countRows,
+    vasRows,
   ] = await Promise.all([
     employee.canBook
       ? db
@@ -298,6 +303,40 @@ export default async function FloorHomePage({
           .orderBy(locations.locationCode)
           .limit(20)
       : Promise.resolve([]),
+    employee.canPack
+      ? db
+          .select({
+            taskId: tasks.taskId,
+            statusCode: taskStatuses.code,
+            assignedEmployeeId: tasks.assignedEmployeeId,
+            soNumber: salesOrders.soNumber,
+            lpnId: vasTasks.lpnId,
+            totalSteps: sql<number>`count(${vasTaskSteps.stepId})::int`,
+            doneSteps: sql<number>`count(*) filter (where ${vasTaskSteps.isDone})::int`,
+          })
+          .from(vasTasks)
+          .innerJoin(tasks, eq(vasTasks.taskId, tasks.taskId))
+          .innerJoin(taskStatuses, eq(tasks.statusId, taskStatuses.statusId))
+          .innerJoin(taskTypes, eq(tasks.taskTypeId, taskTypes.taskTypeId))
+          .innerJoin(salesOrders, eq(vasTasks.soId, salesOrders.soId))
+          .leftJoin(vasTaskSteps, eq(vasTaskSteps.taskId, vasTasks.taskId))
+          .where(
+            and(
+              eq(tasks.warehouseId, parsedWarehouseId),
+              eq(taskTypes.code, "VAS"),
+              mine,
+              or(...ACTIVE_STATUSES.map((code) => eq(taskStatuses.code, code))),
+            ),
+          )
+          .groupBy(
+            tasks.taskId,
+            taskStatuses.code,
+            salesOrders.soNumber,
+            vasTasks.lpnId,
+          )
+          .orderBy(tasks.priority, tasks.createdAt)
+          .limit(20)
+      : Promise.resolve([]),
   ]);
 
   // Location codes for the replenishment rows -- two locations per task, so
@@ -326,7 +365,8 @@ export default async function FloorHomePage({
     employee.canModifyInventory ||
     employee.canPick ||
     employee.canLoad ||
-    employee.canReplenish;
+    employee.canReplenish ||
+    employee.canPack;
 
   return (
     <main className="flex-1 space-y-6 bg-slate-50 p-5 sm:p-8">
@@ -465,6 +505,34 @@ export default async function FloorHomePage({
                 </div>
                 <div className="text-xs text-slate-500">
                   Take {row.pickQuantity} → {row.lpnId}
+                  {row.assignedEmployeeId ? "" : " · unclaimed"}
+                </div>
+              </div>
+              <StatusPill code={row.statusCode} />
+            </Link>
+          ))}
+        </TaskSection>
+      ) : null}
+
+      {employee.canPack ? (
+        <TaskSection
+          title="Packing & VAS"
+          icon={<Package className="h-5 w-5 text-slate-400" />}
+          emptyLabel="Nothing waiting to be packed."
+        >
+          {vasRows.map((row) => (
+            <Link
+              key={row.taskId}
+              href={`/warehouses/${parsedWarehouseId}/floor/vas/${row.taskId}`}
+              className="flex items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3.5 shadow-sm transition hover:border-teal-300 hover:shadow-md"
+            >
+              <div className="min-w-0">
+                <div className="font-mono text-sm font-bold text-slate-900">
+                  {row.soNumber}
+                </div>
+                <div className="text-xs text-slate-500">
+                  {row.doneSteps}/{row.totalSteps} done
+                  {row.lpnId ? ` · ${row.lpnId}` : ""}
                   {row.assignedEmployeeId ? "" : " · unclaimed"}
                 </div>
               </div>

@@ -14,6 +14,7 @@ import {
 import { notifyLocationInventoryChanged } from "@/lib/inventory/receiving";
 import { reportEmployeeAtLocation } from "@/lib/warehouse-map/asset-positions";
 import { orderPickLpn, syncSalesOrderStatus } from "@/lib/outbound/fulfilment";
+import { raiseVasForOrder, syncOrderVasStatus } from "@/lib/vas/vas-server";
 
 /** Movement type for stock leaving a pick face against a customer order. */
 const MOVEMENT_PICK = "PICK";
@@ -202,6 +203,15 @@ export async function completePickingTask(formData: FormData) {
         .limit(1);
       if (so && orderPickLpn(so.soNumber) === pick.lpnId) {
         await syncSalesOrderStatus(tx, warehouseId, so.soId, so.soNumber);
+
+        // The moment an order finishes picking is the moment value-added
+        // work becomes possible, so that is where it is raised -- inside the
+        // same transaction, so a completed pick can never leave an order
+        // that needs packing without a task telling anyone.
+        // No-ops when VAS is switched off, not set to auto-raise, or when no
+        // standing rule matches this order.
+        await raiseVasForOrder(tx, warehouseId, so.soId);
+        await syncOrderVasStatus(tx, warehouseId, so.soId);
       }
     }
 

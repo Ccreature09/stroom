@@ -34,6 +34,13 @@ export default async function OutboundDashboardPage({
       cta: "View Picks",
     },
     {
+      href: `/warehouses/${parsedWarehouseId}/outbound/vas`,
+      title: "Packing & VAS",
+      description:
+        "Optional per warehouse. Standing rules decide what each picked order needs doing to it before it ships.",
+      cta: "View VAS Queue",
+    },
+    {
       href: `/warehouses/${parsedWarehouseId}/outbound/shipments`,
       title: "Shipments",
       description:

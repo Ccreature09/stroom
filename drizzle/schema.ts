@@ -1361,6 +1361,183 @@ export const taskRoutingRules = pgTable(
   ],
 );
 
+// Whether a task type is used at all in this warehouse, and whether it is
+// raised automatically.
+//
+// Not every warehouse does every step. One shipping full pallets never packs;
+// one shipping single orders always does. Hardcoding packing into the
+// outbound flow would be wrong for the first and invisible for the second,
+// so it is a per-warehouse switch instead. Absent row = the type's own
+// default (enabled, not auto-raised), which is what every task type did
+// before this table existed.
+export const warehouseTaskSettings = pgTable(
+  "warehouse_task_settings",
+  {
+    settingId: serial("setting_id").primaryKey().notNull(),
+    warehouseId: integer("warehouse_id").notNull(),
+    taskTypeId: integer("task_type_id").notNull(),
+    isEnabled: boolean("is_enabled").default(true).notNull(),
+    /** Raise it automatically when the preceding step finishes. */
+    autoCreate: boolean("auto_create").default(false).notNull(),
+    updatedAt: timestamp("updated_at", { mode: "string" }).default(
+      sql`CURRENT_TIMESTAMP`,
+    ),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.warehouseId],
+      foreignColumns: [warehouses.warehouseId],
+      name: "warehouse_task_settings_warehouse_id_fkey",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.taskTypeId],
+      foreignColumns: [taskTypes.taskTypeId],
+      name: "warehouse_task_settings_task_type_id_fkey",
+    }).onDelete("cascade"),
+    unique("uq_warehouse_task_settings").on(table.warehouseId, table.taskTypeId),
+  ],
+);
+
+// A named, reusable set of value-added instructions -- "Retail pack: apply
+// logo, yellow outer box". Matched against an order to decide whether it
+// needs VAS at all and what the checklist should start as.
+export const vasRules = pgTable(
+  "vas_rules",
+  {
+    ruleId: serial("rule_id").primaryKey().notNull(),
+    warehouseId: integer("warehouse_id").notNull(),
+    name: varchar({ length: 100 }).notNull(),
+    description: text(),
+    // What the rule attaches to. CUSTOMER and ITEM narrow it; ALL applies to
+    // every order, which is the "we pack everything" case.
+    appliesTo: varchar("applies_to", { length: 20 }).default("ALL").notNull(),
+    customerId: integer("customer_id"),
+    itemId: integer("item_id"),
+    isActive: boolean("is_active").default(true).notNull(),
+    createdAt: timestamp("created_at", { mode: "string" }).default(
+      sql`CURRENT_TIMESTAMP`,
+    ),
+  },
+  (table) => [
+    index("idx_vas_rules_warehouse").using(
+      "btree",
+      table.warehouseId.asc().nullsLast().op("int4_ops"),
+    ),
+    foreignKey({
+      columns: [table.warehouseId],
+      foreignColumns: [warehouses.warehouseId],
+      name: "vas_rules_warehouse_id_fkey",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.customerId],
+      foreignColumns: [customers.customerId],
+      name: "vas_rules_customer_id_fkey",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.itemId],
+      foreignColumns: [items.itemId],
+      name: "vas_rules_item_id_fkey",
+    }).onDelete("cascade"),
+    check(
+      "chk_vas_rule_applies_to",
+      sql`(applies_to)::text = ANY ((ARRAY['ALL'::character varying, 'CUSTOMER'::character varying, 'ITEM'::character varying])::text[])`,
+    ),
+    // A CUSTOMER rule must name a customer and an ITEM rule an item, or the
+    // rule silently matches nothing and nobody notices until stock ships
+    // unpackaged.
+    check(
+      "chk_vas_rule_target",
+      sql`(applies_to = 'ALL' AND customer_id IS NULL AND item_id IS NULL)
+       OR (applies_to = 'CUSTOMER' AND customer_id IS NOT NULL)
+       OR (applies_to = 'ITEM' AND item_id IS NOT NULL)`,
+    ),
+  ],
+);
+
+// The individual instructions a rule contributes. Free text on purpose:
+// "apply the customer's logo to the short face" is not something a schema can
+// usefully enumerate, and a supervisor writing it in their own words is the
+// point.
+export const vasRuleSteps = pgTable(
+  "vas_rule_steps",
+  {
+    stepId: serial("step_id").primaryKey().notNull(),
+    ruleId: integer("rule_id").notNull(),
+    sortOrder: integer("sort_order").default(0).notNull(),
+    instruction: text().notNull(),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.ruleId],
+      foreignColumns: [vasRules.ruleId],
+      name: "vas_rule_steps_rule_id_fkey",
+    }).onDelete("cascade"),
+  ],
+);
+
+// The work itself: one VAS task per order that needs it.
+export const vasTasks = pgTable(
+  "vas_tasks",
+  {
+    taskId: uuid("task_id").primaryKey().notNull(),
+    soId: integer("so_id").notNull(),
+    /** The order pallet being worked on, when there is one. */
+    lpnId: varchar("lpn_id", { length: 50 }),
+    notes: text(),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.taskId],
+      foreignColumns: [tasks.taskId],
+      name: "vas_tasks_task_id_fkey",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.soId],
+      foreignColumns: [salesOrders.soId],
+      name: "vas_tasks_so_id_fkey",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.lpnId],
+      foreignColumns: [pallets.lpnId],
+      name: "vas_tasks_lpn_id_fkey",
+    }).onDelete("set null"),
+  ],
+);
+
+// The checklist the worker actually ticks off.
+//
+// Instructions are COPIED from the rule rather than referenced: a rule edited
+// next month must not silently rewrite what someone was told to do last week,
+// and the record of what was actually asked for is the thing an audit needs.
+export const vasTaskSteps = pgTable(
+  "vas_task_steps",
+  {
+    stepId: serial("step_id").primaryKey().notNull(),
+    taskId: uuid("task_id").notNull(),
+    sortOrder: integer("sort_order").default(0).notNull(),
+    instruction: text().notNull(),
+    isDone: boolean("is_done").default(false).notNull(),
+    doneAt: timestamp("done_at", { mode: "string" }),
+    doneByEmployeeId: integer("done_by_employee_id"),
+  },
+  (table) => [
+    index("idx_vas_task_steps_task").using(
+      "btree",
+      table.taskId.asc().nullsLast().op("uuid_ops"),
+    ),
+    foreignKey({
+      columns: [table.taskId],
+      foreignColumns: [vasTasks.taskId],
+      name: "vas_task_steps_task_id_fkey",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.doneByEmployeeId],
+      foreignColumns: [employees.employeeId],
+      name: "vas_task_steps_done_by_employee_id_fkey",
+    }).onDelete("set null"),
+  ],
+);
+
 export const employeeDepartments = pgTable(
   "employee_departments",
   {

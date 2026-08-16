@@ -41,6 +41,7 @@ export const TASK_TYPE_CODES = [
   "LOADING",
   "REPLENISHMENT",
   "CYCLE_COUNT",
+  "VAS",
 ] as const;
 export type TaskTypeCode = (typeof TASK_TYPE_CODES)[number];
 
@@ -52,6 +53,7 @@ const TASK_TYPE_SEED: Record<TaskTypeCode, string> = {
   LOADING: "Load an outbound trailer",
   REPLENISHMENT: "Move stock to a pick face",
   CYCLE_COUNT: "Count stock at a location",
+  VAS: "Value-added services on a picked order (packing, labelling, kitting)",
 };
 
 export type TaskLookups = {

@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { and, asc, desc, eq, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import {
   carriers,
@@ -50,16 +50,21 @@ export default async function ShipmentsPage({
       .groupBy(shipments.shipmentId, carriers.name)
       .orderBy(desc(shipments.createdAt))
       .limit(200),
-    // Only fully-picked orders can be loaded, and only ones not already on
-    // a shipment -- a pallet cannot go on two trailers.
+    // Ready-to-load orders not already on a shipment -- a pallet cannot go on
+    // two trailers. PACKED where value-added work is switched on, PICKED
+    // where it isn't; anything mid-VAS is deliberately excluded.
     db
-      .select({ soId: salesOrders.soId, soNumber: salesOrders.soNumber })
+      .select({
+        soId: salesOrders.soId,
+        soNumber: salesOrders.soNumber,
+        status: salesOrders.status,
+      })
       .from(salesOrders)
       .leftJoin(shipmentSalesOrders, eq(shipmentSalesOrders.soId, salesOrders.soId))
       .where(
         and(
           eq(salesOrders.warehouseId, parsedWarehouseId),
-          eq(salesOrders.status, "PICKED"),
+          inArray(salesOrders.status, ["PICKED", "PACKED"]),
           sql`${shipmentSalesOrders.soId} is null`,
         ),
       )

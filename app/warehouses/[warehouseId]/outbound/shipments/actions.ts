@@ -23,6 +23,7 @@ import {
   startTask,
 } from "@/lib/inbound/task-lifecycle";
 import { orderPickLpn } from "@/lib/outbound/fulfilment";
+import { findOrdersWithOpenVas } from "@/lib/vas/vas-server";
 import {
   parseDepartmentIds,
   validateDepartmentIds,
@@ -123,11 +124,29 @@ export async function createShipment(formData: FormData) {
   if (orderRows.length !== soIds.length) {
     return { error: "One or more orders were not found in this warehouse." };
   }
-  const notPicked = orderRows.filter((o) => o.status !== "PICKED");
-  if (notPicked.length > 0) {
+  // PACKED is the shippable state where value-added work is switched on;
+  // PICKED is the shippable state where it is not.
+  const notReady = orderRows.filter(
+    (o) => o.status !== "PICKED" && o.status !== "PACKED",
+  );
+  if (notReady.length > 0) {
     return {
-      error: `Not fully picked yet: ${notPicked.map((o) => o.soNumber).join(", ")}.`,
+      error: `Not ready to load: ${notReady.map((o) => `${o.soNumber} (${o.status})`).join(", ")}.`,
     };
+  }
+
+  // Belt and braces on top of the status check -- an order whose VAS task is
+  // still open must not get on a truck, and loading something that still
+  // needs a logo applied is precisely the mistake this module exists to
+  // prevent.
+  const blocked = await findOrdersWithOpenVas(
+    db,
+    warehouseId,
+    orderRows.map((o) => o.soId),
+  );
+  if (blocked.size > 0) {
+    const names = orderRows.filter((o) => blocked.has(o.soId)).map((o) => o.soNumber);
+    return { error: `Value-added work still outstanding on: ${names.join(", ")}.` };
   }
 
   const routing = await validateDepartmentIds(

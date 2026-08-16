@@ -171,6 +171,7 @@ export async function requireWarehouseActionAccess(
     requireUnload?: boolean;
     requireAssignTasks?: boolean;
     requirePick?: boolean;
+    requirePack?: boolean;
     requireLoad?: boolean;
     requireReleaseOrders?: boolean;
     requireVoidShipments?: boolean;
@@ -232,6 +233,12 @@ export async function requireWarehouseActionAccess(
   }
   if (options.requirePick && employee.canPick !== true) {
     return { ok: false, error: "You do not have permission to pick orders." };
+  }
+  if (options.requirePack && employee.canPack !== true) {
+    return {
+      ok: false,
+      error: "You do not have permission to do value-added / packing work.",
+    };
   }
   if (options.requireLoad && employee.canLoad !== true) {
     return { ok: false, error: "You do not have permission to load trailers." };
