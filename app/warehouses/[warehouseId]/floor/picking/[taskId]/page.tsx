@@ -14,6 +14,7 @@ import {
 import { requireWarehouseAccess } from "@/lib/warehouse-access";
 import { DynamicBreadcrumb } from "@/components/layout/dynamic-breadcrumb";
 import { ArrowLeft } from "lucide-react";
+import { serialsAtLocation } from "@/lib/inventory/serials-server";
 import { PickScanFlow } from "./pick-scan-flow";
 
 export default async function FloorPickingDetailPage({
@@ -39,6 +40,9 @@ export default async function FloorPickingDetailPage({
       sku: items.sku,
       itemName: items.name,
       barcode: items.barcode,
+      isSerialTracked: items.isSerialTracked,
+      itemId: pickingTasks.itemId,
+      pickLocationId: pickingTasks.pickLocationId,
       locationCode: locations.locationCode,
     })
     .from(pickingTasks)
@@ -58,6 +62,21 @@ export default async function FloorPickingDetailPage({
     .limit(1);
 
   if (!row) redirect(`/warehouses/${parsedWarehouseId}/floor`);
+
+  // Only fetched for serialised items: the picker gets told immediately when a
+  // scanned unit isn't in this bin, instead of after submitting the pallet.
+  // The server re-checks every serial anyway -- this list is for feedback, not
+  // authority, and can be stale by the time the pick is confirmed.
+  const availableSerials = row.isSerialTracked
+    ? (
+        await serialsAtLocation(db, {
+          itemId: row.itemId,
+          locationId: row.pickLocationId,
+          batchNumber: row.batchNumber,
+          lotNumber: row.lotNumber,
+        })
+      ).map((s) => s.serialNumber)
+    : [];
 
   const assigneeName = row.assignedEmployeeId
     ? [row.assigneeFirstName, row.assigneeLastName].filter(Boolean).join(" ") ||
@@ -98,6 +117,8 @@ export default async function FloorPickingDetailPage({
         batchNumber={row.batchNumber}
         lotNumber={row.lotNumber}
         pickQuantity={row.pickQuantity}
+        isSerialTracked={row.isSerialTracked === true}
+        availableSerials={availableSerials}
       />
     </main>
   );

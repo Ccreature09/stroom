@@ -3,6 +3,12 @@
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { AlertTriangle, MapPin, ScanLine } from "lucide-react";
+import {
+  findUnavailable,
+  normaliseSerial,
+  scanProgress,
+  serialKey,
+} from "@/lib/inventory/serial-rules";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -12,7 +18,7 @@ import {
   startPickingTask,
 } from "../../../outbound/picking/actions";
 
-type Step = "location" | "item" | "quantity";
+type Step = "location" | "item" | "quantity" | "serials";
 
 /**
  * Confirm the bay, confirm the item, confirm the count.
@@ -41,6 +47,8 @@ export function PickScanFlow({
   batchNumber,
   lotNumber,
   pickQuantity,
+  isSerialTracked,
+  availableSerials,
 }: {
   warehouseId: number;
   taskId: string;
@@ -55,6 +63,9 @@ export function PickScanFlow({
   batchNumber: string | null;
   lotNumber: string | null;
   pickQuantity: number;
+  isSerialTracked: boolean;
+  /** Serials the system believes are in this bin, for immediate feedback. */
+  availableSerials: string[];
 }) {
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
@@ -63,6 +74,8 @@ export function PickScanFlow({
   const [locationScan, setLocationScan] = useState("");
   const [itemScan, setItemScan] = useState("");
   const [quantity, setQuantity] = useState(String(pickQuantity));
+  const [serialScan, setSerialScan] = useState("");
+  const [serials, setSerials] = useState<string[]>([]);
 
   function run(
     action: (formData: FormData) => Promise<{ error?: string }>,
@@ -165,7 +178,47 @@ export function PickScanFlow({
       return;
     }
     setItemScan("");
-    setStep("quantity");
+    setStep(isSerialTracked ? "serials" : "quantity");
+  }
+
+  /**
+   * Each unit is checked against what the system says is in this bin the
+   * moment it is scanned.
+   *
+   * Catching a wrong unit here rather than on submit matters because the
+   * picker is standing at the bay with the box in their hand: they can put it
+   * back and find the right one. Told at the end, they would have to unpack a
+   * pallet to work out which of twelve boxes was wrong.
+   */
+  function handleSerialScan(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    const value = normaliseSerial(serialScan);
+    setSerialScan("");
+    if (!value) return;
+
+    if (serials.some((s) => serialKey(s) === serialKey(value))) {
+      setError(`${value} is already on the pallet.`);
+      return;
+    }
+    if (findUnavailable([value], availableSerials).length > 0) {
+      setError(`${value} isn't in ${locationCode}. Check the label.`);
+      return;
+    }
+    if (serials.length >= pickQuantity) {
+      setError(`This pick only needs ${pickQuantity}.`);
+      return;
+    }
+    setSerials((prev) => [...prev, value]);
+  }
+
+  function handleSerialSubmit() {
+    setError(null);
+    if (serials.length === 0) {
+      setError("Scan at least one unit.");
+      return;
+    }
+    run(completePickingTask, { serials: serials.join("\n") });
   }
 
   function handleQuantitySubmit(e: React.FormEvent) {
@@ -227,6 +280,112 @@ export function PickScanFlow({
             className="h-14 text-lg"
           />
         </form>
+      ) : null}
+
+      {step === "serials" ? (
+        <div className="space-y-3">
+          <div className="rounded-xl border border-slate-200 bg-white px-4 py-3">
+            <div className="flex items-baseline justify-between">
+              <span className="text-2xl font-bold text-slate-900">
+                {serials.length}
+                <span className="text-base font-medium text-slate-400">
+                  {" "}
+                  / {pickQuantity}
+                </span>
+              </span>
+              <span
+                className={`text-sm font-semibold ${
+                  scanProgress(serials.length, pickQuantity).isComplete
+                    ? "text-emerald-700"
+                    : "text-teal-700"
+                }`}
+              >
+                {scanProgress(serials.length, pickQuantity).isComplete
+                  ? "All units scanned"
+                  : `${pickQuantity - serials.length} left to scan`}
+              </span>
+            </div>
+            <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-slate-100">
+              <div
+                className={`h-full rounded-full transition-all ${
+                  serials.length >= pickQuantity ? "bg-emerald-600" : "bg-teal-600"
+                }`}
+                style={{
+                  width: `${Math.min(100, (serials.length / pickQuantity) * 100)}%`,
+                }}
+              />
+            </div>
+          </div>
+
+          <form onSubmit={handleSerialScan} className="space-y-2">
+            <Label
+              htmlFor="pick-serial-scan"
+              className="flex items-center gap-1.5 text-sm font-semibold text-slate-700"
+            >
+              <ScanLine className="h-4 w-4" /> Scan each unit&apos;s serial
+            </Label>
+            <Input
+              id="pick-serial-scan"
+              autoFocus
+              value={serialScan}
+              onChange={(e) => setSerialScan(e.target.value)}
+              placeholder="Scan serial number..."
+              className="h-14 text-lg"
+            />
+          </form>
+
+          {serials.length > 0 ? (
+            <div className="max-h-40 space-y-1 overflow-y-auto rounded-lg border border-slate-200 bg-white p-2">
+              {[...serials].reverse().map((serial, i) => (
+                <div
+                  key={serial}
+                  className="flex items-center justify-between gap-2 rounded px-2 py-1"
+                >
+                  <span className="min-w-0 truncate font-mono text-xs text-slate-800">
+                    <span className="mr-2 text-slate-300">{serials.length - i}</span>
+                    {serial}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setSerials((prev) => prev.filter((s) => s !== serial))
+                    }
+                    className="shrink-0 text-[11px] font-medium text-slate-400 hover:text-red-600"
+                  >
+                    remove
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : null}
+
+          {serials.length > 0 && serials.length < pickQuantity ? (
+            <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-sm text-amber-800">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+              <p>
+                Short by {pickQuantity - serials.length}. Confirming now records
+                only the units you scanned, and the difference goes back to the
+                order for someone to chase.
+              </p>
+            </div>
+          ) : null}
+
+          {error ? <ErrorNote text={error} /> : null}
+
+          <Button
+            type="button"
+            size="lg"
+            disabled={isPending || serials.length === 0}
+            onClick={handleSerialSubmit}
+            className="h-14 w-full bg-teal-700 text-base hover:bg-teal-800"
+          >
+            {isPending
+              ? "Confirming..."
+              : serials.length === 0
+                ? "Scan a unit first"
+                : `Confirm ${serials.length} Unit${serials.length === 1 ? "" : "s"}`}
+          </Button>
+        </div>
       ) : null}
 
       {step === "quantity" ? (

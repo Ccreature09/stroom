@@ -9,17 +9,15 @@ type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 type DbOrTx = typeof db | Tx;
 
 /**
- * The pick container for an order.
+ * Names the pick container for an order.
  *
- * `picking_tasks` has no `so_id` column -- the schema links a pick to a
- * pallet (`lpn_id`, NOT NULL) and nothing else -- so the order pallet's LPN
- * *is* the link back to the order. Deriving it from the order number rather
- * than storing the association keeps that link in one place instead of
- * scattering `LIKE 'PICK-%'` string surgery across the module.
+ * This used to be load-bearing: with no `so_id` on `picking_tasks`, the
+ * pallet's name *was* the link back to the order, and every lookup parsed it.
+ * Migration 0021 added the column and backfilled it, so this is now only a
+ * naming convention -- a label a human can read on a pallet. Renaming a
+ * pallet no longer severs anything.
  *
- * Worth knowing this is the weakest joint in the outbound model: a proper
- * fix is an `so_id` column on `picking_tasks`, which is a small additive
- * migration. Until then, every lookup goes through here.
+ * Look picks up by `picking_tasks.so_id`, not by matching this string.
  */
 export function orderPickLpn(soNumber: string): string {
   return `PICK-${soNumber}`.slice(0, 50);
@@ -37,7 +35,7 @@ export type PickProgress = {
 export async function loadOrderPickProgress(
   tx: DbOrTx,
   warehouseId: number,
-  soNumber: string,
+  soId: number,
 ): Promise<PickProgress> {
   const rows = await tx
     .select({
@@ -50,7 +48,7 @@ export async function loadOrderPickProgress(
     .where(
       and(
         eq(tasks.warehouseId, warehouseId),
-        eq(pickingTasks.lpnId, orderPickLpn(soNumber)),
+        eq(pickingTasks.soId, soId),
       ),
     )
     .groupBy(taskStatuses.code);
@@ -83,7 +81,6 @@ export async function syncSalesOrderStatus(
   tx: DbOrTx,
   warehouseId: number,
   soId: number,
-  soNumber: string,
 ): Promise<void> {
   const [current] = await tx
     .select({ status: salesOrders.status })
@@ -93,7 +90,7 @@ export async function syncSalesOrderStatus(
   if (!current) return;
   if (!["RELEASED", "PICKING", "PICKED"].includes(current.status ?? "")) return;
 
-  const progress = await loadOrderPickProgress(tx, warehouseId, soNumber);
+  const progress = await loadOrderPickProgress(tx, warehouseId, soId);
   const outstanding = progress.pending + progress.inProgress;
 
   let next: string;
@@ -121,7 +118,7 @@ export async function syncSalesOrderStatus(
 export async function cancelOpenPicksForOrder(
   tx: Tx,
   warehouseId: number,
-  soNumber: string,
+  soId: number,
 ): Promise<number> {
   const { statusIdByCode } = await getTaskLookups();
 
@@ -133,7 +130,7 @@ export async function cancelOpenPicksForOrder(
     .where(
       and(
         eq(tasks.warehouseId, warehouseId),
-        eq(pickingTasks.lpnId, orderPickLpn(soNumber)),
+        eq(pickingTasks.soId, soId),
         inArray(taskStatuses.code, ["PENDING", "IN_PROGRESS"]),
       ),
     );

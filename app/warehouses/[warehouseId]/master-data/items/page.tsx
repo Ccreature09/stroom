@@ -3,7 +3,7 @@ import { redirect } from "next/navigation";
 import { db } from "@/lib/db";
 import { items, employees } from "@/drizzle/schema";
 import { createClient } from "@/lib/server";
-import { Search, ShieldAlert, Package, Layers } from "lucide-react";
+import { Search, ShieldAlert, Package, Layers, Barcode } from "lucide-react";
 import { AddItemDialog } from "./add-item-dialog";
 import { ItemRowActions } from "./item-row-actions";
 
@@ -135,9 +135,15 @@ export default async function WarehouseItemCatalogMasterDataPage({
                         <ShieldAlert className="h-2.5 w-2.5" /> Expiry
                       </span>
                     )}
+                    {item.isSerialTracked && (
+                      <span className="inline-flex items-center gap-1 rounded bg-teal-50 px-1.5 py-0.5 text-[10px] font-medium text-teal-700 border border-teal-200">
+                        <Barcode className="h-2.5 w-2.5" /> Serial
+                      </span>
+                    )}
                     {!item.isBatchTracked &&
                       !item.isLotTracked &&
-                      !item.hasExpiry && (
+                      !item.hasExpiry &&
+                      !item.isSerialTracked && (
                         <span className="text-xs text-slate-400">Standard</span>
                       )}
                   </div>

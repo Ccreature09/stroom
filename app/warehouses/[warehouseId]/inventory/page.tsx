@@ -5,6 +5,7 @@ import {
   inventory,
   inventoryStatuses,
   locations,
+  inventorySerials,
   pallets,
   stockMovements,
 } from "@/drizzle/schema";
@@ -37,7 +38,7 @@ export default async function InventoryControlPage({
     "movement_destination_locations",
   );
 
-  const [[stockTotals], [palletTotals], [movementTotals], [statusTotals]] =
+  const [[stockTotals], [palletTotals], [serialTotals], [movementTotals], [statusTotals]] =
     await Promise.all([
       db
         .select({
@@ -51,6 +52,10 @@ export default async function InventoryControlPage({
         .select({ count: sql<number>`count(*)::int` })
         .from(pallets)
         .where(eq(pallets.warehouseId, parsedWarehouseId)),
+      db
+        .select({ count: sql<number>`count(*)::int` })
+        .from(inventorySerials)
+        .where(eq(inventorySerials.organizationId, employee.organizationId)),
       db
         .select({ count: sql<number>`count(*)::int` })
         .from(stockMovements)
@@ -114,6 +119,14 @@ export default async function InventoryControlPage({
         "Immutable audit trail of every receipt, adjustment, and transfer.",
       cta: "View Movements →",
       metric: `${movementTotals?.count ?? 0} recorded`,
+    },
+    {
+      href: `/warehouses/${parsedWarehouseId}/inventory/serials`,
+      title: "Serial Lookup",
+      description:
+        "Trace one physical unit from the delivery that brought it in to the customer it went out to.",
+      cta: "Trace a Serial →",
+      metric: `${serialTotals?.count ?? 0} units tracked`,
     },
     {
       href: `/warehouses/${parsedWarehouseId}/inventory/statuses`,

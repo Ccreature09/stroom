@@ -62,6 +62,7 @@ export default async function FloorReceivePoPage({
         isBatchTracked: items.isBatchTracked,
         isLotTracked: items.isLotTracked,
         hasExpiry: items.hasExpiry,
+        isSerialTracked: items.isSerialTracked,
         quantityOrdered: purchaseOrderLines.quantityOrdered,
         quantityReceived: purchaseOrderLines.quantityReceived,
       })

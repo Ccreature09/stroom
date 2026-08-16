@@ -24,6 +24,7 @@ import {
 } from "@/lib/inbound/task-lifecycle";
 import { orderPickLpn } from "@/lib/outbound/fulfilment";
 import { findOrdersWithOpenVas } from "@/lib/vas/vas-server";
+import { markSerialsShipped } from "@/lib/inventory/serials-server";
 import {
   parseDepartmentIds,
   validateDepartmentIds,
@@ -389,6 +390,14 @@ export async function dispatchShipment(formData: FormData) {
           updatedAt: new Date().toISOString(),
         })
         .where(inArray(salesOrders.soId, soIds));
+
+      // The moment that makes serial tracking worth doing: each unit stops
+      // being stock and becomes a record of what a named customer received.
+      // Same transaction as the dispatch itself, so a shipped order can never
+      // exist without its units marked shipped.
+      for (const soId of soIds) {
+        await markSerialsShipped(tx, { soId, shipmentId });
+      }
     }
   });
 

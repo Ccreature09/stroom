@@ -23,6 +23,7 @@ const routeNameMap: Record<string, string> = {
   "sales-orders": "Sales Orders",
   "cycle-count": "Cycle Count",
   metrics: "Performance",
+  serials: "Serial Lookup",
   vas: "Packing & VAS",
   "vas-rules": "VAS Rules",
   "task-routing": "Task Routing",

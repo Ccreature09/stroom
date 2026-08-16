@@ -45,6 +45,7 @@ export async function createItem(formData: FormData) {
   const isBatchTracked = formData.get("isBatchTracked") === "on";
   const isLotTracked = formData.get("isLotTracked") === "on";
   const hasExpiry = formData.get("hasExpiry") === "on";
+  const isSerialTracked = formData.get("isSerialTracked") === "on";
 
   if (!sku || !name || !warehouseId) {
     return { error: "SKU and Name are required." };
@@ -77,6 +78,7 @@ export async function createItem(formData: FormData) {
     hazardClass: hazardClass || "None",
     isBatchTracked,
     isLotTracked,
+    isSerialTracked,
     hasExpiry,
     shelfLifeDays,
     minStockLevel,
@@ -121,6 +123,7 @@ export async function updateItem(formData: FormData) {
   const isBatchTracked = formData.get("isBatchTracked") === "on";
   const isLotTracked = formData.get("isLotTracked") === "on";
   const hasExpiry = formData.get("hasExpiry") === "on";
+  const isSerialTracked = formData.get("isSerialTracked") === "on";
 
   if (!itemId || !sku || !name || !warehouseId) {
     return { error: "SKU and Name are required." };
@@ -154,6 +157,7 @@ export async function updateItem(formData: FormData) {
       hazardClass: hazardClass || "None",
       isBatchTracked,
       isLotTracked,
+      isSerialTracked,
       hasExpiry,
       shelfLifeDays,
       minStockLevel,

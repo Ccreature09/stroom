@@ -7,6 +7,13 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { receivePurchaseOrderLine } from "../../../inbound/purchase-orders/actions";
+import {
+  describeSerialProblem,
+  normaliseSerial,
+  scanProgress,
+  serialKey,
+  validateSerialList,
+} from "@/lib/inventory/serial-rules";
 
 export type PoLine = {
   poLineId: number;
@@ -17,6 +24,7 @@ export type PoLine = {
   isBatchTracked: boolean;
   isLotTracked: boolean;
   hasExpiry: boolean;
+  isSerialTracked: boolean;
   quantityOrdered: number;
   quantityReceived: number | null;
 };
@@ -26,14 +34,19 @@ export type StatusOption = { statusId: number; name: string };
 const selectClassName =
   "w-full rounded-lg border border-input bg-transparent px-3 py-3 text-base outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50";
 
-type FieldStep = "batch" | "lot" | "expiry" | "quantity";
+type FieldStep = "batch" | "lot" | "expiry" | "quantity" | "serials";
 
+/**
+ * Serial-tracked items end on the serial step instead of the quantity step:
+ * the count is whatever was scanned, so asking for it separately would just
+ * be inviting the two numbers to disagree.
+ */
 function requiredSteps(line: PoLine): FieldStep[] {
   const steps: FieldStep[] = [];
   if (line.isBatchTracked) steps.push("batch");
   if (line.isLotTracked) steps.push("lot");
   if (line.hasExpiry) steps.push("expiry");
-  steps.push("quantity");
+  steps.push(line.isSerialTracked ? "serials" : "quantity");
   return steps;
 }
 
@@ -73,6 +86,8 @@ export function ScanSession({
   const [lotValue, setLotValue] = useState("");
   const [expiryValue, setExpiryValue] = useState("");
   const [quantityValue, setQuantityValue] = useState("");
+  const [serialScan, setSerialScan] = useState("");
+  const [serials, setSerials] = useState<string[]>([]);
 
   const [error, setError] = useState<string | null>(null);
   const [lastBooked, setLastBooked] = useState<{ sku: string; quantity: number } | null>(null);
@@ -115,6 +130,8 @@ export function ScanSession({
     setLotValue("");
     setExpiryValue("");
     setQuantityValue(String(remaining));
+    setSerials([]);
+    setSerialScan("");
     setPendingSteps(requiredSteps(line));
   }
 
@@ -146,14 +163,48 @@ export function ScanSession({
         setError("Quantity must be a positive whole number.");
         return;
       }
-      submitLine(matchedLine, qty);
+      submitLine(matchedLine, qty, []);
+      return;
+    }
+    if (currentStep === "serials") {
+      // Reached only via the "Book N Units" button; each scan is handled by
+      // its own form so the scanner's Enter adds a unit rather than submitting
+      // the whole pallet after the first one.
+      const problem = validateSerialList(serials);
+      if (problem) {
+        setError(describeSerialProblem(problem));
+        return;
+      }
+      submitLine(matchedLine, serials.length, serials);
       return;
     }
 
     setPendingSteps((prev) => prev.slice(1));
   }
 
-  function submitLine(line: PoLine, quantity: number) {
+  /**
+   * One unit, one scan, straight back to an empty box.
+   *
+   * Rejecting a duplicate here rather than at submit time is the whole point:
+   * on a 200-unit pallet, finding out at the end that unit 47 was scanned
+   * twice means recounting the lot. Finding out immediately means rescanning
+   * one box.
+   */
+  function handleSerialScan(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    const value = normaliseSerial(serialScan);
+    if (!value) return;
+    if (serials.some((s) => serialKey(s) === serialKey(value))) {
+      setError(`${value} is already on this pallet.`);
+      setSerialScan("");
+      return;
+    }
+    setSerials((prev) => [...prev, value]);
+    setSerialScan("");
+  }
+
+  function submitLine(line: PoLine, quantity: number, serialNumbers: string[]) {
     const formData = new FormData();
     formData.append("warehouseId", String(warehouseId));
     formData.append("poLineId", String(line.poLineId));
@@ -163,6 +214,9 @@ export function ScanSession({
     if (batchValue.trim()) formData.append("batchNumber", batchValue.trim());
     if (lotValue.trim()) formData.append("lotNumber", lotValue.trim());
     if (expiryValue) formData.append("expiryDate", expiryValue);
+    if (serialNumbers.length > 0) {
+      formData.append("serials", serialNumbers.join("\n"));
+    }
 
     startTransition(async () => {
       const res = await receivePurchaseOrderLine(formData);
@@ -180,6 +234,8 @@ export function ScanSession({
       setLastBooked({ sku: line.sku, quantity });
       setMatchedLine(null);
       setPendingSteps([]);
+      setSerials([]);
+      setSerialScan("");
       router.refresh();
     });
   }
@@ -245,7 +301,7 @@ export function ScanSession({
           />
         </form>
       ) : (
-        <form onSubmit={handleFieldSubmit} className="space-y-3 rounded-2xl border-2 border-teal-600 bg-teal-50 p-4">
+        <div className="space-y-3 rounded-2xl border-2 border-teal-600 bg-teal-50 p-4">
           <div>
             <div className="font-mono text-sm font-bold text-slate-900">{matchedLine.sku}</div>
             <div className="text-xs text-slate-600">{matchedLine.itemName}</div>
@@ -254,75 +310,119 @@ export function ScanSession({
             </div>
           </div>
 
-          {currentStep === "batch" ? (
-            <ScanField
-              label="Scan batch number"
-              value={batchValue}
-              onChange={setBatchValue}
-              autoFocus
+          {/* The serial step is its own form so the scanner's Enter adds one
+              unit and clears the box, instead of submitting the whole pallet
+              after the first scan. */}
+          {currentStep === "serials" ? (
+            <SerialCapture
+              serials={serials}
+              value={serialScan}
+              onValueChange={setSerialScan}
+              onSubmit={handleSerialScan}
+              onRemove={(serial) =>
+                setSerials((prev) => prev.filter((s) => s !== serial))
+              }
+              expected={remainingOf(matchedLine)}
             />
           ) : null}
-          {currentStep === "lot" ? (
-            <ScanField label="Scan lot number" value={lotValue} onChange={setLotValue} autoFocus />
-          ) : null}
-          {currentStep === "expiry" ? (
-            <div className="space-y-1">
-              <Label htmlFor="scan-expiry" className="text-sm">
-                Expiry date
-              </Label>
-              <Input
-                id="scan-expiry"
-                type="date"
-                autoFocus
-                value={expiryValue}
-                onChange={(e) => setExpiryValue(e.target.value)}
-                className="h-14 text-lg"
-              />
-            </div>
-          ) : null}
-          {currentStep === "quantity" ? (
-            <div className="space-y-1">
-              <Label htmlFor="scan-quantity" className="text-sm">
-                Quantity in this batch
-              </Label>
-              <Input
-                id="scan-quantity"
-                type="number"
-                min={1}
-                autoFocus
-                value={quantityValue}
-                onChange={(e) => setQuantityValue(e.target.value)}
-                className="h-14 text-lg"
-              />
-            </div>
-          ) : null}
 
-          {error ? (
-            <p className="rounded-lg bg-red-50 px-3 py-2 text-sm font-medium text-red-700">{error}</p>
-          ) : null}
+          {currentStep !== "serials" ? (
+            <form onSubmit={handleFieldSubmit} className="space-y-3">
+              {currentStep === "batch" ? (
+                <ScanField
+                  label="Scan batch number"
+                  value={batchValue}
+                  onChange={setBatchValue}
+                  autoFocus
+                />
+              ) : null}
+              {currentStep === "lot" ? (
+                <ScanField label="Scan lot number" value={lotValue} onChange={setLotValue} autoFocus />
+              ) : null}
+              {currentStep === "expiry" ? (
+                <div className="space-y-1">
+                  <Label htmlFor="scan-expiry" className="text-sm">
+                    Expiry date
+                  </Label>
+                  <Input
+                    id="scan-expiry"
+                    type="date"
+                    autoFocus
+                    value={expiryValue}
+                    onChange={(e) => setExpiryValue(e.target.value)}
+                    className="h-14 text-lg"
+                  />
+                </div>
+              ) : null}
+              {currentStep === "quantity" ? (
+                <div className="space-y-1">
+                  <Label htmlFor="scan-quantity" className="text-sm">
+                    Quantity in this batch
+                  </Label>
+                  <Input
+                    id="scan-quantity"
+                    type="number"
+                    min={1}
+                    autoFocus
+                    value={quantityValue}
+                    onChange={(e) => setQuantityValue(e.target.value)}
+                    className="h-14 text-lg"
+                  />
+                </div>
+              ) : null}
 
-          <div className="flex gap-2">
-            <Button
-              type="button"
-              variant="outline"
-              onClick={backToItemScan}
-              className="h-12 flex-1 text-sm"
-            >
-              Cancel
-            </Button>
-            <Button
-              type="submit"
-              disabled={isPending}
-              className="h-12 flex-[2] bg-teal-700 text-base hover:bg-teal-800"
-            >
-              {isPending
-                ? "Booking..."
-                : currentStep === "quantity"
-                  ? "Book It"
-                  : "Next"}
-            </Button>
-          </div>
-        </form>
+              {error ? (
+                <p className="rounded-lg bg-red-50 px-3 py-2 text-sm font-medium text-red-700">{error}</p>
+              ) : null}
+
+              <div className="flex gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={backToItemScan}
+                  className="h-12 flex-1 text-sm"
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="submit"
+                  disabled={isPending}
+                  className="h-12 flex-[2] bg-teal-700 text-base hover:bg-teal-800"
+                >
+                  {isPending ? "Booking..." : currentStep === "quantity" ? "Book It" : "Next"}
+                </Button>
+              </div>
+            </form>
+          ) : (
+            <div className="space-y-3">
+              {error ? (
+                <p className="rounded-lg bg-red-50 px-3 py-2 text-sm font-medium text-red-700">{error}</p>
+              ) : null}
+              <div className="flex gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={backToItemScan}
+                  className="h-12 flex-1 text-sm"
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="button"
+                  disabled={isPending || serials.length === 0}
+                  onClick={handleFieldSubmit}
+                  className="h-12 flex-[2] bg-teal-700 text-base hover:bg-teal-800"
+                >
+                  {isPending
+                    ? "Booking..."
+                    : serials.length === 0
+                      ? "Scan a unit first"
+                      : `Book ${serials.length} Unit${serials.length === 1 ? "" : "s"}`}
+                </Button>
+              </div>
+            </div>
+          )}
+        </div>
       )}
 
       {error && !matchedLine ? (
@@ -365,6 +465,118 @@ export function ScanSession({
           );
         })}
       </div>
+    </div>
+  );
+}
+
+/**
+ * The per-unit scanning panel.
+ *
+ * The count that matters is the one at the top: "4 of 12 · 8 left on this
+ * pallet". A picker working a pallet of serialised goods needs to know how
+ * many boxes are still in front of them without counting them, and that is the
+ * single question this panel exists to answer.
+ *
+ * Scanning past the expected count is allowed but called out. The delivery
+ * genuinely does contain thirteen sometimes, and the receiver finding that out
+ * is the useful outcome -- refusing the thirteenth scan would just mean it
+ * goes on the shelf untracked.
+ */
+function SerialCapture({
+  serials,
+  value,
+  onValueChange,
+  onSubmit,
+  onRemove,
+  expected,
+}: {
+  serials: string[];
+  value: string;
+  onValueChange: (value: string) => void;
+  onSubmit: (e: React.FormEvent) => void;
+  onRemove: (serial: string) => void;
+  expected: number;
+}) {
+  const progress = scanProgress(serials.length, expected);
+  const over = serials.length > expected;
+
+  return (
+    <div className="space-y-3">
+      <div className="rounded-xl border border-teal-200 bg-white px-4 py-3">
+        <div className="flex items-baseline justify-between">
+          <span className="text-2xl font-bold text-slate-900">
+            {progress.scanned}
+            <span className="text-base font-medium text-slate-400">
+              {" "}
+              / {expected}
+            </span>
+          </span>
+          <span
+            className={`text-sm font-semibold ${
+              over
+                ? "text-amber-700"
+                : progress.isComplete
+                  ? "text-emerald-700"
+                  : "text-teal-700"
+            }`}
+          >
+            {over
+              ? `${serials.length - expected} over`
+              : progress.isComplete
+                ? "Pallet complete"
+                : `${progress.remaining} left to scan`}
+          </span>
+        </div>
+        <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-slate-100">
+          <div
+            className={`h-full rounded-full transition-all ${
+              over ? "bg-amber-500" : progress.isComplete ? "bg-emerald-600" : "bg-teal-600"
+            }`}
+            style={{
+              width: `${Math.min(100, expected > 0 ? (serials.length / expected) * 100 : 0)}%`,
+            }}
+          />
+        </div>
+      </div>
+
+      <form onSubmit={onSubmit} className="space-y-1">
+        <Label htmlFor="scan-serial" className="flex items-center gap-1.5 text-sm">
+          <ScanLine className="h-4 w-4" /> Scan each unit&apos;s serial
+        </Label>
+        <Input
+          id="scan-serial"
+          autoFocus
+          value={value}
+          onChange={(e) => onValueChange(e.target.value)}
+          placeholder="Scan serial number..."
+          className="h-14 text-lg"
+        />
+      </form>
+
+      {serials.length > 0 ? (
+        <div className="max-h-44 space-y-1 overflow-y-auto rounded-lg border border-teal-200 bg-white p-2">
+          {[...serials].reverse().map((serial, i) => (
+            <div
+              key={serial}
+              className="flex items-center justify-between gap-2 rounded px-2 py-1"
+            >
+              <span className="min-w-0 truncate font-mono text-xs text-slate-800">
+                <span className="mr-2 text-slate-300">
+                  {serials.length - i}
+                </span>
+                {serial}
+              </span>
+              <button
+                type="button"
+                onClick={() => onRemove(serial)}
+                className="shrink-0 text-[11px] font-medium text-slate-400 hover:text-red-600"
+              >
+                remove
+              </button>
+            </div>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }

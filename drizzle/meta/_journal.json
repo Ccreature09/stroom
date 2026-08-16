@@ -148,6 +148,13 @@
       "when": 1786891981234,
       "tag": "0020_vas_and_task_settings",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1786896560834,
+      "tag": "0021_serial_tracking",
+      "breakpoints": true
     }
   ]
 }

@@ -248,6 +248,29 @@ export function EditItemDialog({
                   </Label>
                 </div>
               </div>
+              <div className="mt-2 flex items-start gap-2 rounded-lg border border-border bg-muted/40 p-3">
+                <Checkbox
+                  id="edit-isSerialTracked"
+                  name="isSerialTracked"
+                  value="on"
+                  defaultChecked={item.isSerialTracked}
+                  className="mt-0.5"
+                />
+                <div>
+                  <Label
+                    htmlFor="edit-isSerialTracked"
+                    className="text-xs cursor-pointer"
+                  >
+                    Serial Tracked
+                  </Label>
+                  <p className="mt-0.5 text-[11px] text-muted-foreground">
+                    Every unit is scanned individually at receipt and at pick.
+                    Turning this on does not retrofit serials to stock already
+                    on the shelf — only units received from now on will have
+                    them.
+                  </p>
+                </div>
+              </div>
             </div>
           </div>
 

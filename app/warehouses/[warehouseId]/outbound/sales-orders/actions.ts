@@ -259,6 +259,7 @@ export async function releaseSalesOrder(formData: FormData): Promise<ReleaseResu
             lotNumber: pick.candidate.lotNumber,
             pickQuantity: pick.quantity,
             lpnId,
+            soId,
           });
           picksCreated += 1;
         }
@@ -333,7 +334,7 @@ export async function cancelSalesOrder(formData: FormData) {
     // (availability is derived from them), while quantityAllocated is what
     // the order claims to hold. Clearing one without the other would leave
     // stock either permanently reserved or double-promised.
-    await cancelOpenPicksForOrder(tx, warehouseId, so.soNumber);
+    await cancelOpenPicksForOrder(tx, warehouseId, soId);
     await tx
       .update(salesOrderLines)
       .set({ quantityAllocated: 0 })

@@ -16,6 +16,15 @@ import {
   notifyLocationInventoryChanged,
   receiveIntoInventory,
 } from "@/lib/inventory/receiving";
+import {
+  itemTracking,
+  recordReceivedSerials,
+} from "@/lib/inventory/serials-server";
+import {
+  describeSerialProblem,
+  parseSerialList,
+  validateSerialList,
+} from "@/lib/inventory/serial-rules";
 import { reportEmployeeAtLocation } from "@/lib/warehouse-map/asset-positions";
 
 function isUniqueViolation(error: unknown) {
@@ -284,14 +293,28 @@ export async function receivePurchaseOrderLine(formData: FormData) {
   const { employee, warehouseId } = access.context;
 
   const poLineId = parsePositiveInt(formData.get("poLineId"));
-  const quantity = parsePositiveInt(formData.get("quantity"));
   const locationId = parsePositiveInt(formData.get("locationId"));
   const statusId = parsePositiveInt(formData.get("statusId"));
+  const serials = parseSerialList(String(formData.get("serials") ?? ""));
+
+  // For a serial-tracked item the quantity is not something anybody types --
+  // it is however many units were physically scanned. Trusting a typed number
+  // here would let the stock line and the serial rows disagree from the very
+  // first receipt.
+  const quantity =
+    serials.length > 0
+      ? serials.length
+      : parsePositiveInt(formData.get("quantity"));
 
   if (!poLineId) return { error: "Invalid order line." };
   if (!quantity) return { error: "Quantity must be a positive whole number." };
   if (!locationId) return { error: "Select a location." };
   if (!statusId) return { error: "Select an inventory status." };
+
+  if (serials.length > 0) {
+    const problem = validateSerialList(serials);
+    if (problem) return { error: describeSerialProblem(problem) };
+  }
 
   const [line] = await db
     .select({
@@ -351,7 +374,34 @@ export async function receivePurchaseOrderLine(formData: FormData) {
   const itemId = line.itemId;
   const poId = line.poId;
 
+  // The item is the authority on whether serials are required, not the form.
+  // A screen that forgot to collect them must fail here rather than book
+  // untraceable stock for an item the business has said it traces.
+  const tracking = await itemTracking(db, itemId);
+  if (tracking?.isSerialTracked && serials.length === 0) {
+    return { error: "This item is serial tracked — scan each unit's serial number." };
+  }
+  if (!tracking?.isSerialTracked && serials.length > 0) {
+    return { error: "This item is not serial tracked, so serials can't be recorded against it." };
+  }
+
   const conflict = await db.transaction(async (tx) => {
+    if (serials.length > 0 && tracking) {
+      const recorded = await recordReceivedSerials(tx, {
+        organizationId: tracking.organizationId,
+        itemId,
+        serials,
+        locationId,
+        batchNumber: line.batchNumber,
+        lotNumber: line.lotNumber,
+        expiryDate: line.expiryDate,
+        inventoryStatusId: statusId,
+        poLineId,
+        employeeId: employee.employeeId,
+      });
+      if (!recorded.ok) return { duplicates: recorded.serials } as const;
+    }
+
     const outcome = await receiveIntoInventory(tx, {
       employeeId: employee.employeeId,
       locationId,
@@ -397,6 +447,13 @@ export async function receivePurchaseOrderLine(formData: FormData) {
 
     return "ok" as const;
   });
+
+  if (typeof conflict === "object" && "duplicates" in conflict) {
+    const shown = conflict.duplicates.slice(0, 5).join(", ");
+    return {
+      error: `Already booked in: ${shown}${conflict.duplicates.length > 5 ? ` (+${conflict.duplicates.length - 5} more)` : ""}. Each unit is received once.`,
+    };
+  }
 
   if (conflict === "status-mismatch") {
     return {

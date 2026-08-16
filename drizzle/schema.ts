@@ -11,6 +11,7 @@ import {
   uuid,
   date,
   index,
+  uniqueIndex,
   text,
   numeric,
   jsonb,
@@ -159,6 +160,9 @@ export const items = pgTable(
     hazardClass: varchar("hazard_class", { length: 20 }).default("None"),
     isBatchTracked: boolean("is_batch_tracked").default(false).notNull(),
     isLotTracked: boolean("is_lot_tracked").default(false).notNull(),
+    // Unlike batch and lot, which label a group of units, this one makes every
+    // single unit its own tracked object in `inventory_serials`.
+    isSerialTracked: boolean("is_serial_tracked").default(false).notNull(),
     hasExpiry: boolean("has_expiry").default(false).notNull(),
     shelfLifeDays: integer("shelf_life_days"),
     minStockLevel: integer("min_stock_level").default(0),
@@ -953,6 +957,9 @@ export const pickingTasks = pgTable(
     lotNumber: varchar("lot_number", { length: 50 }),
     pickQuantity: integer("pick_quantity").notNull(),
     lpnId: varchar("lpn_id", { length: 50 }).notNull(),
+    // Nullable because pre-0021 picks have no recorded order beyond their
+    // pallet's name, which is what this column exists to stop relying on.
+    soId: integer("so_id"),
   },
   (table) => [
     foreignKey({
@@ -975,6 +982,11 @@ export const pickingTasks = pgTable(
       foreignColumns: [tasks.taskId],
       name: "picking_tasks_task_id_fkey",
     }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.soId],
+      foreignColumns: [salesOrders.soId],
+      name: "picking_tasks_so_id_fkey",
+    }).onDelete("set null"),
     check("picking_tasks_pick_quantity_check", sql`pick_quantity > 0`),
   ],
 );
@@ -2626,3 +2638,127 @@ export const hallUnderlays = pgTable(
 // no code ever read from it or zone_types -- the zone-polygon geometry this
 // table was meant to hold for "which zone is this worker standing in" was
 // never actually built.
+
+/**
+ * One row per physical unit of a serial-tracked item.
+ *
+ * Batch and lot label a *group* -- one code covers a pallet -- so they live as
+ * columns on the stock line. A serial identifies a single object, which is a
+ * different shape of fact entirely: it has to survive being split off a
+ * pallet, picked onto a different pallet, shipped to a named customer, and
+ * still be answerable years later when someone asks where unit X went. That
+ * needs its own row with its own history, not another varchar on `inventory`.
+ *
+ * The row is never deleted. Shipping sets `status` and stamps the order, so
+ * "which customer got this unit" stays answerable after the stock line it came
+ * from is long gone.
+ */
+export const inventorySerials = pgTable(
+  "inventory_serials",
+  {
+    serialId: serial("serial_id").primaryKey().notNull(),
+    organizationId: integer("organization_id").notNull(),
+    itemId: integer("item_id").notNull(),
+    serialNumber: varchar("serial_number", { length: 100 }).notNull(),
+    // IN_STOCK -> PICKED -> SHIPPED. CONSUMED covers a unit written off by an
+    // adjustment; it is an end state like SHIPPED, not a stock state.
+    status: varchar({ length: 20 }).default("IN_STOCK").notNull(),
+    // Null once the unit has left the building -- a shipped serial has a
+    // customer, not a bin.
+    locationId: integer("location_id"),
+    batchNumber: varchar("batch_number", { length: 50 }),
+    lotNumber: varchar("lot_number", { length: 50 }),
+    expiryDate: date("expiry_date"),
+    inventoryStatusId: integer("inventory_status_id"),
+    lpnId: varchar("lpn_id", { length: 50 }),
+    poLineId: integer("po_line_id"),
+    soId: integer("so_id"),
+    shipmentId: uuid("shipment_id"),
+    receivedAt: timestamp("received_at", { mode: "string" }).default(
+      sql`CURRENT_TIMESTAMP`,
+    ),
+    pickedAt: timestamp("picked_at", { mode: "string" }),
+    shippedAt: timestamp("shipped_at", { mode: "string" }),
+    receivedByEmployeeId: integer("received_by_employee_id"),
+    pickedByEmployeeId: integer("picked_by_employee_id"),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.organizationId],
+      foreignColumns: [organizations.organizationId],
+      name: "inventory_serials_organization_id_fkey",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.itemId],
+      foreignColumns: [items.itemId],
+      name: "inventory_serials_item_id_fkey",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.locationId],
+      foreignColumns: [locations.locationId],
+      name: "inventory_serials_location_id_fkey",
+    }).onDelete("set null"),
+    foreignKey({
+      columns: [table.inventoryStatusId],
+      foreignColumns: [inventoryStatuses.statusId],
+      name: "inventory_serials_inventory_status_id_fkey",
+    }).onDelete("set null"),
+    foreignKey({
+      columns: [table.lpnId],
+      foreignColumns: [pallets.lpnId],
+      name: "inventory_serials_lpn_id_fkey",
+    }).onDelete("set null"),
+    foreignKey({
+      columns: [table.poLineId],
+      foreignColumns: [purchaseOrderLines.poLineId],
+      name: "inventory_serials_po_line_id_fkey",
+    }).onDelete("set null"),
+    foreignKey({
+      columns: [table.soId],
+      foreignColumns: [salesOrders.soId],
+      name: "inventory_serials_so_id_fkey",
+    }).onDelete("set null"),
+    foreignKey({
+      columns: [table.shipmentId],
+      foreignColumns: [shipments.shipmentId],
+      name: "inventory_serials_shipment_id_fkey",
+    }).onDelete("set null"),
+    foreignKey({
+      columns: [table.receivedByEmployeeId],
+      foreignColumns: [employees.employeeId],
+      name: "inventory_serials_received_by_employee_id_fkey",
+    }).onDelete("set null"),
+    foreignKey({
+      columns: [table.pickedByEmployeeId],
+      foreignColumns: [employees.employeeId],
+      name: "inventory_serials_picked_by_employee_id_fkey",
+    }).onDelete("set null"),
+    // The rule the whole feature rests on: a given physical unit exists once.
+    // Compared case-insensitively because a scanner and a keyboard disagree
+    // about case far more often than two units genuinely differ by it, and
+    // scoped per item because serial numbers are only unique per manufacturer
+    // -- two different products may legitimately both ship a unit "00001".
+    uniqueIndex("uq_inventory_serials_org_item_number").using(
+      "btree",
+      table.organizationId.asc().nullsLast().op("int4_ops"),
+      table.itemId.asc().nullsLast().op("int4_ops"),
+      sql`upper(serial_number)`,
+    ),
+    index("idx_inventory_serials_location").using(
+      "btree",
+      table.locationId.asc().nullsLast().op("int4_ops"),
+    ),
+    index("idx_inventory_serials_item").using(
+      "btree",
+      table.itemId.asc().nullsLast().op("int4_ops"),
+    ),
+    index("idx_inventory_serials_so").using(
+      "btree",
+      table.soId.asc().nullsLast().op("int4_ops"),
+    ),
+    check(
+      "chk_inventory_serial_status",
+      sql`status::text = ANY (ARRAY['IN_STOCK'::text, 'PICKED'::text, 'SHIPPED'::text, 'CONSUMED'::text])`,
+    ),
+  ],
+);

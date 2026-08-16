@@ -6,6 +6,15 @@ import { db } from "@/lib/db";
 import { inventory, pickingTasks, salesOrders, stockMovements } from "@/drizzle/schema";
 import { requireWarehouseActionAccess } from "@/lib/warehouse-access";
 import {
+  consumeSerialsForPick,
+  itemTracking,
+} from "@/lib/inventory/serials-server";
+import {
+  describeSerialProblem,
+  parseSerialList,
+  validateSerialList,
+} from "@/lib/inventory/serial-rules";
+import {
   assignTask,
   cancelTask,
   completeTask,
@@ -13,7 +22,7 @@ import {
 } from "@/lib/inbound/task-lifecycle";
 import { notifyLocationInventoryChanged } from "@/lib/inventory/receiving";
 import { reportEmployeeAtLocation } from "@/lib/warehouse-map/asset-positions";
-import { orderPickLpn, syncSalesOrderStatus } from "@/lib/outbound/fulfilment";
+import { syncSalesOrderStatus } from "@/lib/outbound/fulfilment";
 import { raiseVasForOrder, syncOrderVasStatus } from "@/lib/vas/vas-server";
 
 /** Movement type for stock leaving a pick face against a customer order. */
@@ -105,6 +114,7 @@ export async function completePickingTask(formData: FormData) {
 
   const taskId = String(formData.get("taskId") ?? "");
   const pickedQuantityInput = parsePositiveInt(formData.get("pickedQuantity"));
+  const serials = parseSerialList(String(formData.get("serials") ?? ""));
   if (!taskId) return { error: "Invalid task." };
 
   const [pick] = await db
@@ -115,13 +125,26 @@ export async function completePickingTask(formData: FormData) {
       lotNumber: pickingTasks.lotNumber,
       pickQuantity: pickingTasks.pickQuantity,
       lpnId: pickingTasks.lpnId,
+      soId: pickingTasks.soId,
     })
     .from(pickingTasks)
     .where(eq(pickingTasks.taskId, taskId))
     .limit(1);
   if (!pick) return { error: "Pick task not found." };
 
-  const pickedQuantity = pickedQuantityInput ?? pick.pickQuantity;
+  // Same rule as receiving: for a serialised item the quantity is the number
+  // of units actually scanned, never a separately typed figure.
+  const tracking = await itemTracking(db, pick.itemId);
+  if (tracking?.isSerialTracked) {
+    const problem = validateSerialList(serials);
+    if (problem) return { error: describeSerialProblem(problem) };
+  } else if (serials.length > 0) {
+    return { error: "This item is not serial tracked, so serials can't be recorded against it." };
+  }
+
+  const pickedQuantity = tracking?.isSerialTracked
+    ? serials.length
+    : (pickedQuantityInput ?? pick.pickQuantity);
   if (pickedQuantity > pick.pickQuantity) {
     return {
       error: `This pick asks for ${pick.pickQuantity}. Picking more than that needs a supervisor adjustment.`,
@@ -154,6 +177,28 @@ export async function completePickingTask(formData: FormData) {
       return {
         error: `Only ${onHand} available at that location -- report a shortage instead of over-picking.`,
       } as const;
+    }
+
+    // Move the named units onto the pallet before the stock line is touched.
+    // Conditioned on each unit still being IN_STOCK here, so two pickers
+    // racing for the same box produces a refusal rather than one of them
+    // walking off with stock the system has given to the other.
+    if (tracking?.isSerialTracked && serials.length > 0) {
+      const consumed = await consumeSerialsForPick(tx, {
+        organizationId: tracking.organizationId,
+        itemId: pick.itemId,
+        locationId: pick.pickLocationId,
+        serials,
+        lpnId: pick.lpnId,
+        soId: pick.soId,
+        employeeId: employee.employeeId,
+      });
+      if (!consumed.ok) {
+        const shown = consumed.serials.slice(0, 5).join(", ");
+        return {
+          error: `Not in this bin: ${shown}${consumed.serials.length > 5 ? ` (+${consumed.serials.length - 5} more)` : ""}. Check the label or report a discrepancy.`,
+        } as const;
+      }
     }
 
     const remaining = onHand - pickedQuantity;
@@ -189,20 +234,20 @@ export async function completePickingTask(formData: FormData) {
     const completion = await completeTask(tx, taskId, warehouseId);
     if (completion.error) return { error: completion.error } as const;
 
-    // The pallet is now wherever the picker is, not on the shelf it came
-    // from -- keeping its last known location as the pick face would send
-    // loading to the wrong end of the building.
-    const soNumber = pick.lpnId.startsWith("PICK-") ? pick.lpnId.slice(5) : null;
-    if (soNumber) {
+    // Which order this pick belongs to now comes from `picking_tasks.so_id`
+    // rather than from parsing the pallet's name. The name convention still
+    // exists for humans reading a label, but it is no longer load-bearing --
+    // renaming a pallet used to silently sever the pick from its order.
+    if (pick.soId !== null) {
       const [so] = await tx
         .select({ soId: salesOrders.soId, soNumber: salesOrders.soNumber })
         .from(salesOrders)
         .where(
-          and(eq(salesOrders.soNumber, soNumber), eq(salesOrders.warehouseId, warehouseId)),
+          and(eq(salesOrders.soId, pick.soId), eq(salesOrders.warehouseId, warehouseId)),
         )
         .limit(1);
-      if (so && orderPickLpn(so.soNumber) === pick.lpnId) {
-        await syncSalesOrderStatus(tx, warehouseId, so.soId, so.soNumber);
+      if (so) {
+        await syncSalesOrderStatus(tx, warehouseId, so.soId);
 
         // The moment an order finishes picking is the moment value-added
         // work becomes possible, so that is where it is raised -- inside the
