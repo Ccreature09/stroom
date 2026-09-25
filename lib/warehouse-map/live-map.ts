@@ -343,7 +343,8 @@ export type MapEventKind =
   | "ROUTE"
   | "BLOCKAGE"
   | "ALERT"
-  | "LAYOUT";
+  | "LAYOUT"
+  | "INVENTORY";
 
 export type MapEvent = {
   /** Server-assigned, monotonic per warehouse. Ordering uses this, never ts. */

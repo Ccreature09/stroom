@@ -127,6 +127,34 @@
       "when": 1785960441422,
       "tag": "0017_rls_policies",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1786835943465,
+      "tag": "0018_task_routing_rules",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1786837678827,
+      "tag": "0019_drop_nav_turn_restrictions",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1786891981234,
+      "tag": "0020_vas_and_task_settings",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1786896560834,
+      "tag": "0021_serial_tracking",
+      "breakpoints": true
     }
   ]
 }

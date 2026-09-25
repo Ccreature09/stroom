@@ -10,6 +10,7 @@ const ROW_LIMIT = 500;
 
 const MOVEMENT_TYPES = [
   "RECEIPT",
+  "PICK",
   "ADJUSTMENT_IN",
   "ADJUSTMENT_OUT",
   "TRANSFER",
@@ -17,6 +18,7 @@ const MOVEMENT_TYPES = [
 
 const typeStyles: Record<string, string> = {
   RECEIPT: "bg-emerald-50 text-emerald-700 border-emerald-200",
+  PICK: "bg-teal-50 text-teal-700 border-teal-200",
   ADJUSTMENT_IN: "bg-blue-50 text-blue-700 border-blue-200",
   ADJUSTMENT_OUT: "bg-amber-50 text-amber-700 border-amber-200",
   TRANSFER: "bg-purple-50 text-purple-700 border-purple-200",

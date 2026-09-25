@@ -1,0 +1,19 @@
+-- Drops `nav_turn_restrictions`.
+--
+-- The table was created alongside the navigation graph (0004_nav_graph) to
+-- hold hand-authored turn exceptions -- "no left turn out of the dock lane"
+-- -- layered on top of the angle-derived turn cost the router computes in
+-- routing.ts. It was never written to, never read, and no UI was ever built
+-- for it: turn cost has been angle-derived only for its entire existence.
+--
+-- Verified empty (0 rows), with no foreign keys pointing at it, no views
+-- depending on it, and no code references anywhere in app/ or lib/ -- not
+-- even to the concept -- before dropping.
+--
+-- CASCADE is here to take the row-level security policy 0017 created for it
+-- down with the table; there is nothing else attached.
+--
+-- Re-adding this is a small additive migration if per-turn overrides are
+-- ever genuinely needed. The router already searches over directed arcs,
+-- which is the hard prerequisite, so the door stays open.
+DROP TABLE "nav_turn_restrictions" CASCADE;

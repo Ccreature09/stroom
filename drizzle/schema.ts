@@ -11,6 +11,7 @@ import {
   uuid,
   date,
   index,
+  uniqueIndex,
   text,
   numeric,
   jsonb,
@@ -159,6 +160,9 @@ export const items = pgTable(
     hazardClass: varchar("hazard_class", { length: 20 }).default("None"),
     isBatchTracked: boolean("is_batch_tracked").default(false).notNull(),
     isLotTracked: boolean("is_lot_tracked").default(false).notNull(),
+    // Unlike batch and lot, which label a group of units, this one makes every
+    // single unit its own tracked object in `inventory_serials`.
+    isSerialTracked: boolean("is_serial_tracked").default(false).notNull(),
     hasExpiry: boolean("has_expiry").default(false).notNull(),
     shelfLifeDays: integer("shelf_life_days"),
     minStockLevel: integer("min_stock_level").default(0),
@@ -953,6 +957,9 @@ export const pickingTasks = pgTable(
     lotNumber: varchar("lot_number", { length: 50 }),
     pickQuantity: integer("pick_quantity").notNull(),
     lpnId: varchar("lpn_id", { length: 50 }).notNull(),
+    // Nullable because pre-0021 picks have no recorded order beyond their
+    // pallet's name, which is what this column exists to stop relying on.
+    soId: integer("so_id"),
   },
   (table) => [
     foreignKey({
@@ -975,6 +982,11 @@ export const pickingTasks = pgTable(
       foreignColumns: [tasks.taskId],
       name: "picking_tasks_task_id_fkey",
     }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.soId],
+      foreignColumns: [salesOrders.soId],
+      name: "picking_tasks_so_id_fkey",
+    }).onDelete("set null"),
     check("picking_tasks_pick_quantity_check", sql`pick_quantity > 0`),
   ],
 );
@@ -1307,6 +1319,234 @@ export const taskEligibleDepartments = pgTable(
       columns: [table.taskId, table.departmentId],
       name: "task_eligible_departments_pkey",
     }),
+  ],
+);
+
+// Standing policy for who a kind of work goes to, as opposed to
+// `task_eligible_departments`, which records where one particular task went.
+//
+// Rules are the default applied at task creation; an explicit choice at
+// creation time still wins, so this sets the norm rather than removing the
+// operator's judgement. Scoped per warehouse because the same task type is
+// genuinely owned by differently-named teams at different sites.
+export const taskRoutingRules = pgTable(
+  "task_routing_rules",
+  {
+    ruleId: serial("rule_id").primaryKey().notNull(),
+    warehouseId: integer("warehouse_id").notNull(),
+    taskTypeId: integer("task_type_id").notNull(),
+    departmentId: integer("department_id").notNull(),
+    isActive: boolean("is_active").default(true).notNull(),
+    createdAt: timestamp("created_at", { mode: "string" }).default(
+      sql`CURRENT_TIMESTAMP`,
+    ),
+  },
+  (table) => [
+    index("idx_task_routing_rules_lookup").using(
+      "btree",
+      table.warehouseId.asc().nullsLast().op("int4_ops"),
+      table.taskTypeId.asc().nullsLast().op("int4_ops"),
+    ),
+    foreignKey({
+      columns: [table.warehouseId],
+      foreignColumns: [warehouses.warehouseId],
+      name: "task_routing_rules_warehouse_id_fkey",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.taskTypeId],
+      foreignColumns: [taskTypes.taskTypeId],
+      name: "task_routing_rules_task_type_id_fkey",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.departmentId],
+      foreignColumns: [departments.departmentId],
+      name: "task_routing_rules_department_id_fkey",
+    }).onDelete("cascade"),
+    // A task type may route to several departments, but each pairing is
+    // stated once -- a duplicate rule would silently double-insert the same
+    // eligibility row on every task created.
+    unique("uq_task_routing_rules_wh_type_dept").on(
+      table.warehouseId,
+      table.taskTypeId,
+      table.departmentId,
+    ),
+  ],
+);
+
+// Whether a task type is used at all in this warehouse, and whether it is
+// raised automatically.
+//
+// Not every warehouse does every step. One shipping full pallets never packs;
+// one shipping single orders always does. Hardcoding packing into the
+// outbound flow would be wrong for the first and invisible for the second,
+// so it is a per-warehouse switch instead. Absent row = the type's own
+// default (enabled, not auto-raised), which is what every task type did
+// before this table existed.
+export const warehouseTaskSettings = pgTable(
+  "warehouse_task_settings",
+  {
+    settingId: serial("setting_id").primaryKey().notNull(),
+    warehouseId: integer("warehouse_id").notNull(),
+    taskTypeId: integer("task_type_id").notNull(),
+    isEnabled: boolean("is_enabled").default(true).notNull(),
+    /** Raise it automatically when the preceding step finishes. */
+    autoCreate: boolean("auto_create").default(false).notNull(),
+    updatedAt: timestamp("updated_at", { mode: "string" }).default(
+      sql`CURRENT_TIMESTAMP`,
+    ),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.warehouseId],
+      foreignColumns: [warehouses.warehouseId],
+      name: "warehouse_task_settings_warehouse_id_fkey",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.taskTypeId],
+      foreignColumns: [taskTypes.taskTypeId],
+      name: "warehouse_task_settings_task_type_id_fkey",
+    }).onDelete("cascade"),
+    unique("uq_warehouse_task_settings").on(table.warehouseId, table.taskTypeId),
+  ],
+);
+
+// A named, reusable set of value-added instructions -- "Retail pack: apply
+// logo, yellow outer box". Matched against an order to decide whether it
+// needs VAS at all and what the checklist should start as.
+export const vasRules = pgTable(
+  "vas_rules",
+  {
+    ruleId: serial("rule_id").primaryKey().notNull(),
+    warehouseId: integer("warehouse_id").notNull(),
+    name: varchar({ length: 100 }).notNull(),
+    description: text(),
+    // What the rule attaches to. CUSTOMER and ITEM narrow it; ALL applies to
+    // every order, which is the "we pack everything" case.
+    appliesTo: varchar("applies_to", { length: 20 }).default("ALL").notNull(),
+    customerId: integer("customer_id"),
+    itemId: integer("item_id"),
+    isActive: boolean("is_active").default(true).notNull(),
+    createdAt: timestamp("created_at", { mode: "string" }).default(
+      sql`CURRENT_TIMESTAMP`,
+    ),
+  },
+  (table) => [
+    index("idx_vas_rules_warehouse").using(
+      "btree",
+      table.warehouseId.asc().nullsLast().op("int4_ops"),
+    ),
+    foreignKey({
+      columns: [table.warehouseId],
+      foreignColumns: [warehouses.warehouseId],
+      name: "vas_rules_warehouse_id_fkey",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.customerId],
+      foreignColumns: [customers.customerId],
+      name: "vas_rules_customer_id_fkey",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.itemId],
+      foreignColumns: [items.itemId],
+      name: "vas_rules_item_id_fkey",
+    }).onDelete("cascade"),
+    check(
+      "chk_vas_rule_applies_to",
+      sql`(applies_to)::text = ANY ((ARRAY['ALL'::character varying, 'CUSTOMER'::character varying, 'ITEM'::character varying])::text[])`,
+    ),
+    // A CUSTOMER rule must name a customer and an ITEM rule an item, or the
+    // rule silently matches nothing and nobody notices until stock ships
+    // unpackaged.
+    check(
+      "chk_vas_rule_target",
+      sql`(applies_to = 'ALL' AND customer_id IS NULL AND item_id IS NULL)
+       OR (applies_to = 'CUSTOMER' AND customer_id IS NOT NULL)
+       OR (applies_to = 'ITEM' AND item_id IS NOT NULL)`,
+    ),
+  ],
+);
+
+// The individual instructions a rule contributes. Free text on purpose:
+// "apply the customer's logo to the short face" is not something a schema can
+// usefully enumerate, and a supervisor writing it in their own words is the
+// point.
+export const vasRuleSteps = pgTable(
+  "vas_rule_steps",
+  {
+    stepId: serial("step_id").primaryKey().notNull(),
+    ruleId: integer("rule_id").notNull(),
+    sortOrder: integer("sort_order").default(0).notNull(),
+    instruction: text().notNull(),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.ruleId],
+      foreignColumns: [vasRules.ruleId],
+      name: "vas_rule_steps_rule_id_fkey",
+    }).onDelete("cascade"),
+  ],
+);
+
+// The work itself: one VAS task per order that needs it.
+export const vasTasks = pgTable(
+  "vas_tasks",
+  {
+    taskId: uuid("task_id").primaryKey().notNull(),
+    soId: integer("so_id").notNull(),
+    /** The order pallet being worked on, when there is one. */
+    lpnId: varchar("lpn_id", { length: 50 }),
+    notes: text(),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.taskId],
+      foreignColumns: [tasks.taskId],
+      name: "vas_tasks_task_id_fkey",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.soId],
+      foreignColumns: [salesOrders.soId],
+      name: "vas_tasks_so_id_fkey",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.lpnId],
+      foreignColumns: [pallets.lpnId],
+      name: "vas_tasks_lpn_id_fkey",
+    }).onDelete("set null"),
+  ],
+);
+
+// The checklist the worker actually ticks off.
+//
+// Instructions are COPIED from the rule rather than referenced: a rule edited
+// next month must not silently rewrite what someone was told to do last week,
+// and the record of what was actually asked for is the thing an audit needs.
+export const vasTaskSteps = pgTable(
+  "vas_task_steps",
+  {
+    stepId: serial("step_id").primaryKey().notNull(),
+    taskId: uuid("task_id").notNull(),
+    sortOrder: integer("sort_order").default(0).notNull(),
+    instruction: text().notNull(),
+    isDone: boolean("is_done").default(false).notNull(),
+    doneAt: timestamp("done_at", { mode: "string" }),
+    doneByEmployeeId: integer("done_by_employee_id"),
+  },
+  (table) => [
+    index("idx_vas_task_steps_task").using(
+      "btree",
+      table.taskId.asc().nullsLast().op("uuid_ops"),
+    ),
+    foreignKey({
+      columns: [table.taskId],
+      foreignColumns: [vasTasks.taskId],
+      name: "vas_task_steps_task_id_fkey",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.doneByEmployeeId],
+      foreignColumns: [employees.employeeId],
+      name: "vas_task_steps_done_by_employee_id_fkey",
+    }).onDelete("set null"),
   ],
 );
 
@@ -1696,34 +1936,15 @@ export const navEdges = pgTable(
 );
 
 // Turn cost depends on the edge you arrived on, which is why the search runs
-// over directed arcs rather than nodes. Most turns are derived from the angle
-// between them; this table is only for hand-authored exceptions (no left turn
-// out of the dock lane, and so on).
-export const navTurnRestrictions = pgTable(
-  "nav_turn_restrictions",
-  {
-    restrictionId: serial("restriction_id").primaryKey().notNull(),
-    warehouseId: integer("warehouse_id").notNull(),
-    fromEdgeId: integer("from_edge_id").notNull(),
-    toEdgeId: integer("to_edge_id").notNull(),
-    penaltyMs: integer("penalty_ms").default(0).notNull(),
-    isForbidden: boolean("is_forbidden").default(false).notNull(),
-    allowedVehicleMask: bigint("allowed_vehicle_mask", { mode: "number" }),
-  },
-  (table) => [
-    foreignKey({
-      columns: [table.fromEdgeId],
-      foreignColumns: [navEdges.edgeId],
-      name: "nav_turn_restrictions_from_edge_id_fkey",
-    }).onDelete("cascade"),
-    foreignKey({
-      columns: [table.toEdgeId],
-      foreignColumns: [navEdges.edgeId],
-      name: "nav_turn_restrictions_to_edge_id_fkey",
-    }).onDelete("cascade"),
-    unique("uq_nav_turn_restriction").on(table.fromEdgeId, table.toEdgeId),
-  ],
-);
+// over directed arcs rather than nodes -- see routing.ts. Turn cost is
+// derived entirely from the angle between the two arcs.
+//
+// A `nav_turn_restrictions` table for hand-authored exceptions ("no left
+// turn out of the dock lane") existed here and was dropped in migration
+// 0019: it was created with the graph, never written to, never read, and
+// carrying an empty table for a feature nobody had asked for made the
+// schema harder to read for no benefit. Re-adding it is a small additive
+// migration if a real need for per-turn overrides ever turns up.
 
 // Where an operator stands (or a truck parks) to service a bin, and what it
 // costs once they are there.
@@ -2417,3 +2638,127 @@ export const hallUnderlays = pgTable(
 // no code ever read from it or zone_types -- the zone-polygon geometry this
 // table was meant to hold for "which zone is this worker standing in" was
 // never actually built.
+
+/**
+ * One row per physical unit of a serial-tracked item.
+ *
+ * Batch and lot label a *group* -- one code covers a pallet -- so they live as
+ * columns on the stock line. A serial identifies a single object, which is a
+ * different shape of fact entirely: it has to survive being split off a
+ * pallet, picked onto a different pallet, shipped to a named customer, and
+ * still be answerable years later when someone asks where unit X went. That
+ * needs its own row with its own history, not another varchar on `inventory`.
+ *
+ * The row is never deleted. Shipping sets `status` and stamps the order, so
+ * "which customer got this unit" stays answerable after the stock line it came
+ * from is long gone.
+ */
+export const inventorySerials = pgTable(
+  "inventory_serials",
+  {
+    serialId: serial("serial_id").primaryKey().notNull(),
+    organizationId: integer("organization_id").notNull(),
+    itemId: integer("item_id").notNull(),
+    serialNumber: varchar("serial_number", { length: 100 }).notNull(),
+    // IN_STOCK -> PICKED -> SHIPPED. CONSUMED covers a unit written off by an
+    // adjustment; it is an end state like SHIPPED, not a stock state.
+    status: varchar({ length: 20 }).default("IN_STOCK").notNull(),
+    // Null once the unit has left the building -- a shipped serial has a
+    // customer, not a bin.
+    locationId: integer("location_id"),
+    batchNumber: varchar("batch_number", { length: 50 }),
+    lotNumber: varchar("lot_number", { length: 50 }),
+    expiryDate: date("expiry_date"),
+    inventoryStatusId: integer("inventory_status_id"),
+    lpnId: varchar("lpn_id", { length: 50 }),
+    poLineId: integer("po_line_id"),
+    soId: integer("so_id"),
+    shipmentId: uuid("shipment_id"),
+    receivedAt: timestamp("received_at", { mode: "string" }).default(
+      sql`CURRENT_TIMESTAMP`,
+    ),
+    pickedAt: timestamp("picked_at", { mode: "string" }),
+    shippedAt: timestamp("shipped_at", { mode: "string" }),
+    receivedByEmployeeId: integer("received_by_employee_id"),
+    pickedByEmployeeId: integer("picked_by_employee_id"),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.organizationId],
+      foreignColumns: [organizations.organizationId],
+      name: "inventory_serials_organization_id_fkey",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.itemId],
+      foreignColumns: [items.itemId],
+      name: "inventory_serials_item_id_fkey",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.locationId],
+      foreignColumns: [locations.locationId],
+      name: "inventory_serials_location_id_fkey",
+    }).onDelete("set null"),
+    foreignKey({
+      columns: [table.inventoryStatusId],
+      foreignColumns: [inventoryStatuses.statusId],
+      name: "inventory_serials_inventory_status_id_fkey",
+    }).onDelete("set null"),
+    foreignKey({
+      columns: [table.lpnId],
+      foreignColumns: [pallets.lpnId],
+      name: "inventory_serials_lpn_id_fkey",
+    }).onDelete("set null"),
+    foreignKey({
+      columns: [table.poLineId],
+      foreignColumns: [purchaseOrderLines.poLineId],
+      name: "inventory_serials_po_line_id_fkey",
+    }).onDelete("set null"),
+    foreignKey({
+      columns: [table.soId],
+      foreignColumns: [salesOrders.soId],
+      name: "inventory_serials_so_id_fkey",
+    }).onDelete("set null"),
+    foreignKey({
+      columns: [table.shipmentId],
+      foreignColumns: [shipments.shipmentId],
+      name: "inventory_serials_shipment_id_fkey",
+    }).onDelete("set null"),
+    foreignKey({
+      columns: [table.receivedByEmployeeId],
+      foreignColumns: [employees.employeeId],
+      name: "inventory_serials_received_by_employee_id_fkey",
+    }).onDelete("set null"),
+    foreignKey({
+      columns: [table.pickedByEmployeeId],
+      foreignColumns: [employees.employeeId],
+      name: "inventory_serials_picked_by_employee_id_fkey",
+    }).onDelete("set null"),
+    // The rule the whole feature rests on: a given physical unit exists once.
+    // Compared case-insensitively because a scanner and a keyboard disagree
+    // about case far more often than two units genuinely differ by it, and
+    // scoped per item because serial numbers are only unique per manufacturer
+    // -- two different products may legitimately both ship a unit "00001".
+    uniqueIndex("uq_inventory_serials_org_item_number").using(
+      "btree",
+      table.organizationId.asc().nullsLast().op("int4_ops"),
+      table.itemId.asc().nullsLast().op("int4_ops"),
+      sql`upper(serial_number)`,
+    ),
+    index("idx_inventory_serials_location").using(
+      "btree",
+      table.locationId.asc().nullsLast().op("int4_ops"),
+    ),
+    index("idx_inventory_serials_item").using(
+      "btree",
+      table.itemId.asc().nullsLast().op("int4_ops"),
+    ),
+    index("idx_inventory_serials_so").using(
+      "btree",
+      table.soId.asc().nullsLast().op("int4_ops"),
+    ),
+    check(
+      "chk_inventory_serial_status",
+      sql`status::text = ANY (ARRAY['IN_STOCK'::text, 'PICKED'::text, 'SHIPPED'::text, 'CONSUMED'::text])`,
+    ),
+  ],
+);

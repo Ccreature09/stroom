@@ -29,6 +29,7 @@ export default async function WarehouseDashboardPage({
       canModifyConfigs: positionTypes.canModifyConfigs,
       canModifyLayout: positionTypes.canModifyLayout,
       canViewMetrics: positionTypes.canViewMetrics,
+      canAssignTasks: positionTypes.canAssignTasks,
     })
     .from(employees)
     .innerJoin(
@@ -135,6 +136,171 @@ export default async function WarehouseDashboardPage({
               </Card>
             </Link>
           ) : null}
+
+          {employee.canViewMetrics ? (
+            <Link href={`/warehouses/${warehouse.warehouseId}/live-map`}>
+              <Card className="rounded-2xl border border-slate-200 bg-white shadow-sm transition hover:-translate-y-0.5 hover:border-teal-300 hover:shadow-md h-full">
+                <CardContent className="p-6">
+                  <h2 className="text-lg font-bold text-slate-950">
+                    Live Map
+                  </h2>
+                  <p className="mt-2 text-sm text-slate-600">
+                    Watch people, equipment, and inventory move across the
+                    published layout in real time.
+                  </p>
+                  <span className="mt-4 inline-flex text-sm font-semibold text-teal-700">
+                    Open module →
+                  </span>
+                </CardContent>
+              </Card>
+            </Link>
+          ) : null}
+
+          {/* Inbound Operations -- the management view over the whole
+              inbound flow (suppliers, costs, reassigning others' work).
+              Reserved for people who direct floor work; a floor worker
+              wants My Tasks below instead. */}
+          {employee.canAssignTasks ? (
+            <Link href={`/warehouses/${warehouse.warehouseId}/inbound`}>
+              <Card className="rounded-2xl border border-slate-200 bg-white shadow-sm transition hover:-translate-y-0.5 hover:border-teal-300 hover:shadow-md h-full">
+                <CardContent className="p-6">
+                  <h2 className="text-lg font-bold text-slate-950">
+                    Inbound Operations
+                  </h2>
+                  <p className="mt-2 text-sm text-slate-600">
+                    Purchase orders, dock appointments, unloading, and
+                    putaway.
+                  </p>
+                  <span className="mt-4 inline-flex text-sm font-semibold text-teal-700">
+                    Open module →
+                  </span>
+                </CardContent>
+              </Card>
+            </Link>
+          ) : null}
+
+          {/* Outbound Operations -- management view, same gate as Inbound. */}
+          {employee.canAssignTasks ? (
+            <Link href={`/warehouses/${warehouse.warehouseId}/outbound`}>
+              <Card className="rounded-2xl border border-slate-200 bg-white shadow-sm transition hover:-translate-y-0.5 hover:border-teal-300 hover:shadow-md h-full">
+                <CardContent className="p-6">
+                  <h2 className="text-lg font-bold text-slate-950">
+                    Outbound Operations
+                  </h2>
+                  <p className="mt-2 text-sm text-slate-600">
+                    Sales orders, picking, and building trailers for
+                    dispatch.
+                  </p>
+                  <span className="mt-4 inline-flex text-sm font-semibold text-teal-700">
+                    Open module →
+                  </span>
+                </CardContent>
+              </Card>
+            </Link>
+          ) : null}
+
+          {/* Internal Operations -- management view, same gate. */}
+          {employee.canAssignTasks ? (
+            <Link href={`/warehouses/${warehouse.warehouseId}/internal`}>
+              <Card className="rounded-2xl border border-slate-200 bg-white shadow-sm transition hover:-translate-y-0.5 hover:border-teal-300 hover:shadow-md h-full">
+                <CardContent className="p-6">
+                  <h2 className="text-lg font-bold text-slate-950">
+                    Internal Operations
+                  </h2>
+                  <p className="mt-2 text-sm text-slate-600">
+                    Replenishing pick faces and cycle counting stock in
+                    place.
+                  </p>
+                  <span className="mt-4 inline-flex text-sm font-semibold text-teal-700">
+                    Open module →
+                  </span>
+                </CardContent>
+              </Card>
+            </Link>
+          ) : null}
+
+          {/* Performance -- named individuals' output is on this page, so it
+              sits behind canViewMetrics like Time Clock and Live Map. */}
+          {employee.canViewMetrics ? (
+            <Link href={`/warehouses/${warehouse.warehouseId}/metrics`}>
+              <Card className="rounded-2xl border border-slate-200 bg-white shadow-sm transition hover:-translate-y-0.5 hover:border-teal-300 hover:shadow-md h-full">
+                <CardContent className="p-6">
+                  <h2 className="text-lg font-bold text-slate-950">
+                    Performance
+                  </h2>
+                  <p className="mt-2 text-sm text-slate-600">
+                    Throughput, dock-to-stock, count accuracy, and where the
+                    time actually goes.
+                  </p>
+                  <span className="mt-4 inline-flex text-sm font-semibold text-teal-700">
+                    Open module →
+                  </span>
+                </CardContent>
+              </Card>
+            </Link>
+          ) : null}
+
+          {/* Time Clock -- workforce hours. Behind the metrics gate, the
+              same boundary individual worker location sits behind. */}
+          {employee.canViewMetrics ? (
+            <Link href={`/warehouses/${warehouse.warehouseId}/timeclock`}>
+              <Card className="rounded-2xl border border-slate-200 bg-white shadow-sm transition hover:-translate-y-0.5 hover:border-teal-300 hover:shadow-md h-full">
+                <CardContent className="p-6">
+                  <h2 className="text-lg font-bold text-slate-950">
+                    Time Clock
+                  </h2>
+                  <p className="mt-2 text-sm text-slate-600">
+                    Who is on shift now, and hours worked across the team.
+                  </p>
+                  <span className="mt-4 inline-flex text-sm font-semibold text-teal-700">
+                    Open module →
+                  </span>
+                </CardContent>
+              </Card>
+            </Link>
+          ) : null}
+
+          {/* Task Routing -- standing policy for which team gets which
+              kind of work. Same gate as the manager views that consume it. */}
+          {employee.canAssignTasks ? (
+            <Link href={`/warehouses/${warehouse.warehouseId}/task-routing`}>
+              <Card className="rounded-2xl border border-slate-200 bg-white shadow-sm transition hover:-translate-y-0.5 hover:border-teal-300 hover:shadow-md h-full">
+                <CardContent className="p-6">
+                  <h2 className="text-lg font-bold text-slate-950">
+                    Task Routing
+                  </h2>
+                  <p className="mt-2 text-sm text-slate-600">
+                    Set which department each kind of task goes to by
+                    default.
+                  </p>
+                  <span className="mt-4 inline-flex text-sm font-semibold text-teal-700">
+                    Open module →
+                  </span>
+                </CardContent>
+              </Card>
+            </Link>
+          ) : null}
+
+          {/* My Tasks -- the worker-facing surface. Open to everyone,
+              including managers: it shows only what's assigned to (or
+              claimable by) whoever is signed in, never the full supplier/
+              cost picture. */}
+          <Link href={`/warehouses/${warehouse.warehouseId}/floor`}>
+            <Card className="rounded-2xl border border-slate-200 bg-white shadow-sm transition hover:-translate-y-0.5 hover:border-teal-300 hover:shadow-md h-full">
+              <CardContent className="p-6">
+                <h2 className="text-lg font-bold text-slate-950">
+                  My Tasks
+                </h2>
+                <p className="mt-2 text-sm text-slate-600">
+                  Dock appointments, unloading, and putaway assigned to you
+                  -- receive a truck and book stock in.
+                </p>
+                <span className="mt-4 inline-flex text-sm font-semibold text-teal-700">
+                  Open module →
+                </span>
+              </CardContent>
+            </Card>
+          </Link>
 
           {/* Master Data & Partners */}
           <Link href={`/warehouses/${warehouse.warehouseId}/master-data`}>

@@ -1,5 +1,5 @@
 import { redirect } from "next/navigation";
-import { and, eq, isNull, or, sql } from "drizzle-orm";
+import { and, eq, isNotNull, isNull, or, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
 import {
   assetPositions,
@@ -9,6 +9,7 @@ import {
   layoutBlockages,
   layoutFeatures,
   locations,
+  mheTypes,
   navEdges,
   navNodes,
   warehouses,
@@ -24,6 +25,7 @@ import type {
 } from "@/lib/warehouse-map/types";
 import LiveMapView from "./live-map-view";
 import { getBottlenecks, getHeatmapCells } from "./traffic-actions";
+import { getHallInventorySnapshot } from "./inventory-actions";
 
 import {
   Card,
@@ -292,12 +294,28 @@ export default async function LiveMapPage({
 
   const blockages: BlockageDTO[] = blockageRows;
 
-  const [bottlenecks, heatmapCells] = await Promise.all([
-    getBottlenecks(parsedWarehouseId, hall.hallId),
-    getHeatmapCells(parsedWarehouseId, hall.hallId, {
-      cellSizeMm: HEATMAP_CELL_SIZE_MM,
-    }),
-  ]);
+  const [bottlenecks, heatmapCells, initialInventory, routingVehicleRows] =
+    await Promise.all([
+      getBottlenecks(parsedWarehouseId, hall.hallId),
+      getHeatmapCells(parsedWarehouseId, hall.hallId, {
+        cellSizeMm: HEATMAP_CELL_SIZE_MM,
+      }),
+      getHallInventorySnapshot(parsedWarehouseId, hall.hallId),
+      db
+        .select({
+          mheTypeId: mheTypes.mheTypeId,
+          name: mheTypes.name,
+          classBit: mheTypes.classBit,
+          isPedestrian: mheTypes.isPedestrian,
+        })
+        .from(mheTypes)
+        .where(
+          and(
+            eq(mheTypes.warehouseId, parsedWarehouseId),
+            isNotNull(mheTypes.classBit),
+          ),
+        ),
+    ]);
 
   const initialAssets: LiveAssetDTO[] = assetRows.map((row) => ({
     assetKind: row.assetKind as "EMPLOYEE" | "MHE",
@@ -350,6 +368,9 @@ export default async function LiveMapPage({
           bottlenecks={bottlenecks}
           heatmapCells={heatmapCells}
           heatmapCellSizeMm={HEATMAP_CELL_SIZE_MM}
+          initialInventory={initialInventory}
+          routingVehicles={routingVehicleRows}
+          hasNavGraph={navGraph.nodes.length > 0}
         />
       </div>
     </main>

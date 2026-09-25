@@ -180,6 +180,25 @@ export type RoutingVehicleDTO = {
   isPedestrian: boolean;
 };
 
+/** Live occupancy for one storage location -- what the map overlay draws. */
+export type InventoryLocationDTO = {
+  locationId: number;
+  totalQuantity: number;
+  lineCount: number;
+};
+
+/** One matching stock line for a "find item" search on the live map. */
+export type ItemSearchResultDTO = {
+  locationId: number;
+  locationCode: string;
+  itemId: number;
+  sku: string;
+  itemName: string | null;
+  quantity: number;
+  batchNumber: string | null;
+  lotNumber: string | null;
+};
+
 export type NavGraphDTO = {
   nodes: NavNodeDTO[];
   edges: NavEdgeDTO[];

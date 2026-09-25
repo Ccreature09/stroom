@@ -232,6 +232,27 @@ export function AddItemDialog({ warehouseId }: { warehouseId: number }) {
                   </Label>
                 </div>
               </div>
+              <div className="mt-2 flex items-start gap-2 rounded-lg border border-border bg-muted/40 p-3">
+                <Checkbox
+                  id="isSerialTracked"
+                  name="isSerialTracked"
+                  value="on"
+                  className="mt-0.5"
+                />
+                <div>
+                  <Label
+                    htmlFor="isSerialTracked"
+                    className="text-xs cursor-pointer"
+                  >
+                    Serial Tracked
+                  </Label>
+                  <p className="mt-0.5 text-[11px] text-muted-foreground">
+                    Every unit is scanned individually at receipt and at pick.
+                    Slower on the floor, but it answers &ldquo;which customer
+                    got this exact unit&rdquo;.
+                  </p>
+                </div>
+              </div>
             </div>
           </div>
 
