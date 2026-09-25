@@ -4,19 +4,26 @@ import postgres from "postgres";
 import * as schema from "@/drizzle/schema";
 import * as relations from "@/drizzle/relations";
 
-if (!process.env.DATABASE_URL) {
+const connectionString = process.env.DATABASE_URL;
+
+if (!connectionString) {
   throw new Error("DATABASE_URL environment variable is not set.");
 }
 
-// 1. Declare a type-safe global object reference to persist the client in development
+// Declare a type-safe global reference to persist the client across Next.js HMR reloads
 const globalForDb = globalThis as unknown as {
   conn: postgres.Sql | undefined;
 };
 
-// 2. Reuse the existing connection if it exists, otherwise create a new one
-const client = globalForDb.conn ?? postgres(process.env.DATABASE_URL, { prepare: false });
+// Configure postgres.js client options for Next.js & Supabase Pooler
+const client =
+  globalForDb.conn ??
+  postgres(connectionString, {
+    prepare: false,      // Required for Supabase Transaction Pooler (Port 6543)
+    connect_timeout: 10, // Prevents hanging on network timeouts
+    idle_timeout: 15,    // Closes idle sockets cleanly
+  });
 
-// 3. Keep a reference to the connection in development mode to bypass module reloads
 if (process.env.NODE_ENV !== "production") {
   globalForDb.conn = client;
 }
